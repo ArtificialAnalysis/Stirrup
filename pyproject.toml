@@ -45,7 +45,7 @@ all = ["stirrup[litellm,e2b,docker,mcp]"]
 
 [project.urls]
 Homepage = "https://github.com/ArtificialAnalysis/Stirrup"
-Documentation = "https://artificialanalysis.github.io/Stirrup"
+Documentation = "https://stirrup.artificialanalysis.ai"
 Repository = "https://github.com/ArtificialAnalysis/Stirrup"
 
 [build-system]

@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="">
+  <a href="https://stirrup.artificialanalysis.ai">
     <picture>
         <img alt="Stirrup" src="https://github.com/ArtificialAnalysis/Stirrup/blob/048653717d8662b0b81d152a037995af1c926afc/assets/stirrup-banner.png?raw=true" width="700">
     </picture>
@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://pypi.python.org/pypi/stirrup"><img src="https://img.shields.io/pypi/v/stirrup" alt="PyPI version" /></a>&nbsp;<!--
   --><a href="https://github.com/ArtificialAnalysis/Stirrup/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ArtificialAnalysis/Stirrup" alt="License" /></a>&nbsp;<!--
-  --><a href="https://artificialanalysis.github.io/Stirrup"><img src="https://img.shields.io/badge/MkDocs-4F46E5?logo=materialformkdocs&logoColor=fff" alt="MkDocs" /></a>
+  --><a href="https://stirrup.artificialanalysis.ai"><img src="https://img.shields.io/badge/MkDocs-4F46E5?logo=materialformkdocs&logoColor=fff" alt="MkDocs" /></a>
 </p>
 
 
@@ -137,7 +137,7 @@ agent = Agent(
 )
 ```
 
-See [LiteLLM Example](https://artificialanalysis.github.io/Stirrup/examples/#litellm-multi-provider-support) or [Deepseek Example](https://artificialanalysis.github.io/Stirrup/examples/#openai-compatible-apis-deepseek-vllm-ollama) for complete examples.
+See [LiteLLM Example](https://stirrup.artificialanalysis.ai/examples/#litellm-multi-provider-support) or [Deepseek Example](https://stirrup.artificialanalysis.ai/examples/#openai-compatible-apis-deepseek-vllm-ollama) for complete examples.
 
 ## Default Tools
 
@@ -234,18 +234,18 @@ pip install -e .      # or: uv venv && uv pip install -e .
 pip install -e '.[all]'  # or: uv venv && uv pip install -e '.[all]'
 ```
 
-See the [Full Customization guide](https://artificialanalysis.github.io/Stirrup/extending/full-customization/) for more details.
+See the [Full Customization guide](https://stirrup.artificialanalysis.ai/extending/full-customization/) for more details.
 
 ## Next Steps
 
-- [Getting Started](https://artificialanalysis.github.io/Stirrup/getting-started/) - Installation and first agent tutorial
-- [Core Concepts](https://artificialanalysis.github.io/Stirrup/concepts/) - Understand Agent, Tools, and Sessions
-- [Examples](https://artificialanalysis.github.io/Stirrup/examples/) - Working examples for common patterns
-- [Creating Tools](https://artificialanalysis.github.io/Stirrup/guides/tools/) - Build your own tools
+- [Getting Started](https://stirrup.artificialanalysis.ai/getting-started/) - Installation and first agent tutorial
+- [Core Concepts](https://stirrup.artificialanalysis.ai/concepts/) - Understand Agent, Tools, and Sessions
+- [Examples](https://stirrup.artificialanalysis.ai/examples/) - Working examples for common patterns
+- [Creating Tools](https://stirrup.artificialanalysis.ai/guides/tools/) - Build your own tools
 
 ## Documentation
 
-Full documentation: [artificialanalysis.github.io/Stirrup](https://artificialanalysis.github.io/Stirrup)
+Full documentation: [artificialanalysis.github.io/Stirrup](https://stirrup.artificialanalysis.ai)
 
 Build and serve locally:
 
