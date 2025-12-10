@@ -122,6 +122,7 @@ agent = Agent(client=client, name="deepseek_agent")
 ### LiteLLM (Anthropic, Google, etc.)
 
 ```python
+# Ensure LiteLLM is added with: pip install 'stirrup[litellm]'  # or: uv add 'stirrup[litellm]'
 # Create LiteLLM client for Anthropic Claude
 # See https://docs.litellm.ai/docs/providers for all supported providers
 client = LiteLLMClient(
