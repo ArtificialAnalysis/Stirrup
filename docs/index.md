@@ -69,7 +69,7 @@ For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, us
 --8<-- "examples/litellm_example.py:client"
 ```
 
-See [LiteLLM Example](examples.md#litellm-multi-provider-support) or [Deepseek Example](examples.md#openai-compatible-apis-deepseek-vllm-ollama) for complete examples.
+See [LiteLLM Example](examples.md#litellm-multi-provider-support) or [Deepseek Example](examples.md#openai-compatible-apis) for complete examples.
 
 ## Default Tools
 

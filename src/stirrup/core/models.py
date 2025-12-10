@@ -430,6 +430,7 @@ class Tool[P: BaseModel, M](BaseModel):
     (setup/teardown, resource pooling), use a ToolProvider instead.
 
     Example with parameters:
+        ```python
         class CalcParams(BaseModel):
             expression: str
 
@@ -439,13 +440,16 @@ class Tool[P: BaseModel, M](BaseModel):
             parameters=CalcParams,
             executor=lambda p: ToolResult(content=str(eval(p.expression))),
         )
+        ```
 
     Example without parameters:
+        ```python
         time_tool = Tool[None, None](
             name="time",
             description="Get current time",
             executor=lambda _: ToolResult(content=datetime.now().isoformat()),
         )
+        ```
     """
 
     name: str
