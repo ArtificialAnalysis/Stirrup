@@ -55,7 +55,7 @@ Example `.mcp/mcp.json`:
 ```
 
 !!! note
-    Requires `uv pip install stirrup[mcp]`.
+    Requires `pip install stirrup[mcp]` (or: `uv add stirrup[mcp]`).
 
 ## Image Processing
 
@@ -96,7 +96,7 @@ Use LiteLLM to connect to non-OpenAI providers like Anthropic Claude, Google Gem
 ```
 
 !!! note
-    Requires `uv pip install stirrup[litellm]` and the appropriate API key for your chosen provider (e.g., `ANTHROPIC_API_KEY` for Claude).
+    Requires `pip install stirrup[litellm]` (or: `uv add stirrup[litellm]`) and the appropriate API key for your chosen provider (e.g., `ANTHROPIC_API_KEY` for Claude).
 
 ## Custom Finish Tool
 

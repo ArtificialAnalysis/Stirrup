@@ -3,7 +3,7 @@
 Stirrup supports the Model Context Protocol (MCP) for connecting to external tool servers.
 
 !!! note
-    Requires `uv pip install stirrup[mcp]`
+    Requires `pip install stirrup[mcp]` (or: `uv add stirrup[mcp]`)
 
 ## Quick Start
 

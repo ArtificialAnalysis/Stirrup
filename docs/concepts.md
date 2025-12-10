@@ -213,7 +213,7 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 | `kwargs` | `dict \| None` | `None` | Additional provider-specific arguments |
 
 !!! note "LiteLLM Installation"
-    Requires `uv pip install stirrup[litellm]`
+    Requires `pip install stirrup[litellm]` (or: `uv add stirrup[litellm]`)
 
 ### Creating Your Own Client
 

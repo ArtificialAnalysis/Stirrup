@@ -69,7 +69,7 @@ provider = LocalCodeExecToolProvider(
 Executes code in a Docker container for better isolation.
 
 !!! note
-    Requires `uv pip install stirrup[docker]` and Docker daemon running.
+    Requires `pip install stirrup[docker]` (or: `uv add stirrup[docker]`) and Docker daemon running.
 
 ### From Image
 
@@ -117,7 +117,7 @@ provider = DockerCodeExecToolProvider.from_image(
 Executes code in E2B cloud sandboxes for maximum isolation.
 
 !!! note
-    Requires `uv pip install stirrup[e2b]` and `E2B_API_KEY` environment variable.
+    Requires `pip install stirrup[e2b]` (or: `uv add stirrup[e2b]`) and `E2B_API_KEY` environment variable.
 
 ```python
 from stirrup import Agent

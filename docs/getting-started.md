@@ -12,13 +12,13 @@ This guide walks you through installing Stirrup and creating your first agent.
 Install the core framework:
 
 ```bash
-uv pip install stirrup      # or: uv add stirrup
+pip install stirrup      # or: uv add stirrup
 ```
 
 Or with all optional components:
 
 ```bash
-uv pip install stirrup[all]  # or: uv add stirrup[all]
+pip install stirrup[all]  # or: uv add stirrup[all]
 ```
 
 ### Optional Extras

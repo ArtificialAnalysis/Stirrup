@@ -3,7 +3,7 @@
 !!! note "Optional Dependency"
     LiteLLM is an optional dependency. Install with:
     ```bash
-    uv pip install stirrup[litellm]
+    pip install stirrup[litellm]  # or: uv add stirrup[litellm]
     ```
 
 ::: stirrup.clients.litellm_client

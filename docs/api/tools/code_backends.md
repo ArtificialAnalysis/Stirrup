@@ -30,7 +30,7 @@ Executes code in an isolated temporary directory on the host machine.
 Executes code in a Docker container.
 
 !!! note
-    Requires `uv pip install stirrup[docker]`
+    Requires `pip install stirrup[docker]` (or: `uv add stirrup[docker]`)
 
 ```python
 from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider
@@ -43,7 +43,7 @@ provider = DockerCodeExecToolProvider.from_image("python:3.12-slim")
 Executes code in an E2B cloud sandbox.
 
 !!! note
-    Requires `uv pip install stirrup[e2b]` and `E2B_API_KEY` environment variable.
+    Requires `pip install stirrup[e2b]` (or: `uv add stirrup[e2b]`) and `E2B_API_KEY` environment variable.
 
 ```python
 from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider

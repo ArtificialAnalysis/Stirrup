@@ -10,10 +10,10 @@ git clone https://github.com/ArtificialAnalysis/Stirrup.git
 cd stirrup
 
 # Install in editable mode
-uv pip install -e .
+pip install -e .      # or: uv pip install -e .
 
 # Or with all optional dependencies
-uv pip install -e ".[all]"
+pip install -e ".[all]"  # or: uv pip install -e ".[all]"
 ```
 
 ## Importing in Your Project

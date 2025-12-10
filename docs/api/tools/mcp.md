@@ -3,7 +3,7 @@
 The `stirrup.tools.mcp` module provides MCP (Model Context Protocol) integration.
 
 !!! note
-    Requires `uv pip install stirrup[mcp]`
+    Requires `pip install stirrup[mcp]` (or: `uv add stirrup[mcp]`)
 
 ## MCPToolProvider
 
