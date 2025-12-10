@@ -1,0 +1,102 @@
+site_name: Stirrup
+site_description: A reusable agent framework for building AI agents with tool use
+site_author: Artificial Analysis, Inc.
+repo_url: https://github.com/ArtificialAnalysis/Stirrup
+repo_name: ArtificialAnalysis/Stirrup
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - content.code.annotate
+    - navigation.sections
+    - navigation.expand
+    - toc.integrate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            heading_level: 2
+            merge_init_into_class: true
+            show_bases: true
+            members: true
+            members_order: source
+            inherited_members: false
+            show_signature_annotations: true
+            signature_crossrefs: true
+            separate_signature: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+          inventories:
+            - https://docs.python.org/3/objects.inv
+          extensions:
+            - griffe_pydantic:
+                schema: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Core Concepts: concepts.md
+  - Examples: examples.md
+  - Guides:
+      - Creating Tools: guides/tools.md
+      - Tool Providers: guides/tool-providers.md
+      - Code Execution: guides/code-execution.md
+      - Sub-Agents: guides/sub-agents.md
+      - MCP Integration: guides/mcp.md
+  - Extending:
+      - Custom Clients: extending/clients.md
+      - Custom Tools: extending/tools.md
+      - Custom Loggers: extending/loggers.md
+      - Custom Backends: extending/code_backends.md
+      - Local Development: extending/local-development.md
+  - API Reference:
+      - Core:
+          - Agent: api/core/agent.md
+          - Models: api/core/models.md
+          - Exceptions: api/core/exceptions.md
+      - Clients:
+          - ChatCompletions: api/clients/chat_completions.md
+          - LiteLLM: api/clients/litellm.md
+      - Tools:
+          - Overview: api/tools/index.md
+          - Web Tools: api/tools/web.md
+          - Code Execution: api/tools/code_backends.md
+          - MCP: api/tools/mcp.md
+          - View Image: api/tools/view-image.md
+      - Utils:
+          - Logging: api/utils/logging.md
+          - Text: api/utils/text.md

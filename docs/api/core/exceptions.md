@@ -1,0 +1,3 @@
+# Exceptions
+
+::: stirrup.core.exceptions

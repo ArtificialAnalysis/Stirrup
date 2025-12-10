@@ -1,0 +1,100 @@
+[project]
+name = "stirrup"
+version = "0.1.0"
+description = "The lightweight foundation for building agents"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Artificial Analysis, Inc.", email = "info@artificialanalysis.ai" },
+
+]
+requires-python = ">=3.12"
+keywords = ["ai", "agent", "llm", "openai", "anthropic", "tools", "framework"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "anyio>=4.0.0",
+    "filetype>=1.0.0",
+    "httpx>=0.20.0",
+    "json-schema-to-pydantic>=0.2.0",
+    "moviepy>=2.0.0",
+    "openai>=1.0.0",
+    "pillow>=10.4.0",
+    "pydantic>=2.0.0",
+    "tenacity>=5.0.0",
+    "trafilatura>=1.9.0",
+]
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.79.3"]
+e2b = ["e2b-code-interpreter>=2.3.0"]
+docker = ["docker>=7.0.0", "python-dotenv>=1.0.0"]
+mcp = ["mcp>=1.9.0"]
+all = ["stirrup[litellm,e2b,docker,mcp]"]
+
+[project.urls]
+Homepage = "https://github.com/ArtificialAnalysis/Stirrup"
+Documentation = "https://artificialanalysis.github.io/Stirrup"
+Repository = "https://github.com/ArtificialAnalysis/Stirrup"
+
+[build-system]
+requires = ["uv_build>=0.9.3,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "griffe-pydantic>=1.1.8",
+    "mkdocs-material>=9.7.0",
+    "mkdocstrings>=0.30.1",
+    "mkdocstrings-python>=1.19.0",
+    "pytest>=9.0.0",
+    "rich>=14.2.0",
+    "ruff>=0.14.4",
+    "ty>=0.0.1a32",
+]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-markers"]
+anyio_mode = "auto"
+markers = [
+    "docker: marks tests as requiring the docker package (deselect with '-m \"not docker\"')",
+    "e2b: marks tests as requiring the e2b package (deselect with '-m \"not e2b\"')",
+]
+
+[tool.ruff]
+line-length = 120
+fix = true
+show-fixes = true
+
+[tool.ruff.lint]
+select = [
+    "F",
+    "E",
+    "W",
+    "ANN",
+    "N",
+    "B",
+    "I",
+    "ARG",
+    "SLF",
+    "UP",
+    "PERF",
+    "RUF",
+    "SIM",
+    "S113",
+    "ASYNC",
+]
+ignore = [
+    "E501",     # line too long
+    "ASYNC109", # timeout param in async fn - false positive when passing to external APIs
+]

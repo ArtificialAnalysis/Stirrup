@@ -1,0 +1,5 @@
+Your task: Write and execute a Python script that:
+1. Generates the first 100 Fibonacci numbers
+2. Prints them in a formatted way
+3. Calculates their sum
+4. Creates a file called "fibonacci_100.txt" with the results
