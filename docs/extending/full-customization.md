@@ -1,4 +1,4 @@
-# Local Development
+# Full Customization
 
 This guide covers cloning and importing Stirrup locally for deep customization of the framework internals.
 
@@ -10,10 +10,10 @@ git clone https://github.com/ArtificialAnalysis/Stirrup.git
 cd stirrup
 
 # Install in editable mode
-pip install -e .      # or: uv pip install -e .
+pip install -e .      # or: uv venv && uv pip install -e .
 
 # Or with all optional dependencies
-pip install -e ".[all]"  # or: uv pip install -e ".[all]"
+pip install -e '.[all]'  # or: uv venv && uv pip install -e '.[all]'
 ```
 
 ## Importing in Your Project
@@ -24,12 +24,6 @@ After editable installation, import as usual:
 from stirrup import Agent, DEFAULT_TOOLS
 from stirrup.core.models import SystemMessage, UserMessage
 from stirrup.clients import ChatCompletionsClient
-```
-
-**Alternative (without installation):**
-
-```bash
-export PYTHONPATH="/path/to/stirrup/src:$PYTHONPATH"
 ```
 
 ## Project Structure

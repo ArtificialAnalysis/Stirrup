@@ -218,6 +218,24 @@ agent = Agent(
 )
 ```
 
+## Full Customization
+
+For deep customization of the framework internals, you can clone and import Stirrup locally:
+
+```bash
+# Clone the repository
+git clone https://github.com/ArtificialAnalysis/Stirrup.git
+cd stirrup
+
+# Install in editable mode
+pip install -e .      # or: uv venv && uv pip install -e .
+
+# Or with all optional dependencies
+pip install -e '.[all]'  # or: uv venv && uv pip install -e '.[all]'
+```
+
+See the [Full Customization guide](https://artificialanalysis.github.io/Stirrup/extending/full-customization/) for more details.
+
 ## Next Steps
 
 - [Getting Started](https://artificialanalysis.github.io/Stirrup/getting-started/) - Installation and first agent tutorial

@@ -87,7 +87,7 @@ nav:
       - Custom Tools: extending/tools.md
       - Custom Loggers: extending/loggers.md
       - Custom Backends: extending/code_backends.md
-      - Local Development: extending/local-development.md
+      - Full Customization: extending/full-customization.md
   - API Reference:
       - Core:
           - Agent: api/core/agent.md

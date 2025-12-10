@@ -18,7 +18,7 @@ pip install stirrup      # or: uv add stirrup
 Or with all optional components:
 
 ```bash
-pip install stirrup[all]  # or: uv add stirrup[all]
+pip install 'stirrup[all]'  # or: uv add 'stirrup[all]'
 ```
 
 ### Optional Extras
