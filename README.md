@@ -94,6 +94,24 @@ if __name__ == "__main__":
 
 > **Note:** This example uses OpenRouter. Set `OPENROUTER_API_KEY` in your environment before running. Web search requires a `BRAVE_API_KEY`. The agent will still work without it, but web search will be unavailable.
 
+## Full Customization
+
+For using Stirrup as a foundation for your own fully customized agent, you can clone and import Stirrup locally:
+
+```bash
+# Clone the repository
+git clone https://github.com/ArtificialAnalysis/Stirrup.git
+cd stirrup
+
+# Install in editable mode
+pip install -e .      # or: uv venv && uv pip install -e .
+
+# Or with all optional dependencies
+pip install -e '.[all]'  # or: uv venv && uv pip install -e '.[all]'
+```
+
+See the [Full Customization guide](https://stirrup.artificialanalysis.ai/extending/full-customization/) for more details.
+
 ## How It Works
 
 - **`Agent`** - Configures and runs the agent loop until a finish tool is called or max turns reached
@@ -217,24 +235,6 @@ agent = Agent(
     tools=[*DEFAULT_TOOLS, GREET_TOOL],
 )
 ```
-
-## Full Customization
-
-For deep customization of the framework internals, you can clone and import Stirrup locally:
-
-```bash
-# Clone the repository
-git clone https://github.com/ArtificialAnalysis/Stirrup.git
-cd stirrup
-
-# Install in editable mode
-pip install -e .      # or: uv venv && uv pip install -e .
-
-# Or with all optional dependencies
-pip install -e '.[all]'  # or: uv venv && uv pip install -e '.[all]'
-```
-
-See the [Full Customization guide](https://stirrup.artificialanalysis.ai/extending/full-customization/) for more details.
 
 ## Next Steps
 
