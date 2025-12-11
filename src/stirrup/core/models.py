@@ -17,7 +17,7 @@ from moviepy.video.fx import Resize
 from PIL import Image
 from pydantic import BaseModel, Field, model_validator
 
-from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
+from stirrup.constants import FINISH_TOOL_NAME, RESOLUTION_1MP, RESOLUTION_480P
 
 __all__ = [
     "Addable",
@@ -456,6 +456,26 @@ class Tool[P: BaseModel, M](BaseModel):
     description: str
     parameters: type[P] | None = None
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
+
+
+class FinishToolResult[M](ToolResult[M]):
+    """ToolResult returned by the `finish` tool.
+
+    The agent uses this type (and `is_valid_finish_call`) to detect a valid
+    termination signal.
+    """
+
+    is_valid_finish_call: bool = True
+
+class FinishTool[P: BaseModel, M](Tool[P, M]):
+    """Typed `finish` tool definition.
+
+    Its executor must return a `FinishToolResult` so the agent can treat the call
+    as a valid "finish" signal.
+    """
+
+    name: Literal['finish'] = FINISH_TOOL_NAME
+    executor: Callable[[P], FinishToolResult[M] | Awaitable[FinishToolResult[M]]]
 
 
 class ToolProvider(ABC):

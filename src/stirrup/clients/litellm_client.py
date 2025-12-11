@@ -49,7 +49,6 @@ class LiteLLMClient(LLMClient):
         self,
         model_slug: str,
         max_tokens: int,
-        supports_audio_input: bool = False,
         reasoning_effort: str | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -58,13 +57,10 @@ class LiteLLMClient(LLMClient):
         Args:
             model_slug: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
             max_tokens: Maximum context window size in tokens
-            supports_audio_input: Whether the model supports audio inputs
             reasoning_effort: Reasoning effort level for extended thinking models (e.g., 'medium', 'high')
             kwargs: Additional arguments to pass to LiteLLM completion calls
         """
         self._model_slug = model_slug
-        self._supports_video_input = False
-        self._supports_audio_input = supports_audio_input
         self._max_tokens = max_tokens
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
@@ -92,6 +88,7 @@ class LiteLLMClient(LLMClient):
             tools=to_openai_tools(tools) if tools else None,
             tool_choice="auto" if tools else None,
             max_tokens=self._max_tokens,
+            reasoning_effort=self._reasoning_effort,
             **self._kwargs,
         )
 
