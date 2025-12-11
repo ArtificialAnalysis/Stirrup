@@ -1,0 +1,32 @@
+name: Documentation Issue
+description: Report incorrect or missing documentation
+title: "DOC: "
+labels: ["documentation"]
+
+body:
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: Which documentation page or section is this about?
+      placeholder: e.g., Getting Started page, API reference for Agent class, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's Wrong or Missing
+      description: Describe what is incorrect, unclear, or missing.
+      placeholder: Describe the issue...
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested Improvement
+      description: How would you improve this documentation?
+      placeholder: Your suggestion...
+    validations:
+      required: false

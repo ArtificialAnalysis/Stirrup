@@ -1,0 +1,40 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+title: "ENH: "
+labels: ["enhancement"]
+
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Initial Checks
+      options:
+        - label: I have searched the existing issues and this feature has not been requested
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Description
+      description: What problem does this feature solve? Why is it needed?
+      placeholder: Describe the problem or motivation...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How would you like this to work? Include code examples if helpful.
+      placeholder: Describe your proposed solution...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you've considered?
+      placeholder: Describe alternatives...
+    validations:
+      required: false
