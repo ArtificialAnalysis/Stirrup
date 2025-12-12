@@ -467,6 +467,7 @@ class FinishToolResult[M](ToolResult[M]):
 
     is_valid_finish_call: bool = True
 
+
 class FinishTool[P: BaseModel, M](Tool[P, M]):
     """Typed `finish` tool definition.
 

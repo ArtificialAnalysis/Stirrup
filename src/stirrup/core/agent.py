@@ -2,7 +2,6 @@
 import contextvars
 import glob as glob_module
 import inspect
-import json
 import logging
 import re
 from contextlib import AsyncExitStack
@@ -213,7 +212,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._max_turns = max_turns
         self._system_prompt = system_prompt
         self._tools = tools if tools is not None else DEFAULT_TOOLS
-        self._finish_tool: Tool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
+        self._finish_tool: FinishTool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
         self._context_summarization_cutoff = context_summarization_cutoff
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
@@ -247,7 +246,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         return self._active_tools
 
     @property
-    def finish_tool(self) -> Tool:
+    def finish_tool(self) -> FinishTool:
         """The finish tool used to signal task completion."""
         return self._finish_tool
 
@@ -773,7 +772,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 if isinstance(tool_message, FinishToolResult) and tool_message.is_valid_finish_call:
                     finish_params = self.finish_tool.parameters.model_validate_json(tool_call.arguments)
 
-
                 # Log tool result immediately
                 self._logger.tool_result(tool_message)
 
@@ -864,7 +862,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_metadata: dict[str, list[Any]] = {}
 
         full_msg_history: list[list[ChatMessage]] = []
-        finish_params: FinishParams | None = None
 
         # Cumulative stats for spinner
         total_tool_calls = 0
@@ -878,7 +875,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.user_message(num_turns_remaining_msg)
 
             # Pass turn info to step() for real-time logging
-            assistant_message, tool_messages, finish_call = await self.step(
+            assistant_message, tool_messages, finish_params = await self.step(
                 msgs,
                 run_metadata,
                 turn=i + 1,
