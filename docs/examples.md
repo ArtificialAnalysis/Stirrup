@@ -107,7 +107,7 @@ import asyncio
 
 from pydantic import BaseModel, Field
 
-from stirrup import Agent, Tool, ToolResult
+from stirrup import Agent, FinishTool, FinishToolResult, ToolUseCountMetadata
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
 
@@ -126,11 +126,14 @@ async def main():
     )
 
     # Create custom finish tool
-    finish_tool = Tool(
-        name="finish",
+    finish_tool = FinishTool(
         description="Complete the analysis with structured results",
         parameters=AnalysisResult,
-        executor=lambda p: ToolResult(content="Analysis complete", metadata=None),
+        executor=lambda p: FinishToolResult(
+            content="Analysis complete", 
+            is_valid_finish_call=True,
+            metadata=ToolUseCountMetadata()
+        ),
     )
 
     agent = Agent(
