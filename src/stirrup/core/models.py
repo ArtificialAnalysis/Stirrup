@@ -475,7 +475,7 @@ class FinishTool[P: BaseModel, M](Tool[P, M]):
     as a valid "finish" signal.
     """
 
-    name: Literal['finish'] = FINISH_TOOL_NAME
+    name: Literal["finish"] = FINISH_TOOL_NAME
     executor: Callable[[P], FinishToolResult[M] | Awaitable[FinishToolResult[M]]]
 
 
@@ -592,6 +592,7 @@ class ToolMessage(BaseModel):
     tool_call_id: str | None = None
     name: str | None = None
     args_was_valid: bool = True
+    is_valid_finish_call: bool = False
 
 
 type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]

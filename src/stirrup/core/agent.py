@@ -735,6 +735,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             args_was_valid=args_valid,
+            is_valid_finish_call=(isinstance(result, FinishToolResult) and result.is_valid_finish_call),
         )
 
     async def step(
@@ -769,8 +770,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
 
-                if isinstance(tool_message, FinishToolResult) and tool_message.is_valid_finish_call:
-                    finish_params = self.finish_tool.parameters.model_validate_json(tool_call.arguments)
+                if tool_message.is_valid_finish_call:
+                    finish_params = self._finish_tool.parameters.model_validate_json(tool_call.arguments)
 
                 # Log tool result immediately
                 self._logger.tool_result(tool_message)

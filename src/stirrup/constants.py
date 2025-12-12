@@ -1,7 +1,7 @@
 from typing import Literal
 
 # Tool naming
-FINISH_TOOL_NAME: Literal['finish'] = "finish"
+FINISH_TOOL_NAME: Literal["finish"] = "finish"
 
 # Agent execution limits
 AGENT_MAX_TURNS = 30  # Maximum agent turns before forced termination
