@@ -272,3 +272,74 @@ async def test_agent_invalid_tool_call() -> None:
     error_messages = [m for m in tool_messages if m.name == "nonexistent_tool"]
     assert len(error_messages) == 1
     assert "not a valid tool" in error_messages[0].content
+
+
+async def test_agent_finish_tool_validation() -> None:
+    """Test agent only terminates on valid finish tool calls."""
+    from stirrup.core.models import ToolUseCountMetadata
+
+    class CustomFinishParams(BaseModel):
+        reason: str
+        status: str
+
+    # Custom finish tool that validates status before allowing termination
+    def custom_finish_executor(params: CustomFinishParams) -> ToolResult[ToolUseCountMetadata]:
+        is_valid = params.status == "complete"
+        return ToolResult(
+            content=params.reason,
+            success=is_valid,
+            metadata=ToolUseCountMetadata(),
+        )
+
+    custom_finish_tool = Tool[CustomFinishParams, ToolUseCountMetadata](
+        name=FINISH_TOOL_NAME,
+        description="Finish with status validation",
+        parameters=CustomFinishParams,
+        executor=custom_finish_executor,
+    )
+
+    # Create mock responses
+    responses = [
+        # First: invalid finish (status != "complete")
+        AssistantMessage(
+            content="Trying to finish",
+            tool_calls=[
+                ToolCall(
+                    name=FINISH_TOOL_NAME,
+                    arguments='{"reason": "Not ready", "status": "pending"}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+        # Second: valid finish (status == "complete")
+        AssistantMessage(
+            content="Now finishing",
+            tool_calls=[
+                ToolCall(
+                    name=FINISH_TOOL_NAME,
+                    arguments='{"reason": "Task done", "status": "complete"}',
+                    tool_call_id="call_2",
+                )
+            ],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=custom_finish_tool,
+    )
+
+    async with agent.session() as session:
+        finish_params, _, _ = await session.run([UserMessage(content="Test task")])
+
+    # Agent should have taken 2 turns (invalid finish + valid finish)
+    assert client.call_count == 2
+    assert finish_params is not None
+    assert finish_params.reason == "Task done"
+    assert finish_params.status == "complete"

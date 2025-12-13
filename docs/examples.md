@@ -107,7 +107,7 @@ import asyncio
 
 from pydantic import BaseModel, Field
 
-from stirrup import Agent, Tool, ToolResult
+from stirrup import Agent, Tool, ToolResult, ToolUseCountMetadata
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
 
@@ -130,7 +130,10 @@ async def main():
         name="finish",
         description="Complete the analysis with structured results",
         parameters=AnalysisResult,
-        executor=lambda p: ToolResult(content="Analysis complete", metadata=None),
+        executor=lambda p: ToolResult(
+            content="Analysis complete",
+            metadata=ToolUseCountMetadata()
+        ),
     )
 
     agent = Agent(

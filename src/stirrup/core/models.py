@@ -413,9 +413,15 @@ class ToolResult[M](BaseModel):
 
     Generic over metadata type M. M should implement Addable protocol for aggregation support,
     but this is not enforced at the class level due to Pydantic schema generation limitations.
+
+    Attributes:
+        content: The result content (string, list of content blocks, or images)
+        success: Whether the tool call was successful. For finish tools, controls if agent terminates.
+        metadata: Optional metadata (e.g., usage stats) that implements Addable for aggregation
     """
 
     content: Content
+    success: bool = True
     metadata: M | None = None
 
 
@@ -456,7 +462,6 @@ class Tool[P: BaseModel, M](BaseModel):
     description: str
     parameters: type[P] | None = None
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
-
 
 class ToolProvider(ABC):
     """Abstract base class for tool providers with lifecycle management.
@@ -564,13 +569,23 @@ class AssistantMessage(BaseModel):
 
 
 class ToolMessage(BaseModel):
-    """Tool execution result returned to the LLM."""
+    """Tool execution result returned to the LLM.
+
+    Attributes:
+        role: Always "tool"
+        content: The tool result content
+        tool_call_id: ID linking this result to the corresponding tool call
+        name: Name of the tool that was called
+        args_was_valid: Whether the tool arguments were valid
+        success: Whether the tool executed successfully (used by finish tool to control termination)
+    """
 
     role: Literal["tool"] = "tool"
     content: Content
     tool_call_id: str | None = None
     name: str | None = None
     args_was_valid: bool = True
+    success: bool = False
 
 
 type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]

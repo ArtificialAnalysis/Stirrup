@@ -2,7 +2,6 @@
 import contextvars
 import glob as glob_module
 import inspect
-import json
 import logging
 import re
 from contextlib import AsyncExitStack
@@ -723,17 +722,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     tool_call.name,
                     tool_call.arguments,
                 )
-                result = ToolResult(content="Tool arguments are not valid")
+                result = ToolResult(content="Tool arguments are not valid", success=False)
                 args_valid = False
         else:
             LOGGER.debug(f"LLMClient tried to use the tool {tool_call.name} which is not in the tools list")
-            result = ToolResult(content=f"{tool_call.name} is not a valid tool")
+            result = ToolResult(content=f"{tool_call.name} is not a valid tool", success=False)
 
         return ToolMessage(
             content=result.content,
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             args_was_valid=args_valid,
+            success=result.success,
         )
 
     async def step(
@@ -742,7 +742,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_metadata: dict[str, list[Any]],
         turn: int = 0,
         max_turns: int = 0,
-    ) -> tuple[AssistantMessage, list[ToolMessage], ToolCall | None]:
+    ) -> tuple[AssistantMessage, list[ToolMessage], FinishParams | None]:
         """Execute one agent step: generate assistant message and run any requested tool calls.
 
         Args:
@@ -760,24 +760,21 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         if turn > 0:
             self._logger.assistant_message(turn, max_turns, assistant_message)
 
+        finish_params: FinishParams | None = None
         tool_messages: list[ToolMessage] = []
-        finish_call: ToolCall | None = None
-
         if assistant_message.tool_calls:
-            finish_call = next(
-                (tc for tc in assistant_message.tool_calls if tc.name == FINISH_TOOL_NAME),
-                None,
-            )
-
             tool_messages = []
             for tool_call in assistant_message.tool_calls:
                 tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
 
+                if tool_message.success and tool_message.name == FINISH_TOOL_NAME:
+                    finish_params = self._finish_tool.parameters.model_validate_json(tool_call.arguments)
+
                 # Log tool result immediately
                 self._logger.tool_result(tool_message)
 
-        return assistant_message, tool_messages, finish_call
+        return assistant_message, tool_messages, finish_params
 
     async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Condense message history using LLM to stay within context window."""
@@ -864,7 +861,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_metadata: dict[str, list[Any]] = {}
 
         full_msg_history: list[list[ChatMessage]] = []
-        finish_params: FinishParams | None = None
 
         # Cumulative stats for spinner
         total_tool_calls = 0
@@ -878,7 +874,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.user_message(num_turns_remaining_msg)
 
             # Pass turn info to step() for real-time logging
-            assistant_message, tool_messages, finish_call = await self.step(
+            assistant_message, tool_messages, finish_params = await self.step(
                 msgs,
                 run_metadata,
                 turn=i + 1,
@@ -904,18 +900,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             msgs.extend([assistant_message, *tool_messages, *user_messages])
 
-            if finish_call:
-                try:
-                    finish_arguments = json.loads(finish_call.arguments)
-                    if self._finish_tool.parameters is not None:
-                        finish_params = self._finish_tool.parameters.model_validate(finish_arguments)
-                    break
-                except (json.JSONDecodeError, ValidationError, TypeError):
-                    LOGGER.debug(
-                        "Agent tried to use the finish tool but the tool call is not valid: %r",
-                        finish_call.arguments,
-                    )
-                    # continue until the finish tool call is valid
+            if finish_params:
+                break
 
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
             if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:

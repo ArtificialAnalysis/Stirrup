@@ -67,7 +67,6 @@ class ChatCompletionsClient(LLMClient):
         *,
         base_url: str | None = None,
         api_key: str | None = None,
-        supports_audio_input: bool = False,
         reasoning_effort: str | None = None,
         timeout: float | None = None,
         max_retries: int = 2,
@@ -82,7 +81,6 @@ class ChatCompletionsClient(LLMClient):
                 Use for OpenAI-compatible providers (e.g., 'http://localhost:8000/v1').
             api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
                 environment variable.
-            supports_audio_input: Whether the model supports audio inputs. Defaults to False.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
@@ -92,7 +90,6 @@ class ChatCompletionsClient(LLMClient):
         """
         self._model = model
         self._max_tokens = max_tokens
-        self._supports_audio_input = supports_audio_input
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
 
