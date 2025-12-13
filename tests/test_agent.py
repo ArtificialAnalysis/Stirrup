@@ -276,22 +276,23 @@ async def test_agent_invalid_tool_call() -> None:
 
 async def test_agent_finish_tool_validation() -> None:
     """Test agent only terminates on valid finish tool calls."""
-    from stirrup.core.models import FinishTool, FinishToolResult, ToolUseCountMetadata
+    from stirrup.core.models import ToolUseCountMetadata
 
     class CustomFinishParams(BaseModel):
         reason: str
         status: str
 
     # Custom finish tool that validates status before allowing termination
-    def custom_finish_executor(params: CustomFinishParams) -> FinishToolResult[ToolUseCountMetadata]:
+    def custom_finish_executor(params: CustomFinishParams) -> ToolResult[ToolUseCountMetadata]:
         is_valid = params.status == "complete"
-        return FinishToolResult(
+        return ToolResult(
             content=params.reason,
-            is_valid_finish_call=is_valid,
+            success=is_valid,
             metadata=ToolUseCountMetadata(),
         )
 
-    custom_finish_tool = FinishTool[CustomFinishParams, ToolUseCountMetadata](
+    custom_finish_tool = Tool[CustomFinishParams, ToolUseCountMetadata](
+        name=FINISH_TOOL_NAME,
         description="Finish with status validation",
         parameters=CustomFinishParams,
         executor=custom_finish_executor,

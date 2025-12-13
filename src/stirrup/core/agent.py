@@ -22,8 +22,6 @@ from stirrup.constants import (
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    FinishTool,
-    FinishToolResult,
     ImageContentBlock,
     LLMClient,
     SubAgentMetadata,
@@ -172,7 +170,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         max_turns: int = AGENT_MAX_TURNS,
         system_prompt: str | None = None,
         tools: list[Tool | ToolProvider] | None = None,
-        finish_tool: FinishTool[FinishParams, FinishMeta] | None = None,
+        finish_tool: Tool[FinishParams, FinishMeta] | None = None,
         # Agent options
         context_summarization_cutoff: float = CONTEXT_SUMMARIZATION_CUTOFF,
         run_sync_in_thread: bool = True,
@@ -212,7 +210,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._max_turns = max_turns
         self._system_prompt = system_prompt
         self._tools = tools if tools is not None else DEFAULT_TOOLS
-        self._finish_tool: FinishTool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
+        self._finish_tool: Tool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
         self._context_summarization_cutoff = context_summarization_cutoff
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
@@ -246,7 +244,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         return self._active_tools
 
     @property
-    def finish_tool(self) -> FinishTool:
+    def finish_tool(self) -> Tool:
         """The finish tool used to signal task completion."""
         return self._finish_tool
 
@@ -724,18 +722,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     tool_call.name,
                     tool_call.arguments,
                 )
-                result = ToolResult(content="Tool arguments are not valid")
+                result = ToolResult(content="Tool arguments are not valid", success=False)
                 args_valid = False
         else:
             LOGGER.debug(f"LLMClient tried to use the tool {tool_call.name} which is not in the tools list")
-            result = ToolResult(content=f"{tool_call.name} is not a valid tool")
+            result = ToolResult(content=f"{tool_call.name} is not a valid tool", success=False)
 
         return ToolMessage(
             content=result.content,
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             args_was_valid=args_valid,
-            is_valid_finish_call=(isinstance(result, FinishToolResult) and result.is_valid_finish_call),
+            success=result.success,
         )
 
     async def step(
@@ -770,7 +768,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
 
-                if tool_message.is_valid_finish_call:
+                if tool_message.success and tool_message.name == FINISH_TOOL_NAME:
                     finish_params = self._finish_tool.parameters.model_validate_json(tool_call.arguments)
 
                 # Log tool result immediately

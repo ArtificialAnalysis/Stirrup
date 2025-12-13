@@ -17,7 +17,7 @@ from moviepy.video.fx import Resize
 from PIL import Image
 from pydantic import BaseModel, Field, model_validator
 
-from stirrup.constants import FINISH_TOOL_NAME, RESOLUTION_1MP, RESOLUTION_480P
+from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
 
 __all__ = [
     "Addable",
@@ -413,9 +413,15 @@ class ToolResult[M](BaseModel):
 
     Generic over metadata type M. M should implement Addable protocol for aggregation support,
     but this is not enforced at the class level due to Pydantic schema generation limitations.
+
+    Attributes:
+        content: The result content (string, list of content blocks, or images)
+        success: Whether the tool call was successful. For finish tools, controls if agent terminates.
+        metadata: Optional metadata (e.g., usage stats) that implements Addable for aggregation
     """
 
     content: Content
+    success: bool = True
     metadata: M | None = None
 
 
@@ -456,28 +462,6 @@ class Tool[P: BaseModel, M](BaseModel):
     description: str
     parameters: type[P] | None = None
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
-
-
-class FinishToolResult[M](ToolResult[M]):
-    """ToolResult returned by the `finish` tool.
-
-    The agent uses this type (and `is_valid_finish_call`) to detect a valid
-    termination signal.
-    """
-
-    is_valid_finish_call: bool = True
-
-
-class FinishTool[P: BaseModel, M](Tool[P, M]):
-    """Typed `finish` tool definition.
-
-    Its executor must return a `FinishToolResult` so the agent can treat the call
-    as a valid "finish" signal.
-    """
-
-    name: Literal["finish"] = FINISH_TOOL_NAME
-    executor: Callable[[P], FinishToolResult[M] | Awaitable[FinishToolResult[M]]]
-
 
 class ToolProvider(ABC):
     """Abstract base class for tool providers with lifecycle management.
@@ -585,14 +569,23 @@ class AssistantMessage(BaseModel):
 
 
 class ToolMessage(BaseModel):
-    """Tool execution result returned to the LLM."""
+    """Tool execution result returned to the LLM.
+
+    Attributes:
+        role: Always "tool"
+        content: The tool result content
+        tool_call_id: ID linking this result to the corresponding tool call
+        name: Name of the tool that was called
+        args_was_valid: Whether the tool arguments were valid
+        success: Whether the tool executed successfully (used by finish tool to control termination)
+    """
 
     role: Literal["tool"] = "tool"
     content: Content
     tool_call_id: str | None = None
     name: str | None = None
     args_was_valid: bool = True
-    is_valid_finish_call: bool = False
+    success: bool = False
 
 
 type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]

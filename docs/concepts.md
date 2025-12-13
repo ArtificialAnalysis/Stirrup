@@ -338,19 +338,19 @@ Create custom finish tools for structured output:
 
 ```python
 from pydantic import BaseModel, Field
-from stirrup import FinishTool, FinishToolResult, ToolUseCountMetadata
+from stirrup import Tool, ToolResult, ToolUseCountMetadata
 
 class AnalysisResult(BaseModel):
     summary: str = Field(description="Analysis summary")
     confidence: float = Field(description="Confidence score 0-1")
     paths: list[str] = Field(default_factory=list)
 
-custom_finish = FinishTool(
+custom_finish = Tool(
+    name="finish",
     description="Complete the analysis task",
     parameters=AnalysisResult,
-    executor=lambda p: FinishToolResult(
-        content=p.summary, 
-        is_valid_finish_call=True,
+    executor=lambda p: ToolResult(
+        content=p.summary,
         metadata=ToolUseCountMetadata()
     ),
 )
