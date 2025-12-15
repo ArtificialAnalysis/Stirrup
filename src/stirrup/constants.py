@@ -13,5 +13,6 @@ RESOLUTION_1MP = 1_000_000  # 1 megapixel - default max resolution for images
 RESOLUTION_480P = 640 * 480  # 480p video resolution
 
 # Code execution
-SUBMISSION_SANDBOX_TIMEOUT = 60 * 10  # 10 minutes
+SANDBOX_TIMEOUT = 60 * 10  # 10 minutes
+SANDBOX_REQUEST_TIMEOUT = 60 * 3  # 3 minutes
 E2B_SANDBOX_TEMPLATE_ALIAS = "e2b-sandbox"

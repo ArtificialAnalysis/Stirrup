@@ -13,7 +13,7 @@ except ImportError as e:
 
 import logging
 
-from stirrup.constants import SUBMISSION_SANDBOX_TIMEOUT
+from stirrup.constants import SANDBOX_REQUEST_TIMEOUT, SANDBOX_TIMEOUT
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
 
 from .base import (
@@ -51,7 +51,8 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
     def __init__(
         self,
         *,
-        timeout: int = SUBMISSION_SANDBOX_TIMEOUT,
+        timeout: int = SANDBOX_TIMEOUT,
+        request_timeout: int = SANDBOX_REQUEST_TIMEOUT,
         template: str | None = None,
         allowed_commands: list[str] | None = None,
     ) -> None:
@@ -67,6 +68,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         """
         super().__init__(allowed_commands=allowed_commands)
         self._timeout = timeout
+        self._request_timeout = request_timeout
         self._template = template
         self._sbx: AsyncSandbox | None = None
 
@@ -109,7 +111,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         if not await self._sbx.files.exists(path):
             raise FileNotFoundError(f"File not found: {path}")
 
-        file_bytes = await self._sbx.files.read(path, format="bytes")
+        file_bytes = await self._sbx.files.read(path, format="bytes", request_timeout=self._request_timeout)
         return bytes(file_bytes)
 
     async def write_file_bytes(self, path: str, content: bytes) -> None:
@@ -126,7 +128,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         if self._sbx is None:
             raise RuntimeError("ExecutionEnvironment not started.")
 
-        await self._sbx.files.write(path, content)
+        await self._sbx.files.write(path, content, request_timeout=self._request_timeout)
 
     async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         """Execute command in E2B execution environment, returning raw CommandResult."""
@@ -146,7 +148,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             )
 
         try:
-            r = await self._sbx.commands.run(cmd, timeout=timeout)
+            r = await self._sbx.commands.run(cmd, timeout=timeout, request_timeout=self._request_timeout)
 
             return CommandResult(
                 exit_code=getattr(r, "exit_code", 0),
@@ -231,7 +233,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                     continue
 
                 # Read file content from execution environment
-                file_bytes = await self._sbx.files.read(env_path, format="bytes")
+                file_bytes = await self._sbx.files.read(env_path, format="bytes", request_timeout=self._request_timeout)
                 content = bytes(file_bytes)
 
                 # Save with original filename directly in output_dir
@@ -308,7 +310,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                 if source.is_file():
                     dest = f"{dest_base}/{source.name}"
                     content = source.read_bytes()
-                    await self._sbx.files.write(dest, content)
+                    await self._sbx.files.write(dest, content, request_timeout=self._request_timeout)
                     result.uploaded.append(
                         UploadedFile(
                             source_path=source,
@@ -325,7 +327,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                             relative = file_path.relative_to(source)
                             dest = f"{dest_base}/{source.name}/{relative}"
                             content = file_path.read_bytes()
-                            await self._sbx.files.write(dest, content)
+                            await self._sbx.files.write(dest, content, request_timeout=self._request_timeout)
                             result.uploaded.append(
                                 UploadedFile(
                                     source_path=file_path,
