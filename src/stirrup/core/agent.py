@@ -18,6 +18,7 @@ from stirrup.constants import (
     AGENT_MAX_TURNS,
     CONTEXT_SUMMARIZATION_CUTOFF,
     FINISH_TOOL_NAME,
+    TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.models import (
     AssistantMessage,
@@ -109,17 +110,19 @@ def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[
     return tool_messages, user_messages
 
 
-def _get_total_token_usage(messages: list[list[ChatMessage]]) -> TokenUsage:
-    """Aggregate token usage across all assistant messages in grouped conversation history.
+def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage]:
+    """
+    Returns a list of TokenUsage objects aggregated from all AssistantMessage
+    instances across the provided grouped message history.
 
     Args:
-        messages: List of message groups, where each group represents a segment of conversation.
+        messages: A list where each item is a list of ChatMessage objects representing a segment
+                  or turn group of the conversation history.
 
+    Returns:
+        List of TokenUsage corresponding to each AssistantMessage in the flattened conversation history.
     """
-    return sum(
-        [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)],
-        start=TokenUsage(),
-    )
+    return [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)]
 
 
 class SubAgentParams(BaseModel):
@@ -173,6 +176,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         finish_tool: Tool[FinishParams, FinishMeta] | None = None,
         # Agent options
         context_summarization_cutoff: float = CONTEXT_SUMMARIZATION_CUTOFF,
+        turns_remaining_warning_threshold: int = TURNS_REMAINING_WARNING_THRESHOLD,
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
         # Logging
@@ -212,6 +216,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._tools = tools if tools is not None else DEFAULT_TOOLS
         self._finish_tool: Tool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
         self._context_summarization_cutoff = context_summarization_cutoff
+        self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
 
@@ -800,7 +805,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         init_msgs: str | list[ChatMessage],
         *,
         depth: int | None = None,
-    ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, list[Any]]]:
+    ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, Any]]:
         """Execute the agent loop until finish tool is called or max_turns reached.
 
         A base system prompt is automatically prepended to all runs, including:
@@ -868,7 +873,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         total_output_tokens = 0
 
         for i in range(self._max_turns):
-            if self._max_turns - i <= 30 and i != 0:
+            if self._max_turns - i <= self._turns_remaining_warning_threshold and i != 0:
                 num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - i)
                 msgs.append(num_turns_remaining_msg)
                 self._logger.user_message(num_turns_remaining_msg)
@@ -916,10 +921,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         full_msg_history.append(msgs)
 
         # Add agent's own token usage to run_metadata under "token_usage" key
-        agent_token_usage = _get_total_token_usage(full_msg_history)
-        if "token_usage" not in run_metadata:
-            run_metadata["token_usage"] = []
-        run_metadata["token_usage"].append(agent_token_usage)
+        run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
 
         # Store for __aexit__ to access (on instance for this agent)
         self._last_finish_params = finish_params
