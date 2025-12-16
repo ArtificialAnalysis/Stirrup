@@ -1,3 +1,4 @@
+import base64
 import mimetypes
 import warnings
 from abc import ABC, abstractmethod
@@ -15,7 +16,7 @@ import filetype
 from moviepy import AudioFileClip, VideoFileClip
 from moviepy.video.fx import Resize
 from PIL import Image
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, model_validator
 
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
 
@@ -43,6 +44,21 @@ __all__ = [
     "aggregate_metadata",
 ]
 
+def _bytes_to_b64(v: bytes) -> str:
+    return base64.b64encode(v).decode("ascii")
+
+def _b64_to_bytes(v: bytes | str) -> bytes:
+    if isinstance(v, bytes):
+        return v
+    if isinstance(v, str):
+        return base64.b64decode(v.encode("ascii"))
+    raise TypeError("Invalid bytes value")
+
+Base64Bytes = Annotated[
+    bytes,
+    PlainValidator(_b64_to_bytes),
+    PlainSerializer(_bytes_to_b64, when_used="json"),
+]
 
 def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple[int, int]:
     """Downscale image dimensions to fit within max pixel count while maintaining aspect ratio.
@@ -53,12 +69,11 @@ def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple
     nw, nh = int(w * s) // 2 * 2, int(h * s) // 2 * 2
     return max(nw, 2), max(nh, 2)
 
-
 # Content
 class BinaryContentBlock(BaseModel, ABC):
     """Base class for binary content (images, video, audio) with MIME type validation."""
 
-    data: bytes
+    data: Base64Bytes
     allowed_mime_types: ClassVar[set[str]]
 
     @property

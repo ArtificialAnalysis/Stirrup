@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from pydantic import ValidationError
+
 try:
     from e2b import InvalidArgumentException, TimeoutException
     from e2b.sandbox.filesystem.filesystem import FileType
@@ -357,5 +359,13 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             FileNotFoundError: If file does not exist.
 
         """
-        file_bytes = await self.read_file_bytes(path)
-        return ImageContentBlock(data=file_bytes)
+        if not path.lower().endswith((".png", ".jpg", ".jpeg")):
+            raise ValueError(f"Unsupported image type for `{path}`. Only .png, .jpg, or .jpeg are allowed.")
+
+        try:
+            file_bytes = await self.read_file_bytes(path)
+            image = ImageContentBlock(data=file_bytes)
+        except ValidationError as e:
+            raise ValueError("You submitted a corrupt/unsupported image file.") from e
+
+        return image
