@@ -44,8 +44,10 @@ __all__ = [
     "aggregate_metadata",
 ]
 
+
 def _bytes_to_b64(v: bytes) -> str:
     return base64.b64encode(v).decode("ascii")
+
 
 def _b64_to_bytes(v: bytes | str) -> bytes:
     if isinstance(v, bytes):
@@ -54,11 +56,13 @@ def _b64_to_bytes(v: bytes | str) -> bytes:
         return base64.b64decode(v.encode("ascii"))
     raise TypeError("Invalid bytes value")
 
+
 Base64Bytes = Annotated[
     bytes,
     PlainValidator(_b64_to_bytes),
     PlainSerializer(_bytes_to_b64, when_used="json"),
 ]
+
 
 def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple[int, int]:
     """Downscale image dimensions to fit within max pixel count while maintaining aspect ratio.
@@ -68,6 +72,7 @@ def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple
     s = 1.0 if max_pixels is None or w * h <= max_pixels else sqrt(max_pixels / (w * h))
     nw, nh = int(w * s) // 2 * 2, int(h * s) // 2 * 2
     return max(nw, 2), max(nh, 2)
+
 
 # Content
 class BinaryContentBlock(BaseModel, ABC):
@@ -477,6 +482,7 @@ class Tool[P: BaseModel, M](BaseModel):
     description: str
     parameters: type[P] | None = None
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
+
 
 class ToolProvider(ABC):
     """Abstract base class for tool providers with lifecycle management.
