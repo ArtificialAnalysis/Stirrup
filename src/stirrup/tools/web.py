@@ -125,6 +125,7 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
             return ToolResult(
                 content=f"<web_fetch><url>{params.url}</url><error>"
                 f"{truncate_msg(str(exc), MAX_LENGTH_WEB_FETCH_HTML)}</error></web_fetch>",
+                success=False,
                 metadata=WebFetchMetadata(pages_fetched=[params.url]),
             )
 

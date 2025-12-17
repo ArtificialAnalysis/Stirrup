@@ -1054,6 +1054,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 )
                 return ToolResult(
                     content=f"<sub_agent_result>\n<error>{e!s}</error>\n</sub_agent_result>",
+                    success=False,
                     metadata=error_metadata,
                 )
             finally:
