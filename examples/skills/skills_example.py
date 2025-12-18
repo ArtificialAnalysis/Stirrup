@@ -31,6 +31,8 @@ async def main() -> None:
         skills_dir="skills",
     ) as session:
         await session.run("Read the input sample_data.csv file and run full data analysis.")
+
+
 # --8<-- [end:example]
 
 
