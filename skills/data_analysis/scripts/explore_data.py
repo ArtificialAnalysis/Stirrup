@@ -142,7 +142,7 @@ def explore_categorical(df: pl.DataFrame, max_unique: int = 20):
                 val = row[col_name] if row[col_name] is not None else "<null>"
                 count = row["len"]
                 pct = count / total * 100
-                print(f"  {str(val):<25} {count:>8,} ({pct:>5.1f}%)")
+                print(f"  {val!s:<25} {count:>8,} ({pct:>5.1f}%)")
         else:
             top_values = (
                 df.group_by(col_name)

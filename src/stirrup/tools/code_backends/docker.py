@@ -330,7 +330,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             context_path = self._dockerfile_context.resolve() if self._dockerfile_context else dockerfile_path.parent
 
             # Generate unique tag based on dockerfile path
-            tag = f"agent001-exec-env-{hashlib.md5(str(dockerfile_path).encode()).hexdigest()[:8]}"
+            tag = f"stirrup-exec-env-{hashlib.md5(str(dockerfile_path).encode()).hexdigest()[:8]}"
 
             logger.info("Building image from %s with tag %s", dockerfile_path, tag)
 
