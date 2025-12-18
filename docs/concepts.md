@@ -128,7 +128,7 @@ The `session()` method returns the agent configured as an async context manager.
 
 - Tool lifecycle (setup and teardown of ToolProviders)
 - File uploads to execution environment
-- Skills loading and system prompt injection
+- Skills loading and system prompt addition
 - Output file saving
 - Logging
 
