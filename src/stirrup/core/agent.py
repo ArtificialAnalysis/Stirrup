@@ -36,6 +36,7 @@ from stirrup.core.models import (
     UserMessage,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
+from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
 from stirrup.tools import DEFAULT_TOOLS
 from stirrup.tools.code_backends.base import CodeExecToolProvider
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
@@ -70,6 +71,7 @@ class SessionState:
     parent_exec_env: CodeExecToolProvider | None = None
     depth: int = 0
     uploaded_file_paths: list[str] = field(default_factory=list)  # Paths of files uploaded to exec_env
+    skills_metadata: list[SkillMetadata] = field(default_factory=list)  # Loaded skills metadata
 
 
 _SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("session_state")
@@ -222,6 +224,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Session configuration (set during session(), used in __aenter__)
         self._pending_output_dir: Path | None = None
         self._pending_input_files: str | Path | list[str | Path] | None = None
+        self._pending_skills_dir: Path | None = None
 
         # Instance-scoped state (populated during __aenter__, isolated per agent instance)
         self._active_tools: dict[str, Tool] = {}
@@ -258,6 +261,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self,
         output_dir: Path | str | None = None,
         input_files: str | Path | list[str | Path] | None = None,
+        skills_dir: Path | str | None = None,
     ) -> Self:
         """Configure a session and return self for use as async context manager.
 
@@ -270,6 +274,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         - Glob patterns (e.g., "data/*.csv", "**/*.py")
                         Raises ValueError if no CodeExecToolProvider is configured
                         or if a glob pattern matches no files.
+            skills_dir: Directory containing skill definitions to load and make available
+                       to the agent. Skills are uploaded to the execution environment
+                       and their metadata is included in the system prompt.
 
         Returns:
             Self, for use with `async with agent.session(...) as session:`
@@ -285,6 +292,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         """
         self._pending_output_dir = Path(output_dir) if output_dir else None
         self._pending_input_files = input_files
+        self._pending_skills_dir = Path(skills_dir) if skills_dir else None
         return self
 
     def _resolve_input_files(self, input_files: str | Path | list[str | Path]) -> list[Path]:
@@ -409,6 +417,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             for file_path in state.uploaded_file_paths:
                 files_section += f"\n- {file_path}"
             parts.append(files_section)
+
+        # Skills section (if skills were loaded)
+        if state and state.skills_metadata:
+            skills_section = format_skills_section(state.skills_metadata)
+            if skills_section:
+                parts.append(f"\n\n{skills_section}")
 
         # User's custom system prompt (if provided)
         if self._system_prompt:
@@ -587,6 +601,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 if result.failed:
                     raise RuntimeError(f"Failed to upload files: {result.failed}")
             self._pending_input_files = None  # Clear pending state
+
+            # Upload skills directory if it exists and load metadata
+            if self._pending_skills_dir:
+                skills_path = self._pending_skills_dir
+                if skills_path.exists() and skills_path.is_dir():
+                    if state.exec_env:
+                        logger.debug("[%s __aenter__] Uploading skills directory: %s", self._name, skills_path)
+                        await state.exec_env.upload_files(skills_path, dest_dir="skills")
+                    # Load skills metadata (even if no exec_env, for system prompt)
+                    state.skills_metadata = load_skills_metadata(skills_path)
+                    logger.debug("[%s __aenter__] Loaded %d skills", self._name, len(state.skills_metadata))
+                self._pending_skills_dir = None  # Clear pending state
 
             # Configure and enter logger context
             self._logger.name = self._name
