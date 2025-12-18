@@ -80,6 +80,7 @@ nav:
       - Creating Tools: guides/tools.md
       - Tool Providers: guides/tool-providers.md
       - Code Execution: guides/code-execution.md
+      - Skills: guides/skills.md
       - Sub-Agents: guides/sub-agents.md
       - MCP Integration: guides/mcp.md
   - Extending:
