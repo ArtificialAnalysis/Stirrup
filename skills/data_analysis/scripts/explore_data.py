@@ -42,14 +42,14 @@ def load_data(file_path: str, sample_size: int | None = None) -> pl.DataFrame:
     return df
 
 
-def print_section(title: str):
+def print_section(title: str) -> None:
     """Print a section header."""
     print(f"\n{'=' * 60}")
     print(f" {title}")
     print(f"{'=' * 60}\n")
 
 
-def explore_schema(df: pl.DataFrame):
+def explore_schema(df: pl.DataFrame) -> None:
     """Explore DataFrame schema and structure."""
     print_section("SCHEMA & STRUCTURE")
 
@@ -61,7 +61,7 @@ def explore_schema(df: pl.DataFrame):
         print(f"  {col_name:<30} {dtype}")
 
 
-def explore_missing(df: pl.DataFrame):
+def explore_missing(df: pl.DataFrame) -> None:
     """Analyze missing data."""
     print_section("MISSING DATA ANALYSIS")
 
@@ -78,12 +78,14 @@ def explore_missing(df: pl.DataFrame):
             print(f"{col_name:<30} {null_count:>12,} {null_pct:>9.2f}%")
 
     complete_rows = df.drop_nulls().shape[0]
-    print(f"\nComplete rows (no nulls): {complete_rows:,} ({complete_rows/total_rows*100:.1f}%)")
+    print(f"\nComplete rows (no nulls): {complete_rows:,} ({complete_rows / total_rows * 100:.1f}%)")
 
 
-def explore_numeric(df: pl.DataFrame):
+def explore_numeric(df: pl.DataFrame) -> None:
     """Explore numeric columns."""
-    numeric_cols = [c for c in df.columns if df.schema[c] in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]]
+    numeric_cols = [
+        c for c in df.columns if df.schema[c] in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]
+    ]
 
     if not numeric_cols:
         return
@@ -94,29 +96,31 @@ def explore_numeric(df: pl.DataFrame):
         print(f"\n{col_name}:")
         print("-" * 40)
 
-        stats = df.select([
-            col(col_name).count().alias("count"),
-            col(col_name).mean().alias("mean"),
-            col(col_name).std().alias("std"),
-            col(col_name).min().alias("min"),
-            col(col_name).quantile(0.25).alias("q25"),
-            col(col_name).median().alias("median"),
-            col(col_name).quantile(0.75).alias("q75"),
-            col(col_name).max().alias("max"),
-        ])
+        stats = df.select(
+            [
+                col(col_name).count().alias("count"),
+                col(col_name).mean().alias("mean"),
+                col(col_name).std().alias("std"),
+                col(col_name).min().alias("min"),
+                col(col_name).quantile(0.25).alias("q25"),
+                col(col_name).median().alias("median"),
+                col(col_name).quantile(0.75).alias("q75"),
+                col(col_name).max().alias("max"),
+            ]
+        )
 
         row = stats.row(0, named=True)
         print(f"  Count:    {row['count']:>12,}")
-        print(f"  Mean:     {row['mean']:>12.4f}" if row['mean'] is not None else "  Mean:     N/A")
-        print(f"  Std Dev:  {row['std']:>12.4f}" if row['std'] is not None else "  Std Dev:  N/A")
-        print(f"  Min:      {row['min']:>12.4f}" if row['min'] is not None else "  Min:      N/A")
-        print(f"  25%:      {row['q25']:>12.4f}" if row['q25'] is not None else "  25%:      N/A")
-        print(f"  Median:   {row['median']:>12.4f}" if row['median'] is not None else "  Median:   N/A")
-        print(f"  75%:      {row['q75']:>12.4f}" if row['q75'] is not None else "  75%:      N/A")
-        print(f"  Max:      {row['max']:>12.4f}" if row['max'] is not None else "  Max:      N/A")
+        print(f"  Mean:     {row['mean']:>12.4f}" if row["mean"] is not None else "  Mean:     N/A")
+        print(f"  Std Dev:  {row['std']:>12.4f}" if row["std"] is not None else "  Std Dev:  N/A")
+        print(f"  Min:      {row['min']:>12.4f}" if row["min"] is not None else "  Min:      N/A")
+        print(f"  25%:      {row['q25']:>12.4f}" if row["q25"] is not None else "  25%:      N/A")
+        print(f"  Median:   {row['median']:>12.4f}" if row["median"] is not None else "  Median:   N/A")
+        print(f"  75%:      {row['q75']:>12.4f}" if row["q75"] is not None else "  75%:      N/A")
+        print(f"  Max:      {row['max']:>12.4f}" if row["max"] is not None else "  Max:      N/A")
 
 
-def explore_categorical(df: pl.DataFrame, max_unique: int = 20):
+def explore_categorical(df: pl.DataFrame, max_unique: int = 20) -> None:
     """Explore categorical/string columns."""
     cat_cols = [c for c in df.columns if df.schema[c] in [pl.Utf8, pl.Categorical]]
 
@@ -131,11 +135,7 @@ def explore_categorical(df: pl.DataFrame, max_unique: int = 20):
         print("-" * 40)
 
         if n_unique <= max_unique:
-            value_counts = (
-                df.group_by(col_name)
-                .len()
-                .sort("len", descending=True)
-            )
+            value_counts = df.group_by(col_name).len().sort("len", descending=True)
 
             total = len(df)
             for row in value_counts.iter_rows(named=True):
@@ -144,12 +144,7 @@ def explore_categorical(df: pl.DataFrame, max_unique: int = 20):
                 pct = count / total * 100
                 print(f"  {val!s:<25} {count:>8,} ({pct:>5.1f}%)")
         else:
-            top_values = (
-                df.group_by(col_name)
-                .len()
-                .sort("len", descending=True)
-                .head(10)
-            )
+            top_values = df.group_by(col_name).len().sort("len", descending=True).head(10)
             print(f"  (showing top 10 of {n_unique:,})")
             total = len(df)
             for row in top_values.iter_rows(named=True):
@@ -159,7 +154,7 @@ def explore_categorical(df: pl.DataFrame, max_unique: int = 20):
                 print(f"  {str(val)[:25]:<25} {count:>8,} ({pct:>5.1f}%)")
 
 
-def explore_datetime(df: pl.DataFrame):
+def explore_datetime(df: pl.DataFrame) -> None:
     """Explore datetime columns."""
     dt_cols = [c for c in df.columns if df.schema[c] in [pl.Date, pl.Datetime, pl.Time]]
 
@@ -172,32 +167,34 @@ def explore_datetime(df: pl.DataFrame):
         print(f"\n{col_name}:")
         print("-" * 40)
 
-        stats = df.select([
-            col(col_name).min().alias("min"),
-            col(col_name).max().alias("max"),
-            col(col_name).n_unique().alias("unique"),
-        ])
+        stats = df.select(
+            [
+                col(col_name).min().alias("min"),
+                col(col_name).max().alias("max"),
+                col(col_name).n_unique().alias("unique"),
+            ]
+        )
 
         row = stats.row(0, named=True)
         print(f"  Min:     {row['min']}")
         print(f"  Max:     {row['max']}")
         print(f"  Unique:  {row['unique']:,}")
 
-        if row['min'] is not None and row['max'] is not None:
+        if row["min"] is not None and row["max"] is not None:
             try:
-                span = row['max'] - row['min']
+                span = row["max"] - row["min"]
                 print(f"  Span:    {span}")
             except Exception:
                 pass
 
 
-def explore_sample(df: pl.DataFrame, n: int = 5):
+def explore_sample(df: pl.DataFrame, n: int = 5) -> None:
     """Show sample rows."""
     print_section(f"SAMPLE DATA (first {n} rows)")
     print(df.head(n))
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Explore and profile a dataset")
     parser.add_argument("file_path", help="Path to the data file (CSV, Parquet, JSON)")
     parser.add_argument("--sample", type=int, help="Sample N rows for large files")
@@ -205,8 +202,10 @@ def main():
     args = parser.parse_args()
 
     # Redirect output if specified
+    output_file = None
     if args.output:
-        sys.stdout = open(args.output, "w")
+        output_file = open(args.output, "w")  # noqa: SIM115
+        sys.stdout = output_file
 
     try:
         print(f"Exploring: {args.file_path}")
@@ -227,8 +226,8 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        if args.output:
-            sys.stdout.close()
+        if output_file:
+            output_file.close()
 
 
 if __name__ == "__main__":

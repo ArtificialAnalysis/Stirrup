@@ -41,18 +41,20 @@ def compute_numeric_stats(df: pl.DataFrame, numeric_cols: list[str], group_by: s
     agg_exprs = []
 
     for col_name in numeric_cols:
-        agg_exprs.extend([
-            col(col_name).count().alias(f"{col_name}_count"),
-            col(col_name).null_count().alias(f"{col_name}_null_count"),
-            col(col_name).mean().alias(f"{col_name}_mean"),
-            col(col_name).std().alias(f"{col_name}_std"),
-            col(col_name).min().alias(f"{col_name}_min"),
-            col(col_name).quantile(0.25).alias(f"{col_name}_q25"),
-            col(col_name).median().alias(f"{col_name}_median"),
-            col(col_name).quantile(0.75).alias(f"{col_name}_q75"),
-            col(col_name).max().alias(f"{col_name}_max"),
-            col(col_name).sum().alias(f"{col_name}_sum"),
-        ])
+        agg_exprs.extend(
+            [
+                col(col_name).count().alias(f"{col_name}_count"),
+                col(col_name).null_count().alias(f"{col_name}_null_count"),
+                col(col_name).mean().alias(f"{col_name}_mean"),
+                col(col_name).std().alias(f"{col_name}_std"),
+                col(col_name).min().alias(f"{col_name}_min"),
+                col(col_name).quantile(0.25).alias(f"{col_name}_q25"),
+                col(col_name).median().alias(f"{col_name}_median"),
+                col(col_name).quantile(0.75).alias(f"{col_name}_q75"),
+                col(col_name).max().alias(f"{col_name}_max"),
+                col(col_name).sum().alias(f"{col_name}_sum"),
+            ]
+        )
 
     if group_by:
         return df.group_by(group_by).agg(agg_exprs).sort(group_by)
@@ -60,23 +62,17 @@ def compute_numeric_stats(df: pl.DataFrame, numeric_cols: list[str], group_by: s
         return df.select(agg_exprs)
 
 
-def compute_categorical_stats(df: pl.DataFrame, cat_cols: list[str], group_by: str | None = None) -> dict[str, pl.DataFrame]:
+def compute_categorical_stats(
+    df: pl.DataFrame, cat_cols: list[str], group_by: str | None = None
+) -> dict[str, pl.DataFrame]:
     """Compute value counts for categorical columns."""
     results = {}
 
     for col_name in cat_cols:
         if group_by and col_name != group_by:
-            counts = (
-                df.group_by([group_by, col_name])
-                .len()
-                .sort([group_by, "len"], descending=[False, True])
-            )
+            counts = df.group_by([group_by, col_name]).len().sort([group_by, "len"], descending=[False, True])
         else:
-            counts = (
-                df.group_by(col_name)
-                .len()
-                .sort("len", descending=True)
-            )
+            counts = df.group_by(col_name).len().sort("len", descending=True)
 
         results[col_name] = counts
 
@@ -88,10 +84,25 @@ def format_stats_table(stats: pl.DataFrame, numeric_cols: list[str]) -> str:
     lines = []
 
     # Check if grouped
-    is_grouped = any(c not in [f"{nc}_{s}" for nc in numeric_cols for s in ["count", "null_count", "mean", "std", "min", "q25", "median", "q75", "max", "sum"]] for c in stats.columns)
+    is_grouped = any(
+        c
+        not in [
+            f"{nc}_{s}"
+            for nc in numeric_cols
+            for s in ["count", "null_count", "mean", "std", "min", "q25", "median", "q75", "max", "sum"]
+        ]
+        for c in stats.columns
+    )
 
     if is_grouped:
-        group_col = [c for c in stats.columns if not any(c.endswith(f"_{s}") for s in ["count", "null_count", "mean", "std", "min", "q25", "median", "q75", "max", "sum"])][0]
+        group_col = next(
+            c
+            for c in stats.columns
+            if not any(
+                c.endswith(f"_{s}")
+                for s in ["count", "null_count", "mean", "std", "min", "q25", "median", "q75", "max", "sum"]
+            )
+        )
 
         for col_name in numeric_cols:
             lines.append(f"\n{'=' * 80}")
@@ -147,7 +158,7 @@ def format_stats_table(stats: pl.DataFrame, numeric_cols: list[str]) -> str:
     return "\n".join(lines)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Generate summary statistics report")
     parser.add_argument("file_path", help="Path to the data file")
     parser.add_argument("--group-by", dest="group_by", help="Column to group statistics by")
@@ -160,7 +171,9 @@ def main():
         print(f"Shape: {df.shape[0]:,} rows x {df.shape[1]} columns\n")
 
         # Identify column types
-        numeric_cols = [c for c in df.columns if df.schema[c] in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]]
+        numeric_cols = [
+            c for c in df.columns if df.schema[c] in [pl.Float64, pl.Float32, pl.Int64, pl.Int32, pl.Int16, pl.Int8]
+        ]
         cat_cols = [c for c in df.columns if df.schema[c] in [pl.Utf8, pl.Categorical]]
 
         # Compute numeric statistics

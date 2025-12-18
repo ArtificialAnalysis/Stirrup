@@ -2,6 +2,7 @@
 
 This example demonstrates how to use skills in an agent.
 """
+
 import asyncio
 
 from stirrup import Agent
@@ -20,15 +21,17 @@ async def main() -> None:
     agent = Agent(
         client=client,
         name="agent",
-        max_turns=25,
-        tools = [DockerCodeExecToolProvider.from_dockerfile(dockerfile="examples/skills/Dockerfile")]
+        max_turns=20,
+        tools=[DockerCodeExecToolProvider.from_dockerfile(dockerfile="examples/skills/Dockerfile")],
     )
 
     # Run with session context - handles tool lifecycle, logging and file outputs
-    async with agent.session(input_files=["examples/skills/sample_data.csv"], output_dir="output/skills_example", skills_dir="skills") as session:
+    async with agent.session(
+        input_files=["examples/skills/sample_data.csv"], output_dir="output/skills_example", skills_dir="skills"
+    ) as session:
         _finish_params, _history, _metadata = await session.run(
             """
-        Read the input data.csv file and run full data analysis.
+        Read the input sample_data.csv file and run full data analysis.
         """
         )
 
