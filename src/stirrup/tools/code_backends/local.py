@@ -440,8 +440,20 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
                     logger.debug("Uploaded file: %s -> %s", source, dest)
 
                 elif source.is_dir():
-                    dest = dest_base / source.name
-                    shutil.copytree(source, dest, dirs_exist_ok=True)
+                    # If dest_dir was explicitly provided, copy contents directly to dest_base
+                    # Otherwise, create a subdirectory with the source's name
+                    if dest_dir:
+                        dest = dest_base
+                        # Copy contents of source directory into dest_base
+                        for item in source.iterdir():
+                            item_dest = dest / item.name
+                            if item.is_file():
+                                shutil.copy2(item, item_dest)
+                            else:
+                                shutil.copytree(item, item_dest, dirs_exist_ok=True)
+                    else:
+                        dest = dest_base / source.name
+                        shutil.copytree(source, dest, dirs_exist_ok=True)
                     # Track all individual files uploaded
                     for file_path in source.rglob("*"):
                         if file_path.is_file():

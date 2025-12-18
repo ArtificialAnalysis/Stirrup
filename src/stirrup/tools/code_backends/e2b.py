@@ -320,10 +320,12 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
 
                 elif source.is_dir():
                     # Upload all files in directory recursively
+                    # If dest_dir was explicitly provided, copy contents directly to dest_base
+                    # Otherwise, create a subdirectory with the source's name
                     for file_path in source.rglob("*"):
                         if file_path.is_file():
                             relative = file_path.relative_to(source)
-                            dest = f"{dest_base}/{source.name}/{relative}"
+                            dest = f"{dest_base}/{relative}" if dest_dir else f"{dest_base}/{source.name}/{relative}"
                             content = file_path.read_bytes()
                             await self._sbx.files.write(dest, content)
                             result.uploaded.append(
@@ -333,7 +335,10 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                                     size=len(content),
                                 ),
                             )
-                    logger.debug("Uploaded directory: %s -> %s/%s", source, dest_base, source.name)
+                    if dest_dir:
+                        logger.debug("Uploaded directory contents: %s -> %s", source, dest_base)
+                    else:
+                        logger.debug("Uploaded directory: %s -> %s/%s", source, dest_base, source.name)
 
             except Exception as exc:
                 result.failed[str(source)] = str(exc)
