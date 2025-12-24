@@ -21,7 +21,7 @@ def calculator_executor(params: CalculatorParams) -> ToolResult[ToolUseCountMeta
         result = eval(params.expression, {"__builtins__": {}}, {})
         return ToolResult(content=f"Result: {result}", metadata=ToolUseCountMetadata())
     except Exception as e:
-        return ToolResult(content=f"Error evaluating expression: {e!s}", metadata=ToolUseCountMetadata())
+        return ToolResult(content=f"Error evaluating expression: {e!s}", success=False, metadata=ToolUseCountMetadata())
 
 
 CALCULATOR_TOOL: Tool[CalculatorParams, ToolUseCountMetadata] = Tool[CalculatorParams, ToolUseCountMetadata](

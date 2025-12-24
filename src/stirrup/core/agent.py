@@ -2,7 +2,6 @@
 import contextvars
 import glob as glob_module
 import inspect
-import json
 import logging
 import re
 from contextlib import AsyncExitStack
@@ -19,6 +18,7 @@ from stirrup.constants import (
     AGENT_MAX_TURNS,
     CONTEXT_SUMMARIZATION_CUTOFF,
     FINISH_TOOL_NAME,
+    TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.models import (
     AssistantMessage,
@@ -112,17 +112,19 @@ def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[
     return tool_messages, user_messages
 
 
-def _get_total_token_usage(messages: list[list[ChatMessage]]) -> TokenUsage:
-    """Aggregate token usage across all assistant messages in grouped conversation history.
+def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage]:
+    """
+    Returns a list of TokenUsage objects aggregated from all AssistantMessage
+    instances across the provided grouped message history.
 
     Args:
-        messages: List of message groups, where each group represents a segment of conversation.
+        messages: A list where each item is a list of ChatMessage objects representing a segment
+                  or turn group of the conversation history.
 
+    Returns:
+        List of TokenUsage corresponding to each AssistantMessage in the flattened conversation history.
     """
-    return sum(
-        [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)],
-        start=TokenUsage(),
-    )
+    return [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)]
 
 
 class SubAgentParams(BaseModel):
@@ -176,6 +178,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         finish_tool: Tool[FinishParams, FinishMeta] | None = None,
         # Agent options
         context_summarization_cutoff: float = CONTEXT_SUMMARIZATION_CUTOFF,
+        turns_remaining_warning_threshold: int = TURNS_REMAINING_WARNING_THRESHOLD,
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
         # Logging
@@ -215,6 +218,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._tools = tools if tools is not None else DEFAULT_TOOLS
         self._finish_tool: Tool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
         self._context_summarization_cutoff = context_summarization_cutoff
+        self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
 
@@ -749,17 +753,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     tool_call.name,
                     tool_call.arguments,
                 )
-                result = ToolResult(content="Tool arguments are not valid")
+                result = ToolResult(content="Tool arguments are not valid", success=False)
                 args_valid = False
         else:
             LOGGER.debug(f"LLMClient tried to use the tool {tool_call.name} which is not in the tools list")
-            result = ToolResult(content=f"{tool_call.name} is not a valid tool")
+            result = ToolResult(content=f"{tool_call.name} is not a valid tool", success=False)
 
         return ToolMessage(
             content=result.content,
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             args_was_valid=args_valid,
+            success=result.success,
         )
 
     async def step(
@@ -768,7 +773,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_metadata: dict[str, list[Any]],
         turn: int = 0,
         max_turns: int = 0,
-    ) -> tuple[AssistantMessage, list[ToolMessage], ToolCall | None]:
+    ) -> tuple[AssistantMessage, list[ToolMessage], FinishParams | None]:
         """Execute one agent step: generate assistant message and run any requested tool calls.
 
         Args:
@@ -786,24 +791,21 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         if turn > 0:
             self._logger.assistant_message(turn, max_turns, assistant_message)
 
+        finish_params: FinishParams | None = None
         tool_messages: list[ToolMessage] = []
-        finish_call: ToolCall | None = None
-
         if assistant_message.tool_calls:
-            finish_call = next(
-                (tc for tc in assistant_message.tool_calls if tc.name == FINISH_TOOL_NAME),
-                None,
-            )
-
             tool_messages = []
             for tool_call in assistant_message.tool_calls:
                 tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
 
+                if tool_message.success and tool_message.name == FINISH_TOOL_NAME:
+                    finish_params = self._finish_tool.parameters.model_validate_json(tool_call.arguments)
+
                 # Log tool result immediately
                 self._logger.tool_result(tool_message)
 
-        return assistant_message, tool_messages, finish_call
+        return assistant_message, tool_messages, finish_params
 
     async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Condense message history using LLM to stay within context window."""
@@ -829,7 +831,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         init_msgs: str | list[ChatMessage],
         *,
         depth: int | None = None,
-    ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, list[Any]]]:
+    ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, Any]]:
         """Execute the agent loop until finish tool is called or max_turns reached.
 
         A base system prompt is automatically prepended to all runs, including:
@@ -890,7 +892,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_metadata: dict[str, list[Any]] = {}
 
         full_msg_history: list[list[ChatMessage]] = []
-        finish_params: FinishParams | None = None
 
         # Cumulative stats for spinner
         total_tool_calls = 0
@@ -898,13 +899,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         total_output_tokens = 0
 
         for i in range(self._max_turns):
-            if self._max_turns - i <= 30 and i != 0:
+            if self._max_turns - i <= self._turns_remaining_warning_threshold and i != 0:
                 num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - i)
                 msgs.append(num_turns_remaining_msg)
                 self._logger.user_message(num_turns_remaining_msg)
 
             # Pass turn info to step() for real-time logging
-            assistant_message, tool_messages, finish_call = await self.step(
+            assistant_message, tool_messages, finish_params = await self.step(
                 msgs,
                 run_metadata,
                 turn=i + 1,
@@ -930,18 +931,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             msgs.extend([assistant_message, *tool_messages, *user_messages])
 
-            if finish_call:
-                try:
-                    finish_arguments = json.loads(finish_call.arguments)
-                    if self._finish_tool.parameters is not None:
-                        finish_params = self._finish_tool.parameters.model_validate(finish_arguments)
-                    break
-                except (json.JSONDecodeError, ValidationError, TypeError):
-                    LOGGER.debug(
-                        "Agent tried to use the finish tool but the tool call is not valid: %r",
-                        finish_call.arguments,
-                    )
-                    # continue until the finish tool call is valid
+            if finish_params:
+                break
 
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
             if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:
@@ -956,10 +947,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         full_msg_history.append(msgs)
 
         # Add agent's own token usage to run_metadata under "token_usage" key
-        agent_token_usage = _get_total_token_usage(full_msg_history)
-        if "token_usage" not in run_metadata:
-            run_metadata["token_usage"] = []
-        run_metadata["token_usage"].append(agent_token_usage)
+        run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
 
         # Store for __aexit__ to access (on instance for this agent)
         self._last_finish_params = finish_params
@@ -1092,6 +1080,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 )
                 return ToolResult(
                     content=f"<sub_agent_result>\n<error>{e!s}</error>\n</sub_agent_result>",
+                    success=False,
                     metadata=error_metadata,
                 )
             finally:

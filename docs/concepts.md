@@ -210,7 +210,6 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 | `max_tokens` | `int` | `64_000` | Context window size |
 | `base_url` | `str \| None` | `None` | Custom API URL (for Deepseek, vLLM, etc.) |
 | `api_key` | `str \| None` | `None` | API key (defaults to `OPENROUTER_API_KEY` env var) |
-| `supports_audio_input` | `bool` | `False` | Whether model supports audio |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
 | `max_retries` | `int` | `2` | Number of retries for transient errors |
 
@@ -226,7 +225,6 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 |-----------|------|---------|-------------|
 | `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-sonnet-4-5"`) |
 | `max_tokens` | `int` | required | Context window size |
-| `supports_audio_input` | `bool` | `False` | Whether model supports audio |
 | `reasoning_effort` | `str \| None` | `None` | For reasoning models (o1/o3) |
 | `kwargs` | `dict \| None` | `None` | Additional provider-specific arguments |
 
@@ -369,7 +367,10 @@ custom_finish = Tool(
     name="finish",
     description="Complete the analysis task",
     parameters=AnalysisResult,
-    executor=lambda p: ToolResult(content=p.summary, metadata=ToolUseCountMetadata()),
+    executor=lambda p: ToolResult(
+        content=p.summary,
+        metadata=ToolUseCountMetadata()
+    ),
 )
 
 agent = Agent(client=client, name="analyst", finish_tool=custom_finish)

@@ -419,11 +419,13 @@ class CodeExecToolProvider(ToolProvider, ABC):
             except FileNotFoundError:
                 return ToolResult(
                     content=f"Image `{params.path}` not found.",
+                    success=False,
                     metadata=ToolUseCountMetadata(),
                 )
             except ValueError as e:
                 return ToolResult(
                     content=str(e),
+                    success=False,
                     metadata=ToolUseCountMetadata(),
                 )
 
