@@ -301,6 +301,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         result = UploadFilesResult()
 
         for source in paths:
+            original_name = Path(source).name  # Get name BEFORE resolve
             source = Path(source).resolve()
 
             if not source.exists():
@@ -310,7 +311,8 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
 
             try:
                 if source.is_file():
-                    dest = f"{dest_base}/{source.name}"
+                    source = Path(source).resolve()
+                    dest = f"{dest_base}/{original_name}"
                     content = source.read_bytes()
                     await self._sbx.files.write(dest, content, request_timeout=self._request_timeout)
                     result.uploaded.append(

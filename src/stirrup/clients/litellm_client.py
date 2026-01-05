@@ -49,6 +49,7 @@ class LiteLLMClient(LLMClient):
         self,
         model_slug: str,
         max_tokens: int,
+        api_key: str | None = None,
         reasoning_effort: str | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -63,6 +64,7 @@ class LiteLLMClient(LLMClient):
         self._model_slug = model_slug
         self._max_tokens = max_tokens
         self._reasoning_effort = reasoning_effort
+        self._api_key = api_key
         self._kwargs = kwargs or {}
 
     @property
@@ -89,6 +91,7 @@ class LiteLLMClient(LLMClient):
             tool_choice="auto" if tools else None,
             max_tokens=self._max_tokens,
             reasoning_effort=self._reasoning_effort,
+            api_key=self._api_key,
             **self._kwargs,
         )
 
@@ -105,9 +108,16 @@ class LiteLLMClient(LLMClient):
         if getattr(msg, "reasoning_content", None) is not None:
             reasoning = Reasoning(content=msg.reasoning_content)
         if getattr(msg, "thinking_blocks", None) is not None and len(msg.thinking_blocks) > 0:
-            reasoning = Reasoning(
-                signature=msg.thinking_blocks[0]["signature"], content=msg.thinking_blocks[0]["content"]
-            )
+            if len(msg.thinking_blocks) > 1:
+                raise ValueError("Found multiple thinking blocks in the response")
+
+            signature = msg.thinking_blocks[0].get("thinking_signature", None)
+            content = msg.thinking_blocks[0].get("thinking", None)
+
+            if signature is None and content is None:
+                raise ValueError("Signature and content not found in the thinking block response")
+
+            reasoning = Reasoning(signature=signature, content=content)
 
         usage = r["usage"]
 

@@ -553,6 +553,7 @@ class ToolCall(BaseModel):
         tool_call_id: Unique identifier for tracking this tool call and its result
     """
 
+    signature: str | None = None
     name: str
     arguments: str
     tool_call_id: str | None = None
