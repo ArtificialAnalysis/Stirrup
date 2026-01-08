@@ -48,7 +48,7 @@ async def main() -> None:
     )
 
     # Run with session context - handles all tool lifecycle and logging
-    async with agent.session(resume=True) as session:
+    async with agent.session() as session:
         _finish_params, _history, _metadata = await session.run(
             """Find the current world population and calculate what 10% of it would be.
             Use the web_search tool to find the current world population, then use
