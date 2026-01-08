@@ -21,6 +21,7 @@ from stirrup.constants import (
     CONTEXT_SUMMARIZATION_CUTOFF,
     FINISH_TOOL_NAME,
 )
+from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -226,6 +227,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._pending_output_dir: Path | None = None
         self._pending_input_files: str | Path | list[str | Path] | None = None
         self._pending_skills_dir: Path | None = None
+        self._resume: bool = False
+        self._clear_cache_on_success: bool = True
 
         # Instance-scoped state (populated during __aenter__, isolated per agent instance)
         self._active_tools: dict[str, Tool] = {}
@@ -264,6 +267,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         input_files: str | Path | list[str | Path] | None = None,
         skills_dir: Path | str | None = None,
         resume: bool = False,
+        clear_cache_on_success: bool = True,
     ) -> Self:
         """Configure a session and return self for use as async context manager.
 
@@ -283,6 +287,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                    The cache is identified by hashing the init_msgs passed to run().
                    Cached state includes message history, current turn, and execution
                    environment files from a previous interrupted run.
+            clear_cache_on_success: If True (default), automatically clear the cache
+                                   when the agent completes successfully. Set to False
+                                   to preserve caches for inspection or debugging.
 
         Returns:
             Self, for use with `async with agent.session(...) as session:`
@@ -299,7 +306,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._pending_output_dir = Path(output_dir) if output_dir else None
         self._pending_input_files = input_files
         self._pending_skills_dir = Path(skills_dir) if skills_dir else None
-        self._pending_resume = resume
+        self._resume = resume
+        self._clear_cache_on_success = clear_cache_on_success
         return self
 
     def _handle_interrupt(self, _signum: int, _frame: object) -> None:
@@ -683,9 +691,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
             if should_cache:
-                from stirrup.core.cache import CacheManager
-
-                cache_manager = CacheManager()
+                cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
 
                 exec_env_dir = state.exec_env.temp_dir if state.exec_env else None
 
@@ -927,19 +933,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             ])
 
         """
-        from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 
         # Compute task hash for caching/resume
         task_hash = compute_task_hash(init_msgs)
         self._current_task_hash = task_hash
 
         # Initialize cache manager
-        cache_manager = CacheManager()
+        cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
         start_turn = 0
         resumed = False
 
         # Try to resume from cache if requested
-        if getattr(self, "_pending_resume", False):
+        if self._resume:
             state = _SESSION_STATE.get()
             cached = cache_manager.load_state(task_hash)
             if cached:
@@ -1077,7 +1082,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._last_run_metadata = run_metadata
 
         # Clear cache on successful completion (finish_params is set)
-        if finish_params is not None:
+        if finish_params is not None and cache_manager.clear_on_success:
             cache_manager.clear_cache(task_hash)
             self._current_task_hash = None
             self._current_run_state = None

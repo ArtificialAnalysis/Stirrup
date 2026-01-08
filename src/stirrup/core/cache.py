@@ -287,14 +287,22 @@ class CacheManager:
     Handles saving/loading cache state and execution environment files.
     """
 
-    def __init__(self, cache_base_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        cache_base_dir: Path | None = None,
+        clear_on_success: bool = True,
+    ) -> None:
         """Initialize CacheManager.
 
         Args:
             cache_base_dir: Base directory for cache storage.
-                           Defaults to {project_root}/.cache/
+                           Defaults to ~/.cache/stirrup/
+            clear_on_success: If True (default), automatically clear the cache when
+                             the agent completes successfully. Set to False to preserve
+                             caches for inspection or manual management.
         """
         self._cache_base_dir = cache_base_dir or DEFAULT_CACHE_DIR
+        self.clear_on_success = clear_on_success
 
     def _get_cache_dir(self, task_hash: str) -> Path:
         """Get cache directory path for a task hash."""
