@@ -28,6 +28,7 @@ __all__ = [
     "ChatMessage",
     "Content",
     "ContentBlock",
+    "EmptyParams",
     "ImageContentBlock",
     "LLMClient",
     "SubAgentMetadata",
@@ -445,11 +446,15 @@ class ToolResult[M](BaseModel):
     metadata: M | None = None
 
 
+class EmptyParams(BaseModel):
+    """Empty parameter model for tools that don't require parameters."""
+
+
 class Tool[P: BaseModel, M](BaseModel):
     """Tool definition with name, description, parameter schema, and executor function.
 
     Generic over:
-        P: Parameter model type (must be a Pydantic BaseModel, or None for parameterless tools)
+        P: Parameter model type (Pydantic BaseModel subclass, or EmptyParams for parameterless tools)
         M: Metadata type (should implement Addable for aggregation; use None for tools without metadata)
 
     Tools are simple, stateless callables. For tools requiring lifecycle management
@@ -468,9 +473,9 @@ class Tool[P: BaseModel, M](BaseModel):
         )
         ```
 
-    Example without parameters:
+    Example without parameters (uses EmptyParams by default):
         ```python
-        time_tool = Tool[None, None](
+        time_tool = Tool[EmptyParams, None](
             name="time",
             description="Get current time",
             executor=lambda _: ToolResult(content=datetime.now().isoformat()),
@@ -480,7 +485,7 @@ class Tool[P: BaseModel, M](BaseModel):
 
     name: str
     description: str
-    parameters: type[P] | None = None
+    parameters: type[P] = EmptyParams  # type: ignore[assignment]
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
 
 

@@ -699,10 +699,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         if tool:
             try:
-                # Parse parameters if the tool has them, otherwise use None
-                params = (
-                    tool.parameters.model_validate_json(tool_call.arguments) if tool.parameters is not None else None
-                )
+                params = tool.parameters.model_validate_json(tool_call.arguments)
 
                 # Set parent depth for sub-agent tools to read
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)

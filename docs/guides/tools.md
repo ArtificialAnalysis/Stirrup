@@ -10,7 +10,7 @@ A `Tool` consists of four parts:
 |-----------|------|-------------|
 | `name` | `str` | Unique identifier for the tool |
 | `description` | `str` | What the tool does (shown to the LLM) |
-| `parameters` | `type[BaseModel]` | Pydantic model defining input schema |
+| `parameters` | `type[BaseModel]` | Pydantic model defining input schema (defaults to `EmptyParams`) |
 | `executor` | `Callable` | Function that executes the tool |
 
 ## Basic Example
@@ -78,6 +78,33 @@ from typing import Annotated
 class CalculateParams(BaseModel):
     expression: Annotated[str, Field(description="Mathematical expression")]
     precision: Annotated[int, Field(default=2, ge=0, le=10, description="Decimal places")]
+```
+
+### Parameterless Tools
+
+For tools that don't require any parameters, use `EmptyParams`:
+
+```python
+from stirrup import Tool, ToolResult, ToolUseCountMetadata, EmptyParams
+
+TIME_TOOL = Tool[EmptyParams, ToolUseCountMetadata](
+    name="get_time",
+    description="Get the current time",
+    executor=lambda _: ToolResult(
+        content=datetime.now().isoformat(),
+        metadata=ToolUseCountMetadata(),
+    ),
+)
+```
+
+Since `parameters` defaults to `EmptyParams`, you can also omit it:
+
+```python
+TIME_TOOL = Tool(
+    name="get_time",
+    description="Get the current time",
+    executor=lambda _: ToolResult(content=datetime.now().isoformat()),
+)
 ```
 
 ## Sync vs Async Executors
