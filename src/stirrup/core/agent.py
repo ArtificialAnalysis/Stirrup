@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import re
+import signal
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
@@ -262,6 +263,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         output_dir: Path | str | None = None,
         input_files: str | Path | list[str | Path] | None = None,
         skills_dir: Path | str | None = None,
+        resume: bool = False,
     ) -> Self:
         """Configure a session and return self for use as async context manager.
 
@@ -277,6 +279,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             skills_dir: Directory containing skill definitions to load and make available
                        to the agent. Skills are uploaded to the execution environment
                        and their metadata is included in the system prompt.
+            resume: If True, attempt to resume from cached state if available.
+                   The cache is identified by hashing the init_msgs passed to run().
+                   Cached state includes message history, current turn, and execution
+                   environment files from a previous interrupted run.
 
         Returns:
             Self, for use with `async with agent.session(...) as session:`
@@ -293,7 +299,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._pending_output_dir = Path(output_dir) if output_dir else None
         self._pending_input_files = input_files
         self._pending_skills_dir = Path(skills_dir) if skills_dir else None
+        self._pending_resume = resume
         return self
+
+    def _handle_interrupt(self, _signum: int, _frame: object) -> None:
+        """Handle SIGINT to ensure caching before exit.
+
+        Converts the signal to a KeyboardInterrupt exception so that __aexit__
+        is properly called and can cache the state before cleanup.
+        """
+        raise KeyboardInterrupt("Agent interrupted - state will be cached")
 
     def _resolve_input_files(self, input_files: str | Path | list[str | Path]) -> list[Path]:
         """Resolve input file paths, expanding globs and normalizing to Path objects.
@@ -621,6 +636,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             # depth is already set (0 for main agent, passed in for sub-agents)
             self._logger.__enter__()
 
+            # Set up signal handler for graceful caching on interrupt (root agent only)
+            if current_depth == 0:
+                self._original_sigint = signal.getsignal(signal.SIGINT)
+                signal.signal(signal.SIGINT, self._handle_interrupt)
+
             return self
 
         except Exception:
@@ -642,6 +662,49 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         state = _SESSION_STATE.get()
 
         try:
+            # Cache state on non-success exit (only at root level)
+            should_cache = (
+                state.depth == 0
+                and (exc_type is not None or self._last_finish_params is None)
+                and getattr(self, "_current_task_hash", None)
+                and getattr(self, "_current_run_state", None)
+            )
+
+            logger.debug(
+                "[%s __aexit__] Cache decision: should_cache=%s, depth=%d, exc_type=%s, "
+                "finish_params=%s, task_hash=%s, run_state=%s",
+                self._name,
+                should_cache,
+                state.depth,
+                exc_type,
+                self._last_finish_params is not None,
+                getattr(self, "_current_task_hash", None),
+                getattr(self, "_current_run_state", None) is not None,
+            )
+
+            if should_cache:
+                from stirrup.core.cache import CacheManager
+
+                cache_manager = CacheManager()
+
+                exec_env_dir = state.exec_env.temp_dir if state.exec_env else None
+
+                # Type narrowing: should_cache guarantees these are not None
+                assert self._current_task_hash is not None
+                assert self._current_run_state is not None
+
+                # Temporarily block SIGINT during cache save to prevent interruption
+                original_handler = signal.getsignal(signal.SIGINT)
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+                try:
+                    cache_manager.save_state(
+                        self._current_task_hash,
+                        self._current_run_state,
+                        exec_env_dir,
+                    )
+                finally:
+                    signal.signal(signal.SIGINT, original_handler)
+                self._logger.info(f"Cached state for task {self._current_task_hash}")
             # Save files from finish_params.paths based on depth
             if state.output_dir and self._last_finish_params and state.exec_env:
                 paths = getattr(self._last_finish_params, "paths", None)
@@ -696,6 +759,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                 state.depth,
                             )
         finally:
+            # Restore original signal handler (root agent only)
+            if hasattr(self, "_original_sigint"):
+                signal.signal(signal.SIGINT, self._original_sigint)
+                del self._original_sigint
+
             # Exit logger context
             self._logger.finish_params = self._last_finish_params
             self._logger.run_metadata = self._last_run_metadata
@@ -859,23 +927,60 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             ])
 
         """
-        msgs: list[ChatMessage] = []
+        from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 
-        # Build the complete system prompt (base + input files + user instructions)
-        full_system_prompt = self._build_system_prompt()
-        msgs.append(SystemMessage(content=full_system_prompt))
+        # Compute task hash for caching/resume
+        task_hash = compute_task_hash(init_msgs)
+        self._current_task_hash = task_hash
 
-        if isinstance(init_msgs, str):
-            msgs.append(UserMessage(content=init_msgs))
-        else:
-            msgs.extend(init_msgs)
+        # Initialize cache manager
+        cache_manager = CacheManager()
+        start_turn = 0
+        resumed = False
+
+        # Try to resume from cache if requested
+        if getattr(self, "_pending_resume", False):
+            state = _SESSION_STATE.get()
+            cached = cache_manager.load_state(task_hash)
+            if cached:
+                # Restore files to exec env
+                if state.exec_env and state.exec_env.temp_dir:
+                    cache_manager.restore_files(task_hash, state.exec_env.temp_dir)
+
+                # Restore state
+                msgs = cached.msgs
+                full_msg_history = cached.full_msg_history
+                run_metadata = cached.run_metadata
+                start_turn = cached.turn
+                resumed = True
+                self._logger.info(f"Resuming from cached state at turn {start_turn}")
+            else:
+                self._logger.info(f"No cache found for task {task_hash}, starting fresh")
+
+        if not resumed:
+            msgs: list[ChatMessage] = []
+
+            # Build the complete system prompt (base + input files + user instructions)
+            full_system_prompt = self._build_system_prompt()
+            msgs.append(SystemMessage(content=full_system_prompt))
+
+            if isinstance(init_msgs, str):
+                msgs.append(UserMessage(content=init_msgs))
+            else:
+                msgs.extend(init_msgs)
+
+            # Local metadata storage - isolated per run() invocation for thread safety
+            run_metadata: dict[str, list[Any]] = {}
+
+            full_msg_history: list[list[ChatMessage]] = []
 
         # Set logger depth if provided (for sub-agent runs)
         if depth is not None:
             self._logger.depth = depth
 
-        # Log the task at run start
-        self._logger.task_message(msgs[-1].content)
+        # Log the task at run start (only if not resuming)
+        if not resumed:
+            self._logger.task_message(msgs[-1].content)
 
         # Show warnings (top-level only, if logger supports it)
         if self._logger.depth == 0 and isinstance(self._logger, AgentLogger):
@@ -886,9 +991,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Use logger callback if available and not overridden
         step_callback = self._logger.on_step
 
-        # Local metadata storage - isolated per run() invocation for thread safety
-        run_metadata: dict[str, list[Any]] = {}
-
         full_msg_history: list[list[ChatMessage]] = []
         finish_params: FinishParams | None = None
 
@@ -897,7 +999,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         total_input_tokens = 0
         total_output_tokens = 0
 
-        for i in range(self._max_turns):
+        for i in range(start_turn, self._max_turns):
+            # Capture current state for potential caching (before any async work)
+            self._current_run_state = CacheState(
+                msgs=list(msgs),
+                full_msg_history=[list(group) for group in full_msg_history],
+                turn=i,
+                run_metadata=dict(run_metadata),
+                task_hash=task_hash,
+                agent_name=self._name,
+            )
             if self._max_turns - i <= 30 and i != 0:
                 num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - i)
                 msgs.append(num_turns_remaining_msg)
@@ -964,6 +1075,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Store for __aexit__ to access (on instance for this agent)
         self._last_finish_params = finish_params
         self._last_run_metadata = run_metadata
+
+        # Clear cache on successful completion (finish_params is set)
+        if finish_params is not None:
+            cache_manager.clear_cache(task_hash)
+            self._current_task_hash = None
+            self._current_run_state = None
 
         return finish_params, full_msg_history, run_metadata
 
