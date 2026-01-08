@@ -236,6 +236,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._last_run_metadata: dict[str, list[Any]] = {}
         self._transferred_paths: list[str] = []  # Paths transferred to parent (for subagents)
 
+        # Cache state for resumption (set during run(), used in __aexit__ for caching on interrupt)
+        self._current_task_hash: str | None = None
+        self._current_run_state: CacheState | None = None
+
     @property
     def name(self) -> str:
         """The name of this agent."""
@@ -674,8 +678,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             should_cache = (
                 state.depth == 0
                 and (exc_type is not None or self._last_finish_params is None)
-                and getattr(self, "_current_task_hash", None)
-                and getattr(self, "_current_run_state", None)
+                and self._current_task_hash is not None
+                and self._current_run_state is not None
             )
 
             logger.debug(
@@ -686,8 +690,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 state.depth,
                 exc_type,
                 self._last_finish_params is not None,
-                getattr(self, "_current_task_hash", None),
-                getattr(self, "_current_run_state", None) is not None,
+                self._current_task_hash,
+                self._current_run_state is not None,
             )
 
             if should_cache:
@@ -695,9 +699,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
                 exec_env_dir = state.exec_env.temp_dir if state.exec_env else None
 
-                # Type narrowing: should_cache guarantees these are not None
-                assert self._current_task_hash is not None
-                assert self._current_run_state is not None
+                # Explicit checks to keep type checker happy - should_cache condition guarantees these
+                if self._current_task_hash is None or self._current_run_state is None:
+                    raise ValueError("Cache state is unexpectedly None after should_cache check")
 
                 # Temporarily block SIGINT during cache save to prevent interruption
                 original_handler = signal.getsignal(signal.SIGINT)
