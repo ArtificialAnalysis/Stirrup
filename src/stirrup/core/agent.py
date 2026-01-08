@@ -72,6 +72,7 @@ class SessionState:
     depth: int = 0
     uploaded_file_paths: list[str] = field(default_factory=list)  # Paths of files uploaded to exec_env
     skills_metadata: list[SkillMetadata] = field(default_factory=list)  # Loaded skills metadata
+    logger: AgentLoggerBase | None = None  # Logger for pause/resume during user input
 
 
 _SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("session_state")
@@ -410,6 +411,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Base prompt with max_turns
         parts.append(BASE_SYSTEM_PROMPT_TEMPLATE.format(max_turns=self._max_turns))
 
+        # User interaction guidance based on whether user_input tool is available
+        if "user_input" in self._active_tools:
+            parts.append(
+                " You have access to the user_input tool which allows you to ask the user "
+                "questions when you need clarification or are uncertain about something."
+            )
+        else:
+            parts.append(" You are not able to interact with the user during the task.")
+
         # Input files section (if any were uploaded)
         state = _SESSION_STATE.get(None)
         if state and state.uploaded_file_paths:
@@ -514,6 +524,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             output_dir=str(self._pending_output_dir) if self._pending_output_dir else None,
             parent_exec_env=parent_state.exec_env if parent_state else None,
             depth=current_depth,
+            logger=self._logger,
         )
         _SESSION_STATE.set(state)
 

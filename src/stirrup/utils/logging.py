@@ -27,6 +27,7 @@ from stirrup.core.models import AssistantMessage, ToolMessage, UserMessage, _agg
 __all__ = [
     "AgentLogger",
     "AgentLoggerBase",
+    "console",
 ]
 
 # Shared console instance
@@ -246,6 +247,12 @@ class AgentLoggerBase(ABC):
     def error(self, message: str, *args: object) -> None:
         """Log an error message."""
         ...
+
+    def pause_live(self) -> None:  # noqa: B027
+        """Pause live display (e.g., spinner) before user interaction."""
+
+    def resume_live(self) -> None:  # noqa: B027
+        """Resume live display after user interaction."""
 
 
 class AgentLogger(AgentLoggerBase):
@@ -654,6 +661,23 @@ class AgentLogger(AgentLoggerBase):
         self._output_tokens = output_tokens
         if self._live:
             self._live.update(self._make_spinner())
+
+    def pause_live(self) -> None:
+        """Pause the live spinner display.
+
+        Call this before prompting for user input to prevent the spinner
+        from interfering with the input prompt.
+        """
+        if self._live is not None:
+            self._live.stop()
+
+    def resume_live(self) -> None:
+        """Resume the live spinner display.
+
+        Call this after user input is complete to restart the spinner.
+        """
+        if self._live is not None:
+            self._live.start()
 
     def set_level(self, level: int) -> None:
         """Set the logging level."""

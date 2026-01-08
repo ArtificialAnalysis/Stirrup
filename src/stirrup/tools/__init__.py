@@ -55,6 +55,7 @@ from stirrup.core.models import Tool, ToolProvider
 from stirrup.tools.calculator import CALCULATOR_TOOL
 from stirrup.tools.code_backends import CodeExecToolProvider, LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
+from stirrup.tools.user_input import USER_INPUT_TOOL
 from stirrup.tools.view_image import ViewImageToolProvider
 from stirrup.tools.web import WebToolProvider
 
@@ -69,6 +70,7 @@ __all__ = [
     "CALCULATOR_TOOL",
     "DEFAULT_TOOLS",
     "SIMPLE_FINISH_TOOL",
+    "USER_INPUT_TOOL",
     "CodeExecToolProvider",
     "FinishParams",
     "LocalCodeExecToolProvider",
