@@ -122,7 +122,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         if self._temp_base_dir:
             self._temp_base_dir.mkdir(parents=True, exist_ok=True)
         self._temp_dir = Path(tempfile.mkdtemp(prefix="local_exec_env_", dir=self._temp_base_dir))
-        logger.info("Created local execution environment temp directory: %s", self._temp_dir)
+        logger.debug("Created local execution environment temp directory: %s", self._temp_dir)
         return self.get_code_exec_tool(description=self._description)
 
     async def __aexit__(
@@ -359,7 +359,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
 
                 # Move file (overwrites if exists)
                 shutil.move(str(source_path), str(dest_path))
-                logger.info("Moved file: %s -> %s", source_path, dest_path)
+                logger.debug("Moved file: %s -> %s", source_path, dest_path)
 
                 result.saved.append(
                     SavedFile(
