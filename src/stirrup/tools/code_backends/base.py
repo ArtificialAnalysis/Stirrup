@@ -160,6 +160,11 @@ class CodeExecToolProvider(ToolProvider, ABC):
         if allowed_commands is not None:
             self._compiled_allowed = [re.compile(p) for p in allowed_commands]
 
+    @property
+    def temp_dir(self) -> Path | None:
+        """Return the temporary directory for this execution environment, if any."""
+        return None
+
     def _check_allowed(self, cmd: str) -> bool:
         """Check if command is allowed based on the allowlist.
 
