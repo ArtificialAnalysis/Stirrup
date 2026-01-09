@@ -140,6 +140,10 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
                     tool_dict = tool.model_dump()
                     tool_dict["id"] = tool.tool_call_id
                     tool_dict["type"] = "function"
+                    if tool.signature is not None:
+                        tool_dict["provider_specific_fields"] = {
+                            "thought_signature": tool.signature,
+                        }
                     tool_dict["function"] = {
                         "name": tool.name,
                         "arguments": tool.arguments,

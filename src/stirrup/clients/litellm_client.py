@@ -7,7 +7,7 @@ Requires the litellm extra: `pip install stirrup[litellm]`
 """
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 try:
     from litellm import acompletion
@@ -38,6 +38,7 @@ __all__ = [
 
 LOGGER = logging.getLogger(__name__)
 
+type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "default"]
 
 class LiteLLMClient(LLMClient):
     """LiteLLM-based client supporting multiple LLM providers with unified interface.
@@ -50,7 +51,7 @@ class LiteLLMClient(LLMClient):
         model_slug: str,
         max_tokens: int,
         api_key: str | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Initialize LiteLLM client with model configuration and capabilities.
@@ -63,7 +64,7 @@ class LiteLLMClient(LLMClient):
         """
         self._model_slug = model_slug
         self._max_tokens = max_tokens
-        self._reasoning_effort = reasoning_effort
+        self._reasoning_effort: ReasoningEffort | None = reasoning_effort
         self._api_key = api_key
         self._kwargs = kwargs or {}
 
@@ -90,7 +91,7 @@ class LiteLLMClient(LLMClient):
             tools=to_openai_tools(tools) if tools else None,
             tool_choice="auto" if tools else None,
             max_tokens=self._max_tokens,
-            reasoning_effort=self._reasoning_effort,
+            reasoning_effort= self._reasoning_effort,
             api_key=self._api_key,
             **self._kwargs,
         )
@@ -103,7 +104,6 @@ class LiteLLMClient(LLMClient):
             )
 
         msg = choice["message"]
-
         reasoning: Reasoning | None = None
         if getattr(msg, "reasoning_content", None) is not None:
             reasoning = Reasoning(content=msg.reasoning_content)
@@ -126,6 +126,7 @@ class LiteLLMClient(LLMClient):
                 tool_call_id=tc.get("id"),
                 name=tc["function"]["name"],
                 arguments=tc["function"].get("arguments", "") or "",
+                signature=tc.get("provider_specific_fields", {}).get("thought_signature", None),
             )
             for tc in (msg.get("tool_calls") or [])
         ]
