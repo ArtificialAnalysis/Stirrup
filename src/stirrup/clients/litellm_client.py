@@ -40,6 +40,7 @@ LOGGER = logging.getLogger(__name__)
 
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "default"]
 
+
 class LiteLLMClient(LLMClient):
     """LiteLLM-based client supporting multiple LLM providers with unified interface.
 
@@ -91,7 +92,7 @@ class LiteLLMClient(LLMClient):
             tools=to_openai_tools(tools) if tools else None,
             tool_choice="auto" if tools else None,
             max_tokens=self._max_tokens,
-            reasoning_effort= self._reasoning_effort,
+            reasoning_effort=self._reasoning_effort,
             api_key=self._api_key,
             **self._kwargs,
         )
