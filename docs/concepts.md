@@ -128,6 +128,7 @@ The `session()` method returns the agent configured as an async context manager.
 
 - Tool lifecycle (setup and teardown of ToolProviders)
 - File uploads to execution environment
+- Skills loading and system prompt addition
 - Output file saving
 - Logging
 
@@ -135,6 +136,7 @@ The `session()` method returns the agent configured as an async context manager.
 async with agent.session(
     output_dir="./output",           # Where to save output files
     input_files=["data.csv"],        # Files to upload
+    skills_dir="skills",             # Directory containing skills
 ) as session:
     result = await session.run("Your task")
 ```
@@ -173,6 +175,22 @@ async with agent.session(output_dir="./results") as session:
 ```
 
 The agent signals which files to save by including their paths in `finish_params.paths` when calling the finish tool.
+
+### Loading Skills
+
+Skills are modular packages that extend agent capabilities with domain-specific instructions and scripts. Pass a skills directory to make them available:
+
+```python
+async with agent.session(
+    skills_dir="skills",
+    output_dir="./output",
+) as session:
+    await session.run("Analyze the data using the data_analysis skill")
+```
+
+The agent receives a list of available skills in its system prompt and can read the full instructions via `cat skills/<skill_name>/SKILL.md`.
+
+→ See [Skills Guide](guides/skills.md) for full documentation.
 
 ## Client
 

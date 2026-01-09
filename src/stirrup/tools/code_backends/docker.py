@@ -330,7 +330,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             context_path = self._dockerfile_context.resolve() if self._dockerfile_context else dockerfile_path.parent
 
             # Generate unique tag based on dockerfile path
-            tag = f"agent001-exec-env-{hashlib.md5(str(dockerfile_path).encode()).hexdigest()[:8]}"
+            tag = f"stirrup-exec-env-{hashlib.md5(str(dockerfile_path).encode()).hexdigest()[:8]}"
 
             logger.info("Building image from %s with tag %s", dockerfile_path, tag)
 
@@ -710,8 +710,20 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                     logger.debug("Uploaded file: %s -> %s", source, container_path)
 
                 elif source.is_dir():
-                    dest = dest_base / source.name
-                    shutil.copytree(source, dest, dirs_exist_ok=True)
+                    # If dest_dir was explicitly provided, copy contents directly to dest_base
+                    # Otherwise, create a subdirectory with the source's name
+                    if dest_dir:
+                        dest = dest_base
+                        # Copy contents of source directory into dest_base
+                        for item in source.iterdir():
+                            item_dest = dest / item.name
+                            if item.is_file():
+                                shutil.copy2(item, item_dest)
+                            else:
+                                shutil.copytree(item, item_dest, dirs_exist_ok=True)
+                    else:
+                        dest = dest_base / source.name
+                        shutil.copytree(source, dest, dirs_exist_ok=True)
                     # Track all individual files uploaded
                     for file_path in source.rglob("*"):
                         if file_path.is_file():
@@ -725,7 +737,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                                     size=file_path.stat().st_size,
                                 ),
                             )
-                    logger.debug("Uploaded directory: %s -> %s/%s", source, self._working_dir, source.name)
+                    logger.debug("Uploaded directory: %s -> %s", source, dest)
 
             except Exception as exc:
                 result.failed[str(source)] = str(exc)
