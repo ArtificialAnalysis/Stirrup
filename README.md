@@ -25,16 +25,16 @@ Stirrup is a lightweight framework, or starting point template, for building age
 
 ## Features
 
-- **Essential tools built-in:**
-  - Online search / web browsing
-  - Code execution (local, Docker container, E2B sandbox)
-  - MCP client
-  - Document input and output
-- **Skills system:** Extend agent capabilities with modular, domain-specific instruction packages
-- **Flexible tool execution:** A generic `Tool` class allows easy tool definition and extension
-- **Context management:** Automatically summarizes conversation history when approaching context limits
-- **Flexible provider support:** Pre-built support for OpenAI-compatible APIs and LiteLLM, or bring your own client
-- **Multimodal support:** Process images, video, and audio with automatic format conversion
+- 🧪 **Code execution:** Run code locally, in Docker, or in an E2B sandbox
+- 🔎 **Online search / web browsing:** Search and fetch web pages
+- 🔌 **MCP client support:** Connect to MCP servers and use their tools/resources
+- 📄 **Document input and output:** Import files into context and produce file outputs
+- 🧩 **Skills system:** Extend agents with modular, domain-specific instruction packages
+- 🛠️ **Flexible tool execution:** A generic `Tool` interface allows easy tool definition
+- 👤 **Human-in-the-loop:** Includes a built-in user input tool that enables human feedback or clarification during agent execution
+- 🧠 **Context management:** Automatically summarizes conversation history when approaching context limits
+- 🔁 **Flexible provider support:** Pre-built support for OpenAI-compatible APIs, LiteLLM, or bring your own client
+- 🖼️ **Multimodal support:** Process images, video, and audio with automatic format conversion
 
 ## Installation
 
