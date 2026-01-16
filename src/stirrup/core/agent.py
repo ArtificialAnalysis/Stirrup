@@ -655,6 +655,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     state.skills_metadata = load_skills_metadata(skills_path)
                     logger.debug("[%s __aenter__] Loaded %d skills", self._name, len(state.skills_metadata))
                 self._pending_skills_dir = None  # Clear pending state
+            elif parent_state and parent_state.skills_metadata:
+                # Sub-agent: inherit skills from parent
+                state.skills_metadata = parent_state.skills_metadata
+                logger.debug("[%s __aenter__] Inherited %d skills from parent", self._name, len(state.skills_metadata))
+                # Transfer skills directory from parent's exec_env to sub-agent's exec_env
+                if state.exec_env and parent_state.exec_env:
+                    await state.exec_env.upload_files("skills", source_env=parent_state.exec_env)
 
             # Configure and enter logger context
             self._logger.name = self._name
