@@ -23,6 +23,7 @@ from rich.text import Text
 from rich.tree import Tree
 
 from stirrup.core.models import AssistantMessage, ToolMessage, UserMessage, _aggregate_list, aggregate_metadata
+from stirrup.utils.text import truncate_msg
 
 __all__ = [
     "AgentLogger",
@@ -875,9 +876,8 @@ class AgentLogger(AgentLoggerBase):
         # Unescape HTML entities (e.g., &lt; -> <, &gt; -> >, &amp; -> &)
         result_text = html.unescape(result_text)
 
-        # Truncate long results
-        if len(result_text) > 1000:
-            result_text = result_text[:1000] + "..."
+        # Truncate long results (keeps start and end, removes middle)
+        result_text = truncate_msg(result_text, 1000)
 
         # Format as XML with syntax highlighting
         content = Syntax(result_text, "xml", theme="monokai", word_wrap=True)
