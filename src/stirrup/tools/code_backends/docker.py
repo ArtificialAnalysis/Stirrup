@@ -486,6 +486,25 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         host_path.parent.mkdir(parents=True, exist_ok=True)
         host_path.write_bytes(content)
 
+    async def file_exists(self, path: str) -> bool:
+        """Check if a file exists in the container.
+
+        Since files are volume-mounted, checks directly on the host temp directory.
+
+        Args:
+            path: File path (relative or absolute container path).
+
+        Returns:
+            True if the file exists, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside mounted directory.
+
+        """
+        host_path = self._container_path_to_host(path)
+        return host_path.exists() and host_path.is_file()
+
     async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         """Execute a shell command in the Docker container.
 
