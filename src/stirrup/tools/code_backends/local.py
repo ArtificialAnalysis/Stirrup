@@ -205,6 +205,23 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(content)
 
+    async def file_exists(self, path: str) -> bool:
+        """Check if a file exists in the temp directory.
+
+        Args:
+            path: File path (relative or absolute within the temp dir).
+
+        Returns:
+            True if the file exists, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        return resolved.exists() and resolved.is_file()
+
     async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         """Execute command in the temp directory.
 

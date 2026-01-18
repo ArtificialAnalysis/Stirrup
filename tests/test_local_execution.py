@@ -117,3 +117,21 @@ class TestLocalCodeExecToolProvider:
             # Test failure case - non-existent file
             result = await provider.upload_files(Path("/nonexistent/file.txt"))
             assert len(result.failed) == 1
+
+    async def test_file_exists(self) -> None:
+        """Test file_exists method."""
+        provider = LocalCodeExecToolProvider()
+
+        async with provider as _:
+            # Create a file
+            await provider.run_command("echo 'test' > exists.txt")
+
+            # File should exist
+            assert await provider.file_exists("exists.txt") is True
+
+            # Non-existent file should return False
+            assert await provider.file_exists("nonexistent.txt") is False
+
+            # Directory should return False (only files)
+            await provider.run_command("mkdir testdir")
+            assert await provider.file_exists("testdir") is False

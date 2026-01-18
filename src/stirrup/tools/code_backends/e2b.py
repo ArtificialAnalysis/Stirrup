@@ -132,6 +132,24 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
 
         await self._sbx.files.write(path, content, request_timeout=self._request_timeout)
 
+    async def file_exists(self, path: str) -> bool:
+        """Check if a file exists in the E2B sandbox.
+
+        Args:
+            path: File path within the sandbox.
+
+        Returns:
+            True if the file exists, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+
+        """
+        if self._sbx is None:
+            raise RuntimeError("ExecutionEnvironment not started.")
+
+        return await self._sbx.files.exists(path)
+
     async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         """Execute command in E2B execution environment, returning raw CommandResult."""
         if self._sbx is None:

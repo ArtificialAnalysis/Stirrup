@@ -228,6 +228,23 @@ class CodeExecToolProvider(ToolProvider, ABC):
         """
         ...
 
+    @abstractmethod
+    async def file_exists(self, path: str) -> bool:
+        """Check if a file exists in this execution environment.
+
+        Args:
+            path: File path within this execution environment (relative or absolute
+                  within the env's working directory).
+
+        Returns:
+            True if the file exists, False otherwise.
+
+        Raises:
+            RuntimeError: If execution environment not started.
+
+        """
+        ...
+
     async def save_output_files(
         self,
         paths: list[str],

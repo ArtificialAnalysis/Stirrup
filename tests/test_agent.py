@@ -343,3 +343,56 @@ async def test_agent_finish_tool_validation() -> None:
     assert finish_params is not None
     assert finish_params.reason == "Task done"
     assert finish_params.status == "complete"
+
+
+async def test_finish_tool_validates_file_paths() -> None:
+    """Test that SIMPLE_FINISH_TOOL rejects non-existent file paths."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    # Create mock responses
+    responses = [
+        # First: finish with non-existent file path
+        AssistantMessage(
+            content="Finishing with fake file",
+            tool_calls=[
+                ToolCall(
+                    name=FINISH_TOOL_NAME,
+                    arguments='{"reason": "Done", "paths": ["nonexistent.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+        # Second: finish with empty paths (should succeed)
+        AssistantMessage(
+            content="Finishing properly",
+            tool_calls=[
+                ToolCall(
+                    name=FINISH_TOOL_NAME,
+                    arguments='{"reason": "Actually done", "paths": []}',
+                    tool_call_id="call_2",
+                )
+            ],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[LocalCodeExecToolProvider()],
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    # Agent should have taken 2 turns (failed finish + successful finish)
+    assert client.call_count == 2
+    assert finish_params is not None
+    assert finish_params.reason == "Actually done"
+
+    # First finish should have failed with error about missing file
+    tool_messages = [msg for group in history for msg in group if isinstance(msg, ToolMessage)]
+    assert any("nonexistent.txt" in str(msg.content) and not msg.success for msg in tool_messages)
