@@ -97,6 +97,7 @@ nav:
           - Exceptions: api/core/exceptions.md
       - Clients:
           - ChatCompletions: api/clients/chat_completions.md
+          - OpenResponses: api/clients/open_responses.md
           - LiteLLM: api/clients/litellm.md
       - Tools:
           - Overview: api/tools/index.md
