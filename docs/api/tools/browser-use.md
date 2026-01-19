@@ -30,21 +30,7 @@ Get your API key from the [Browser Use Cloud dashboard](https://cloud.browser-us
 ## Quick Start
 
 ```python
-from stirrup import Agent
-from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
-from stirrup.tools.browser_use import BrowserUseToolProvider
-
-client = ChatCompletionsClient(model="gpt-4o")
-
-agent = Agent(
-    client=client,
-    name="browser_agent",
-    tools=[*DEFAULT_TOOLS, BrowserUseToolProvider(headless=False)],
-)
-
-async with agent.session() as session:
-    await session.run("Go to example.com and click the first link")
+--8<-- "examples/browser_use_example.py:main"
 ```
 
 ## Available Tools
