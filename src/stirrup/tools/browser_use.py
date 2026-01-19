@@ -17,9 +17,12 @@ Example usage:
     async with agent.session() as session:
         await session.run("Go to google.com and search for 'AI agents'")
 
-Requires browser-use dependency (included by default).
+Requires browser-use dependency (`uv add 'stirrup[browser]'`).
 """
 
+import asyncio
+import os
+import urllib.parse
 from types import TracebackType
 from typing import Annotated, Any, Literal
 
@@ -236,6 +239,11 @@ class BrowserUseToolProvider(ToolProvider):
 
     async def __aenter__(self) -> list[Tool[Any, Any]]:
         """Enter async context: start browser and return tools."""
+        if self._use_cloud and not os.environ.get("BROWSER_USE_API_KEY"):
+            raise ValueError(
+                "BROWSER_USE_API_KEY environment variable is required when use_cloud=True. "
+                "Get your API key from https://cloud.browser-use.com"
+            )
         self._session = BrowserSession(  # type: ignore[call-overload]
             headless=self._headless,
             disable_security=self._disable_security,
@@ -270,7 +278,6 @@ class BrowserUseToolProvider(ToolProvider):
 
         async def search_executor(params: SearchParams) -> ToolResult[SearchMetadata]:
             """Search the web using specified search engine."""
-            import urllib.parse
 
             search_urls = {
                 "google": f"https://www.google.com/search?q={urllib.parse.quote_plus(params.query)}&udm=14",
@@ -332,7 +339,6 @@ class BrowserUseToolProvider(ToolProvider):
 
         async def wait_executor(params: WaitParams) -> ToolResult[ToolUseCountMetadata]:
             """Wait for specified seconds."""
-            import asyncio
 
             wait_time = min(max(params.seconds, 1), 30)
             await asyncio.sleep(wait_time)
