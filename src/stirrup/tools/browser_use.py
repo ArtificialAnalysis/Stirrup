@@ -25,7 +25,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from stirrup.core.models import ImageContentBlock, Tool, ToolProvider, ToolResult, ToolUseCountMetadata
+from stirrup.core.models import EmptyParams, ImageContentBlock, Tool, ToolProvider, ToolResult, ToolUseCountMetadata
 
 try:
     from browser_use import BrowserSession
@@ -125,10 +125,6 @@ class WaitParams(BaseModel):
     """Parameters for waiting."""
 
     seconds: Annotated[int, Field(default=3, description="Seconds to wait (max 30)")] = 3
-
-
-class EmptyParams(BaseModel):
-    """Empty parameters for tools that don't need any."""
 
 
 # =============================================================================
