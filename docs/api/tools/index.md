@@ -30,5 +30,6 @@ Tool providers for lifecycle-managed tools:
 
 - [Web Tools](web.md) - `WebToolProvider` for web fetch and search
 - [Code Execution](code_backends.md) - `LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`, `E2BCodeExecToolProvider`
+- [Browser Use](browser-use.md) - `BrowserUseToolProvider` for browser automation
 - [MCP](mcp.md) - `MCPToolProvider` for MCP server integration
 - [View Image](view-image.md) - `ViewImageToolProvider` for viewing images

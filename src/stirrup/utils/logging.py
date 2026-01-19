@@ -769,11 +769,12 @@ class AgentLogger(AgentLoggerBase):
                 content.append("\n\n")
             content.append("Tool Calls:\n", style="bold magenta")
             for tc in assistant_message.tool_calls:
-                args_parsed = json.loads(tc.arguments)
-                args_formatted = json.dumps(args_parsed, indent=2, ensure_ascii=False)
-                args_preview = args_formatted[:1000] + "..." if len(args_formatted) > 1000 else args_formatted
                 content.append(f"  🔧 {tc.name}", style="magenta")
-                content.append(args_preview, style="dim")
+                if tc.arguments and tc.arguments.strip():
+                    args_parsed = json.loads(tc.arguments)
+                    args_formatted = json.dumps(args_parsed, indent=2, ensure_ascii=False)
+                    args_preview = args_formatted[:1000] + "..." if len(args_formatted) > 1000 else args_formatted
+                    content.append(args_preview, style="dim")
 
         # Create and print panel with agent name in title
         title = f"[bold]AssistantMessage[/bold] │ {self.name} │ Turn {turn}/{max_turns}"

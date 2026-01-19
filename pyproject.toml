@@ -24,6 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "anyio>=4.0.0",
+    "browser-use>=0.11.3",
     "filetype>=1.0.0",
     "httpx>=0.20.0",
     "json-schema-to-pydantic>=0.2.0",

@@ -47,6 +47,7 @@ Optional tool providers require explicit imports from their submodules:
 - DockerCodeExecToolProvider: `from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider`
 - E2BCodeExecToolProvider: `from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider`
 - MCPToolProvider: `from stirrup.tools.mcp import MCPToolProvider`
+- BrowserUseToolProvider: `from stirrup.tools.browser_use import BrowserUseToolProvider`
 """
 
 from typing import Any
