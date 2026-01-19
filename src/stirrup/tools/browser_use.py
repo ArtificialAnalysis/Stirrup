@@ -40,9 +40,7 @@ try:
         TypeTextEvent,
     )
 except ImportError as e:
-    raise ImportError(
-        "browser-use package is required. Install with: pip install browser-use"
-    ) from e
+    raise ImportError("browser-use package is required. Install with: pip install browser-use") from e
 
 
 __all__ = ["BrowserUseToolProvider"]
@@ -266,12 +264,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="search"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("search"),
-            description="Search the web using Google, DuckDuckGo, or Bing.",
-            parameters=SearchParams,
-            executor=search_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("search"),
+                description="Search the web using Google, DuckDuckGo, or Bing.",
+                parameters=SearchParams,
+                executor=search_executor,
+            )
+        )
 
         async def navigate_executor(params: NavigateParams) -> ToolResult[BrowserActionMetadata]:
             """Navigate to a URL."""
@@ -282,12 +282,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="navigate"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("navigate"),
-            description="Navigate to a URL. Optionally open in a new tab.",
-            parameters=NavigateParams,
-            executor=navigate_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("navigate"),
+                description="Navigate to a URL. Optionally open in a new tab.",
+                parameters=NavigateParams,
+                executor=navigate_executor,
+            )
+        )
 
         async def go_back_executor(_: EmptyParams) -> ToolResult[BrowserActionMetadata]:
             """Go back in browser history."""
@@ -298,12 +300,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="go_back"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("go_back"),
-            description="Go back to the previous page in browser history.",
-            parameters=EmptyParams,
-            executor=go_back_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("go_back"),
+                description="Go back to the previous page in browser history.",
+                parameters=EmptyParams,
+                executor=go_back_executor,
+            )
+        )
 
         async def wait_executor(params: WaitParams) -> ToolResult[BrowserActionMetadata]:
             """Wait for specified seconds."""
@@ -316,12 +320,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="wait"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("wait"),
-            description="Wait for a specified number of seconds (1-30).",
-            parameters=WaitParams,
-            executor=wait_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("wait"),
+                description="Wait for a specified number of seconds (1-30).",
+                parameters=WaitParams,
+                executor=wait_executor,
+            )
+        )
 
         # --- Page Interaction Tools ---
 
@@ -341,12 +347,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="click"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("click"),
-            description="Click an element by its index from the page snapshot.",
-            parameters=ClickParams,
-            executor=click_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("click"),
+                description="Click an element by its index from the page snapshot.",
+                parameters=ClickParams,
+                executor=click_executor,
+            )
+        )
 
         async def input_text_executor(params: InputTextParams) -> ToolResult[BrowserActionMetadata]:
             """Input text into an element."""
@@ -357,42 +365,50 @@ class BrowserUseToolProvider(ToolProvider):
                     success=False,
                     metadata=BrowserActionMetadata(action_type="input_text"),
                 )
-            event = session.event_bus.dispatch(TypeTextEvent(
-                node=node,
-                text=params.text,
-                clear=params.clear_first,
-            ))
+            event = session.event_bus.dispatch(
+                TypeTextEvent(
+                    node=node,
+                    text=params.text,
+                    clear=params.clear_first,
+                )
+            )
             await event
             return ToolResult(
                 content=f"Typed text into element at index {params.index}",
                 metadata=BrowserActionMetadata(action_type="input_text"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("input_text"),
-            description="Type text into a form field or input element.",
-            parameters=InputTextParams,
-            executor=input_text_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("input_text"),
+                description="Type text into a form field or input element.",
+                parameters=InputTextParams,
+                executor=input_text_executor,
+            )
+        )
 
         async def scroll_executor(params: ScrollParams) -> ToolResult[BrowserActionMetadata]:
             """Scroll the page."""
-            event = session.event_bus.dispatch(ScrollEvent(
-                direction=params.direction,
-                amount=params.amount,
-            ))
+            event = session.event_bus.dispatch(
+                ScrollEvent(
+                    direction=params.direction,
+                    amount=params.amount,
+                )
+            )
             await event
             return ToolResult(
                 content=f"Scrolled {params.direction} by {params.amount} pixels",
                 metadata=BrowserActionMetadata(action_type="scroll"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("scroll"),
-            description="Scroll the page up or down by a specified amount.",
-            parameters=ScrollParams,
-            executor=scroll_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("scroll"),
+                description="Scroll the page up or down by a specified amount.",
+                parameters=ScrollParams,
+                executor=scroll_executor,
+            )
+        )
 
         async def find_text_executor(params: FindTextParams) -> ToolResult[BrowserActionMetadata]:
             """Find and scroll to text on the page."""
@@ -403,12 +419,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="find_text"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("find_text"),
-            description="Find specific text on the page and scroll to it.",
-            parameters=FindTextParams,
-            executor=find_text_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("find_text"),
+                description="Find specific text on the page and scroll to it.",
+                parameters=FindTextParams,
+                executor=find_text_executor,
+            )
+        )
 
         async def send_keys_executor(params: SendKeysParams) -> ToolResult[BrowserActionMetadata]:
             """Send keyboard keys."""
@@ -419,12 +437,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="send_keys"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("send_keys"),
-            description="Send keyboard keys (e.g., 'Enter', 'Escape', 'Tab', 'ArrowDown').",
-            parameters=SendKeysParams,
-            executor=send_keys_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("send_keys"),
+                description="Send keyboard keys (e.g., 'Enter', 'Escape', 'Tab', 'ArrowDown').",
+                parameters=SendKeysParams,
+                executor=send_keys_executor,
+            )
+        )
 
         # --- JavaScript Execution ---
 
@@ -448,12 +468,14 @@ class BrowserUseToolProvider(ToolProvider):
                     metadata=BrowserActionMetadata(action_type="evaluate_js"),
                 )
 
-        tools.append(Tool(
-            name=self._tool_name("evaluate_js"),
-            description="Execute custom JavaScript code on the page. Code is auto-wrapped in arrow function.",
-            parameters=EvaluateJsParams,
-            executor=evaluate_js_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("evaluate_js"),
+                description="Execute custom JavaScript code on the page. Code is auto-wrapped in arrow function.",
+                parameters=EvaluateJsParams,
+                executor=evaluate_js_executor,
+            )
+        )
 
         # --- Tab Management ---
 
@@ -474,12 +496,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="switch_tab"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("switch_tab"),
-            description="Switch to a different browser tab by index (0-based).",
-            parameters=SwitchTabParams,
-            executor=switch_tab_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("switch_tab"),
+                description="Switch to a different browser tab by index (0-based).",
+                parameters=SwitchTabParams,
+                executor=switch_tab_executor,
+            )
+        )
 
         # --- Content Extraction ---
 
@@ -491,12 +515,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="snapshot"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("snapshot"),
-            description="Get accessibility snapshot of current page showing interactive elements with indices.",
-            parameters=EmptyParams,
-            executor=snapshot_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("snapshot"),
+                description="Get accessibility snapshot of current page showing interactive elements with indices.",
+                parameters=EmptyParams,
+                executor=snapshot_executor,
+            )
+        )
 
         async def screenshot_executor(_: EmptyParams) -> ToolResult[BrowserActionMetadata]:
             """Take a screenshot of the current page."""
@@ -509,12 +535,14 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="screenshot"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("screenshot"),
-            description="Take a screenshot of the current page for visual inspection.",
-            parameters=EmptyParams,
-            executor=screenshot_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("screenshot"),
+                description="Take a screenshot of the current page for visual inspection.",
+                parameters=EmptyParams,
+                executor=screenshot_executor,
+            )
+        )
 
         async def get_url_executor(_: EmptyParams) -> ToolResult[BrowserActionMetadata]:
             """Get the current page URL."""
@@ -524,11 +552,13 @@ class BrowserUseToolProvider(ToolProvider):
                 metadata=BrowserActionMetadata(action_type="get_url"),
             )
 
-        tools.append(Tool(
-            name=self._tool_name("get_url"),
-            description="Get the current page URL.",
-            parameters=EmptyParams,
-            executor=get_url_executor,
-        ))
+        tools.append(
+            Tool(
+                name=self._tool_name("get_url"),
+                description="Get the current page URL.",
+                parameters=EmptyParams,
+                executor=get_url_executor,
+            )
+        )
 
         return tools

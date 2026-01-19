@@ -52,11 +52,9 @@ async def main() -> None:
     async with agent.session() as session:
         # Example: Search for something on Google
         await session.run(
-            "Go to google.com, search for 'Stirrup AI agent framework', "
-            "and tell me what the first result is about."
+            "Go to google.com, search for 'Stirrup AI agent framework', and tell me what the first result is about."
         )
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
