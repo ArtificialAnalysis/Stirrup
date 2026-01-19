@@ -234,6 +234,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._pending_skills_dir: Path | None = None
         self._resume: bool = False
         self._clear_cache_on_success: bool = True
+        self._cache_on_interrupt: bool = True
 
         # Instance-scoped state (populated during __aenter__, isolated per agent instance)
         self._active_tools: dict[str, Tool] = {}
@@ -277,6 +278,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         skills_dir: Path | str | None = None,
         resume: bool = False,
         clear_cache_on_success: bool = True,
+        cache_on_interrupt: bool = True,
     ) -> Self:
         """Configure a session and return self for use as async context manager.
 
@@ -299,6 +301,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             clear_cache_on_success: If True (default), automatically clear the cache
                                    when the agent completes successfully. Set to False
                                    to preserve caches for inspection or debugging.
+            cache_on_interrupt: If True (default), set up a SIGINT handler to cache
+                               state on Ctrl+C. Set to False when running agents in
+                               threads or subprocesses where signal handlers cannot
+                               be registered from non-main threads.
 
         Returns:
             Self, for use with `async with agent.session(...) as session:`
@@ -317,6 +323,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._pending_skills_dir = Path(skills_dir) if skills_dir else None
         self._resume = resume
         self._clear_cache_on_success = clear_cache_on_success
+        self._cache_on_interrupt = cache_on_interrupt
         return self
 
     def _handle_interrupt(self, _signum: int, _frame: object) -> None:
@@ -664,7 +671,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             self._logger.__enter__()
 
             # Set up signal handler for graceful caching on interrupt (root agent only)
-            if current_depth == 0:
+            if current_depth == 0 and self._cache_on_interrupt:
                 self._original_sigint = signal.getsignal(signal.SIGINT)
                 signal.signal(signal.SIGINT, self._handle_interrupt)
 
