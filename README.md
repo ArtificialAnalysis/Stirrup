@@ -9,19 +9,19 @@
 <br>
 </div>
 
-
 <p align="center">
   <a href="https://pypi.python.org/pypi/stirrup"><img src="https://img.shields.io/pypi/v/stirrup" alt="PyPI version" /></a>&nbsp;<!--
   --><a href="https://github.com/ArtificialAnalysis/Stirrup/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ArtificialAnalysis/Stirrup" alt="License" /></a>&nbsp;<!--
   --><a href="https://stirrup.artificialanalysis.ai"><img src="https://img.shields.io/badge/MkDocs-4F46E5?logo=materialformkdocs&logoColor=fff" alt="MkDocs" /></a>
 </p>
 
-
 Stirrup is a lightweight framework, or starting point template, for building agents. It differs from other agent frameworks by:
 
 - **Working with the model, not against it:** Stirrup gets out of the way and lets the model choose its own approach to completing tasks (similar to Claude Code). Many frameworks impose rigid workflows that can degrade results.
 - **Best practices and tools built-in:** We analyzed the leading agents (Claude Code, Codex, and others) to understand and incorporate best practices relating to topics like context management and foundational tools (e.g., code execution).
 - **Fully customizable:** Use Stirrup as a package or as a starting template to build your own fully customized agents.
+
+> **Note:** This is the Python implementation, [StirrupJS](https://github.com/ArtificialAnalysis/StirrupJS) is the Typescript implementation.
 
 ## Features
 
