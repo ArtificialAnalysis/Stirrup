@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from stirrup.tools.browser_use import (
-    BrowserActionMetadata,
     BrowserUseToolProvider,
     EmptyParams,
+    InputTextMetadata,
+    NavigateMetadata,
     NavigateParams,
+    SearchMetadata,
     SearchParams,
 )
 
@@ -87,15 +89,32 @@ class TestToolBuilding:
 class TestMetadataAggregation:
     """Test metadata aggregation for run tracking."""
 
-    def test_metadata_addition(self) -> None:
-        """Test metadata aggregates action counts correctly."""
-        meta1 = BrowserActionMetadata.action("click")
-        meta2 = BrowserActionMetadata.action("navigate")
-        meta3 = BrowserActionMetadata.action("click")
+    def test_navigate_metadata_addition(self) -> None:
+        """Test NavigateMetadata aggregates URLs correctly."""
+        meta1 = NavigateMetadata(urls=["https://example.com"])
+        meta2 = NavigateMetadata(urls=["https://google.com"])
 
-        combined = meta1 + meta2 + meta3
-        assert combined.num_uses == 3
-        assert combined.action_counts == {"click": 2, "navigate": 1}
+        combined = meta1 + meta2
+        assert combined.num_uses == 2
+        assert combined.urls == ["https://example.com", "https://google.com"]
+
+    def test_search_metadata_addition(self) -> None:
+        """Test SearchMetadata aggregates queries correctly."""
+        meta1 = SearchMetadata(queries=["first query"])
+        meta2 = SearchMetadata(queries=["second query"])
+
+        combined = meta1 + meta2
+        assert combined.num_uses == 2
+        assert combined.queries == ["first query", "second query"]
+
+    def test_input_text_metadata_addition(self) -> None:
+        """Test InputTextMetadata aggregates texts correctly."""
+        meta1 = InputTextMetadata(texts=["hello"])
+        meta2 = InputTextMetadata(texts=["world"])
+
+        combined = meta1 + meta2
+        assert combined.num_uses == 2
+        assert combined.texts == ["hello", "world"]
 
 
 class TestEmptyArgumentsHandling:

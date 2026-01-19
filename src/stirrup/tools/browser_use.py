@@ -43,7 +43,12 @@ except ImportError as e:
     raise ImportError("browser-use package is required. Install with: pip install browser-use") from e
 
 
-__all__ = ["BrowserUseToolProvider"]
+__all__ = [
+    "BrowserUseToolProvider",
+    "InputTextMetadata",
+    "NavigateMetadata",
+    "SearchMetadata",
+]
 
 
 # =============================================================================
@@ -128,28 +133,40 @@ class EmptyParams(BaseModel):
 # =============================================================================
 
 
-class BrowserActionMetadata(ToolUseCountMetadata):
-    """Metadata for browser action tracking with per-action counts.
+class NavigateMetadata(ToolUseCountMetadata):
+    """Metadata tracking URLs visited."""
 
-    Extends ToolUseCountMetadata with per-action granularity.
-    Implements Addable protocol for aggregation across multiple tool calls.
-    """
+    urls: list[str] = Field(default_factory=list)
 
-    action_counts: dict[str, int] = Field(default_factory=dict)
-
-    def __add__(self, other: "BrowserActionMetadata") -> "BrowserActionMetadata":  # type: ignore[override]
-        merged = dict(self.action_counts)
-        for action, count in other.action_counts.items():
-            merged[action] = merged.get(action, 0) + count
-        return BrowserActionMetadata(
+    def __add__(self, other: "NavigateMetadata") -> "NavigateMetadata":  # type: ignore[override]
+        return NavigateMetadata(
             num_uses=self.num_uses + other.num_uses,
-            action_counts=merged,
+            urls=self.urls + other.urls,
         )
 
-    @classmethod
-    def action(cls, action_type: str) -> "BrowserActionMetadata":
-        """Create metadata for a single action."""
-        return cls(action_counts={action_type: 1})
+
+class SearchMetadata(ToolUseCountMetadata):
+    """Metadata tracking search queries."""
+
+    queries: list[str] = Field(default_factory=list)
+
+    def __add__(self, other: "SearchMetadata") -> "SearchMetadata":  # type: ignore[override]
+        return SearchMetadata(
+            num_uses=self.num_uses + other.num_uses,
+            queries=self.queries + other.queries,
+        )
+
+
+class InputTextMetadata(ToolUseCountMetadata):
+    """Metadata tracking text inputs."""
+
+    texts: list[str] = Field(default_factory=list)
+
+    def __add__(self, other: "InputTextMetadata") -> "InputTextMetadata":  # type: ignore[override]
+        return InputTextMetadata(
+            num_uses=self.num_uses + other.num_uses,
+            texts=self.texts + other.texts,
+        )
 
 
 # =============================================================================
@@ -218,7 +235,7 @@ class BrowserUseToolProvider(ToolProvider):
         """Generate prefixed tool name."""
         return f"{self._tool_prefix}_{name}" if self._tool_prefix else name
 
-    async def __aenter__(self) -> list[Tool[Any, BrowserActionMetadata]]:
+    async def __aenter__(self) -> list[Tool[Any, Any]]:
         """Enter async context: start browser and return tools."""
         self._session = BrowserSession(  # type: ignore[call-overload]
             headless=self._headless,
@@ -242,17 +259,17 @@ class BrowserUseToolProvider(ToolProvider):
             await self._session.stop()
             self._session = None
 
-    def _build_tools(self) -> list[Tool[Any, BrowserActionMetadata]]:
+    def _build_tools(self) -> list[Tool[Any, Any]]:
         """Build all browser tools."""
         session = self._session
         if session is None:
             raise RuntimeError("Browser session not initialized")
 
-        tools: list[Tool[Any, BrowserActionMetadata]] = []
+        tools: list[Tool[Any, Any]] = []
 
         # --- Navigation Tools ---
 
-        async def search_executor(params: SearchParams) -> ToolResult[BrowserActionMetadata]:
+        async def search_executor(params: SearchParams) -> ToolResult[SearchMetadata]:
             """Search the web using specified search engine."""
             import urllib.parse
 
@@ -266,7 +283,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Searched {params.engine} for: {params.query}",
-                metadata=BrowserActionMetadata.action("search"),
+                metadata=SearchMetadata(queries=[params.query]),
             )
 
         tools.append(
@@ -278,13 +295,13 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def navigate_executor(params: NavigateParams) -> ToolResult[BrowserActionMetadata]:
+        async def navigate_executor(params: NavigateParams) -> ToolResult[NavigateMetadata]:
             """Navigate to a URL."""
             event = session.event_bus.dispatch(NavigateToUrlEvent(url=params.url, new_tab=params.new_tab))
             await event
             return ToolResult(
                 content=f"Navigated to: {params.url}" + (" (new tab)" if params.new_tab else ""),
-                metadata=BrowserActionMetadata.action("navigate"),
+                metadata=NavigateMetadata(urls=[params.url]),
             )
 
         tools.append(
@@ -296,13 +313,13 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def go_back_executor(_: EmptyParams) -> ToolResult[BrowserActionMetadata]:
+        async def go_back_executor(_: EmptyParams) -> ToolResult[ToolUseCountMetadata]:
             """Go back in browser history."""
             event = session.event_bus.dispatch(GoBackEvent())
             await event
             return ToolResult(
                 content="Navigated back",
-                metadata=BrowserActionMetadata.action("go_back"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -314,7 +331,7 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def wait_executor(params: WaitParams) -> ToolResult[BrowserActionMetadata]:
+        async def wait_executor(params: WaitParams) -> ToolResult[ToolUseCountMetadata]:
             """Wait for specified seconds."""
             import asyncio
 
@@ -322,7 +339,7 @@ class BrowserUseToolProvider(ToolProvider):
             await asyncio.sleep(wait_time)
             return ToolResult(
                 content=f"Waited for {wait_time} seconds",
-                metadata=BrowserActionMetadata.action("wait"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -336,20 +353,20 @@ class BrowserUseToolProvider(ToolProvider):
 
         # --- Page Interaction Tools ---
 
-        async def click_executor(params: ClickParams) -> ToolResult[BrowserActionMetadata]:
+        async def click_executor(params: ClickParams) -> ToolResult[ToolUseCountMetadata]:
             """Click an element by index."""
             node = await session.get_element_by_index(params.index)
             if node is None:
                 return ToolResult(
                     content=f"Element with index {params.index} not found",
                     success=False,
-                    metadata=BrowserActionMetadata.action("click"),
+                    metadata=ToolUseCountMetadata(),
                 )
             event = session.event_bus.dispatch(ClickElementEvent(node=node))
             await event
             return ToolResult(
                 content=f"Clicked element at index {params.index}",
-                metadata=BrowserActionMetadata.action("click"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -361,14 +378,14 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def input_text_executor(params: InputTextParams) -> ToolResult[BrowserActionMetadata]:
+        async def input_text_executor(params: InputTextParams) -> ToolResult[InputTextMetadata]:
             """Input text into an element."""
             node = await session.get_element_by_index(params.index)
             if node is None:
                 return ToolResult(
                     content=f"Element with index {params.index} not found",
                     success=False,
-                    metadata=BrowserActionMetadata.action("input_text"),
+                    metadata=InputTextMetadata(texts=[params.text]),
                 )
             event = session.event_bus.dispatch(
                 TypeTextEvent(
@@ -380,7 +397,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Typed text into element at index {params.index}",
-                metadata=BrowserActionMetadata.action("input_text"),
+                metadata=InputTextMetadata(texts=[params.text]),
             )
 
         tools.append(
@@ -392,7 +409,7 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def scroll_executor(params: ScrollParams) -> ToolResult[BrowserActionMetadata]:
+        async def scroll_executor(params: ScrollParams) -> ToolResult[ToolUseCountMetadata]:
             """Scroll the page."""
             event = session.event_bus.dispatch(
                 ScrollEvent(
@@ -403,7 +420,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Scrolled {params.direction} by {params.amount} pixels",
-                metadata=BrowserActionMetadata.action("scroll"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -415,13 +432,13 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def find_text_executor(params: FindTextParams) -> ToolResult[BrowserActionMetadata]:
+        async def find_text_executor(params: FindTextParams) -> ToolResult[ToolUseCountMetadata]:
             """Find and scroll to text on the page."""
             event = session.event_bus.dispatch(ScrollToTextEvent(text=params.text))
             await event
             return ToolResult(
                 content=f"Scrolled to text: {params.text}",
-                metadata=BrowserActionMetadata.action("find_text"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -433,13 +450,13 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def send_keys_executor(params: SendKeysParams) -> ToolResult[BrowserActionMetadata]:
+        async def send_keys_executor(params: SendKeysParams) -> ToolResult[ToolUseCountMetadata]:
             """Send keyboard keys."""
             event = session.event_bus.dispatch(SendKeysEvent(keys=params.keys))
             await event
             return ToolResult(
                 content=f"Sent keys: {params.keys}",
-                metadata=BrowserActionMetadata.action("send_keys"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -453,7 +470,7 @@ class BrowserUseToolProvider(ToolProvider):
 
         # --- JavaScript Execution ---
 
-        async def evaluate_js_executor(params: EvaluateJsParams) -> ToolResult[BrowserActionMetadata]:
+        async def evaluate_js_executor(params: EvaluateJsParams) -> ToolResult[ToolUseCountMetadata]:
             """Execute JavaScript on the page."""
             page = await session.must_get_current_page()
             script = params.script.strip()
@@ -464,13 +481,13 @@ class BrowserUseToolProvider(ToolProvider):
                 result = await page.evaluate(script)
                 return ToolResult(
                     content=f"JavaScript result: {result}",
-                    metadata=BrowserActionMetadata.action("evaluate_js"),
+                    metadata=ToolUseCountMetadata(),
                 )
             except Exception as e:
                 return ToolResult(
                     content=f"JavaScript error: {e}",
                     success=False,
-                    metadata=BrowserActionMetadata.action("evaluate_js"),
+                    metadata=ToolUseCountMetadata(),
                 )
 
         tools.append(
@@ -484,21 +501,21 @@ class BrowserUseToolProvider(ToolProvider):
 
         # --- Tab Management ---
 
-        async def switch_tab_executor(params: SwitchTabParams) -> ToolResult[BrowserActionMetadata]:
+        async def switch_tab_executor(params: SwitchTabParams) -> ToolResult[ToolUseCountMetadata]:
             """Switch to a different tab."""
             tabs = await session.get_tabs()
             if params.index < 0 or params.index >= len(tabs):
                 return ToolResult(
                     content=f"Tab index {params.index} out of range (0-{len(tabs) - 1})",
                     success=False,
-                    metadata=BrowserActionMetadata.action("switch_tab"),
+                    metadata=ToolUseCountMetadata(),
                 )
             target_id = tabs[params.index].target_id
             event = session.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
             await event
             return ToolResult(
                 content=f"Switched to tab {params.index}",
-                metadata=BrowserActionMetadata.action("switch_tab"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -512,12 +529,12 @@ class BrowserUseToolProvider(ToolProvider):
 
         # --- Content Extraction ---
 
-        async def snapshot_executor(_: EmptyParams) -> ToolResult[BrowserActionMetadata]:
+        async def snapshot_executor(_: EmptyParams) -> ToolResult[ToolUseCountMetadata]:
             """Get accessibility snapshot of the current page."""
             state_text = await session.get_state_as_text()
             return ToolResult(
                 content=f"<page_snapshot>\n{state_text}\n</page_snapshot>",
-                metadata=BrowserActionMetadata.action("snapshot"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -529,7 +546,7 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def screenshot_executor(_: EmptyParams) -> ToolResult[BrowserActionMetadata]:
+        async def screenshot_executor(_: EmptyParams) -> ToolResult[ToolUseCountMetadata]:
             """Take a screenshot of the current page."""
             screenshot_bytes = await session.take_screenshot()
             return ToolResult(
@@ -537,7 +554,7 @@ class BrowserUseToolProvider(ToolProvider):
                     "Screenshot captured:",
                     ImageContentBlock(data=screenshot_bytes),
                 ],
-                metadata=BrowserActionMetadata.action("screenshot"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
@@ -549,12 +566,12 @@ class BrowserUseToolProvider(ToolProvider):
             )
         )
 
-        async def get_url_executor(_: EmptyParams) -> ToolResult[BrowserActionMetadata]:
+        async def get_url_executor(_: EmptyParams) -> ToolResult[ToolUseCountMetadata]:
             """Get the current page URL."""
             url = await session.get_current_page_url()
             return ToolResult(
                 content=f"Current URL: {url}",
-                metadata=BrowserActionMetadata.action("get_url"),
+                metadata=ToolUseCountMetadata(),
             )
 
         tools.append(
