@@ -71,6 +71,7 @@ anyio_mode = "auto"
 markers = [
     "docker: marks tests as requiring the docker package (deselect with '-m \"not docker\"')",
     "e2b: marks tests as requiring the e2b package (deselect with '-m \"not e2b\"')",
+    "browser: marks tests as requiring headless Chrome (deselect with '-m \"not browser\"')",
 ]
 
 [tool.ruff]

@@ -814,7 +814,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         if tool:
             try:
-                params = tool.parameters.model_validate_json(tool_call.arguments)
+                # Normalize empty arguments to valid empty JSON object
+                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+                params = tool.parameters.model_validate_json(args)
 
                 # Set parent depth for sub-agent tools to read
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)

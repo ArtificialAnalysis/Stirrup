@@ -25,7 +25,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from stirrup.core.models import ImageContentBlock, Tool, ToolProvider, ToolResult
+from stirrup.core.models import ImageContentBlock, Tool, ToolProvider, ToolResult, ToolUseCountMetadata
 
 try:
     from browser_use import BrowserSession
@@ -113,12 +113,6 @@ class SwitchTabParams(BaseModel):
     index: Annotated[int, Field(description="Tab index to switch to (0-based)")]
 
 
-class ExtractParams(BaseModel):
-    """Parameters for extracting data from page."""
-
-    instruction: Annotated[str, Field(description="What data to extract from the page")]
-
-
 class WaitParams(BaseModel):
     """Parameters for waiting."""
 
@@ -134,17 +128,27 @@ class EmptyParams(BaseModel):
 # =============================================================================
 
 
-class BrowserActionMetadata(BaseModel):
-    """Metadata for browser action tracking."""
+class BrowserActionMetadata(ToolUseCountMetadata):
+    """Metadata for browser action tracking with per-action counts.
 
-    num_uses: int = 1
-    action_type: str = ""
+    Implements Addable protocol for aggregation across multiple tool calls.
+    """
+
+    action_counts: dict[str, int] = Field(default_factory=dict)
 
     def __add__(self, other: "BrowserActionMetadata") -> "BrowserActionMetadata":
+        merged = dict(self.action_counts)
+        for action, count in other.action_counts.items():
+            merged[action] = merged.get(action, 0) + count
         return BrowserActionMetadata(
             num_uses=self.num_uses + other.num_uses,
-            action_type=self.action_type,
+            action_counts=merged,
         )
+
+    @classmethod
+    def action(cls, action_type: str) -> "BrowserActionMetadata":
+        """Create metadata for a single action."""
+        return cls(action_counts={action_type: 1})
 
 
 # =============================================================================
@@ -261,7 +265,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Searched {params.engine} for: {params.query}",
-                metadata=BrowserActionMetadata(action_type="search"),
+                metadata=BrowserActionMetadata.action("search"),
             )
 
         tools.append(
@@ -279,7 +283,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Navigated to: {params.url}" + (" (new tab)" if params.new_tab else ""),
-                metadata=BrowserActionMetadata(action_type="navigate"),
+                metadata=BrowserActionMetadata.action("navigate"),
             )
 
         tools.append(
@@ -297,7 +301,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content="Navigated back",
-                metadata=BrowserActionMetadata(action_type="go_back"),
+                metadata=BrowserActionMetadata.action("go_back"),
             )
 
         tools.append(
@@ -317,7 +321,7 @@ class BrowserUseToolProvider(ToolProvider):
             await asyncio.sleep(wait_time)
             return ToolResult(
                 content=f"Waited for {wait_time} seconds",
-                metadata=BrowserActionMetadata(action_type="wait"),
+                metadata=BrowserActionMetadata.action("wait"),
             )
 
         tools.append(
@@ -338,13 +342,13 @@ class BrowserUseToolProvider(ToolProvider):
                 return ToolResult(
                     content=f"Element with index {params.index} not found",
                     success=False,
-                    metadata=BrowserActionMetadata(action_type="click"),
+                    metadata=BrowserActionMetadata.action("click"),
                 )
             event = session.event_bus.dispatch(ClickElementEvent(node=node))
             await event
             return ToolResult(
                 content=f"Clicked element at index {params.index}",
-                metadata=BrowserActionMetadata(action_type="click"),
+                metadata=BrowserActionMetadata.action("click"),
             )
 
         tools.append(
@@ -363,7 +367,7 @@ class BrowserUseToolProvider(ToolProvider):
                 return ToolResult(
                     content=f"Element with index {params.index} not found",
                     success=False,
-                    metadata=BrowserActionMetadata(action_type="input_text"),
+                    metadata=BrowserActionMetadata.action("input_text"),
                 )
             event = session.event_bus.dispatch(
                 TypeTextEvent(
@@ -375,7 +379,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Typed text into element at index {params.index}",
-                metadata=BrowserActionMetadata(action_type="input_text"),
+                metadata=BrowserActionMetadata.action("input_text"),
             )
 
         tools.append(
@@ -398,7 +402,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Scrolled {params.direction} by {params.amount} pixels",
-                metadata=BrowserActionMetadata(action_type="scroll"),
+                metadata=BrowserActionMetadata.action("scroll"),
             )
 
         tools.append(
@@ -416,7 +420,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Scrolled to text: {params.text}",
-                metadata=BrowserActionMetadata(action_type="find_text"),
+                metadata=BrowserActionMetadata.action("find_text"),
             )
 
         tools.append(
@@ -434,7 +438,7 @@ class BrowserUseToolProvider(ToolProvider):
             await event
             return ToolResult(
                 content=f"Sent keys: {params.keys}",
-                metadata=BrowserActionMetadata(action_type="send_keys"),
+                metadata=BrowserActionMetadata.action("send_keys"),
             )
 
         tools.append(
@@ -459,13 +463,13 @@ class BrowserUseToolProvider(ToolProvider):
                 result = await page.evaluate(script)
                 return ToolResult(
                     content=f"JavaScript result: {result}",
-                    metadata=BrowserActionMetadata(action_type="evaluate_js"),
+                    metadata=BrowserActionMetadata.action("evaluate_js"),
                 )
             except Exception as e:
                 return ToolResult(
                     content=f"JavaScript error: {e}",
                     success=False,
-                    metadata=BrowserActionMetadata(action_type="evaluate_js"),
+                    metadata=BrowserActionMetadata.action("evaluate_js"),
                 )
 
         tools.append(
@@ -486,14 +490,14 @@ class BrowserUseToolProvider(ToolProvider):
                 return ToolResult(
                     content=f"Tab index {params.index} out of range (0-{len(tabs) - 1})",
                     success=False,
-                    metadata=BrowserActionMetadata(action_type="switch_tab"),
+                    metadata=BrowserActionMetadata.action("switch_tab"),
                 )
             target_id = tabs[params.index].target_id
             event = session.event_bus.dispatch(SwitchTabEvent(target_id=target_id))
             await event
             return ToolResult(
                 content=f"Switched to tab {params.index}",
-                metadata=BrowserActionMetadata(action_type="switch_tab"),
+                metadata=BrowserActionMetadata.action("switch_tab"),
             )
 
         tools.append(
@@ -512,7 +516,7 @@ class BrowserUseToolProvider(ToolProvider):
             state_text = await session.get_state_as_text()
             return ToolResult(
                 content=f"<page_snapshot>\n{state_text}\n</page_snapshot>",
-                metadata=BrowserActionMetadata(action_type="snapshot"),
+                metadata=BrowserActionMetadata.action("snapshot"),
             )
 
         tools.append(
@@ -532,7 +536,7 @@ class BrowserUseToolProvider(ToolProvider):
                     "Screenshot captured:",
                     ImageContentBlock(data=screenshot_bytes),
                 ],
-                metadata=BrowserActionMetadata(action_type="screenshot"),
+                metadata=BrowserActionMetadata.action("screenshot"),
             )
 
         tools.append(
@@ -549,7 +553,7 @@ class BrowserUseToolProvider(ToolProvider):
             url = await session.get_current_page_url()
             return ToolResult(
                 content=f"Current URL: {url}",
-                metadata=BrowserActionMetadata(action_type="get_url"),
+                metadata=BrowserActionMetadata.action("get_url"),
             )
 
         tools.append(
