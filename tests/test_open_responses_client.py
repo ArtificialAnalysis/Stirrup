@@ -15,6 +15,7 @@ from stirrup.clients.open_responses_client import (
 from stirrup.core.models import (
     AssistantMessage,
     SystemMessage,
+    TokenUsage,
     ToolCall,
     ToolMessage,
     UserMessage,
@@ -73,7 +74,7 @@ class TestMessageConversion:
     def test_assistant_message_conversion(self) -> None:
         """Test AssistantMessage conversion to input format."""
         messages = [
-            AssistantMessage(content="I can help with that", tool_calls=[]),
+            AssistantMessage(content="I can help with that", tool_calls=[], token_usage=TokenUsage()),
         ]
         instructions, input_items = _to_open_responses_input(messages)
 
@@ -97,6 +98,7 @@ class TestMessageConversion:
                         arguments='{"query": "test"}',
                     )
                 ],
+                token_usage=TokenUsage(),
             ),
         ]
         _instructions, input_items = _to_open_responses_input(messages)
@@ -138,9 +140,10 @@ class TestMessageConversion:
             AssistantMessage(
                 content="I'll search for that",
                 tool_calls=[ToolCall(tool_call_id="call_1", name="search", arguments='{"q": "Python"}')],
+                token_usage=TokenUsage(),
             ),
             ToolMessage(content="Python is a programming language", tool_call_id="call_1", name="search"),
-            AssistantMessage(content="Python is a programming language", tool_calls=[]),
+            AssistantMessage(content="Python is a programming language", tool_calls=[], token_usage=TokenUsage()),
         ]
         instructions, input_items = _to_open_responses_input(messages)
 
@@ -314,7 +317,7 @@ class TestOpenResponsesClient:
             output_tokens_details=None,
         )
 
-        client._client.responses.create = AsyncMock(return_value=mock_response)  # noqa: SLF001
+        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
 
         result = await client.generate(
             messages=[UserMessage(content="Hi")],
@@ -352,7 +355,7 @@ class TestOpenResponsesClient:
             output_tokens_details=None,
         )
 
-        client._client.responses.create = AsyncMock(return_value=mock_response)  # noqa: SLF001
+        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
 
         test_tool = Tool[EmptyParams, None](
             name="get_time",
@@ -397,7 +400,7 @@ class TestOpenResponsesClient:
             output_tokens_details=MagicMock(reasoning_tokens=80),
         )
 
-        client._client.responses.create = AsyncMock(return_value=mock_response)  # noqa: SLF001
+        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
 
         result = await client.generate(
             messages=[UserMessage(content="Solve this")],
@@ -425,7 +428,7 @@ class TestOpenResponsesClient:
         mock_response.output = []
         mock_response.usage = MagicMock(input_tokens=100, output_tokens=0)
 
-        client._client.responses.create = AsyncMock(return_value=mock_response)  # noqa: SLF001
+        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
 
         with pytest.raises(ContextOverflowError, match="incomplete"):
             await client.generate(
@@ -456,7 +459,7 @@ class TestOpenResponsesClient:
         )
 
         mock_create = AsyncMock(return_value=mock_response)
-        client._client.responses.create = mock_create  # noqa: SLF001
+        client._client.responses.create = mock_create  # type: ignore[method-assign]  # noqa: SLF001
 
         await client.generate(
             messages=[
@@ -496,7 +499,7 @@ class TestOpenResponsesClient:
         )
 
         mock_create = AsyncMock(return_value=mock_response)
-        client._client.responses.create = mock_create  # noqa: SLF001
+        client._client.responses.create = mock_create  # type: ignore[method-assign]  # noqa: SLF001
 
         await client.generate(
             messages=[UserMessage(content="Hello")],
