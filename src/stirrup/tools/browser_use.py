@@ -131,12 +131,13 @@ class EmptyParams(BaseModel):
 class BrowserActionMetadata(ToolUseCountMetadata):
     """Metadata for browser action tracking with per-action counts.
 
+    Extends ToolUseCountMetadata with per-action granularity.
     Implements Addable protocol for aggregation across multiple tool calls.
     """
 
     action_counts: dict[str, int] = Field(default_factory=dict)
 
-    def __add__(self, other: "BrowserActionMetadata") -> "BrowserActionMetadata":
+    def __add__(self, other: "BrowserActionMetadata") -> "BrowserActionMetadata":  # type: ignore[override]
         merged = dict(self.action_counts)
         for action, count in other.action_counts.items():
             merged[action] = merged.get(action, 0) + count

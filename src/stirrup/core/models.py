@@ -421,12 +421,14 @@ class ToolUseCountMetadata(BaseModel):
 
     Implements Addable protocol for aggregation. Use this for tools that only need
     to track how many times they were called.
+
+    Subclasses can override __add__ with their own type thanks to Self typing.
     """
 
     num_uses: int = 1
 
-    def __add__(self, other: "ToolUseCountMetadata") -> "ToolUseCountMetadata":
-        return ToolUseCountMetadata(num_uses=self.num_uses + other.num_uses)
+    def __add__(self, other: Self) -> Self:
+        return self.__class__(num_uses=self.num_uses + other.num_uses)
 
 
 class ToolResult[M](BaseModel):
