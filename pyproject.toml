@@ -24,7 +24,6 @@ classifiers = [
 ]
 dependencies = [
     "anyio>=4.0.0",
-    "browser-use>=0.11.3",
     "filetype>=1.0.0",
     "httpx>=0.20.0",
     "json-schema-to-pydantic>=0.2.0",
@@ -42,7 +41,8 @@ litellm = ["litellm>=1.79.3"]
 e2b = ["e2b-code-interpreter>=2.3.0"]
 docker = ["docker>=7.0.0", "python-dotenv>=1.0.0"]
 mcp = ["mcp>=1.9.0"]
-all = ["stirrup[litellm,e2b,docker,mcp]"]
+browser = ["browser-use>=0.11.3"]
+all = ["stirrup[litellm,e2b,docker,mcp,browser]"]
 
 [project.urls]
 Homepage = "https://github.com/ArtificialAnalysis/Stirrup"

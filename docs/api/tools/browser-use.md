@@ -2,6 +2,12 @@
 
 The `BrowserUseToolProvider` provides browser automation capabilities using the [browser-use](https://github.com/browser-use/browser-use) library.
 
+## Installation
+
+```bash
+pip install 'stirrup[browser]'  # or: uv add 'stirrup[browser]'
+```
+
 ## Prerequisites
 
 **Local browser** (default):

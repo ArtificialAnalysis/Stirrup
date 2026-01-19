@@ -40,7 +40,10 @@ try:
         TypeTextEvent,
     )
 except ImportError as e:
-    raise ImportError("browser-use package is required. Install with: pip install browser-use") from e
+    raise ImportError(
+        "Requires installation of the browser extra. Install with (for example): "
+        "`uv pip install stirrup[browser]` or `uv add stirrup[browser]`",
+    ) from e
 
 
 __all__ = [

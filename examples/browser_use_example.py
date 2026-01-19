@@ -5,6 +5,7 @@ browser interactions. The agent can navigate pages, click elements, fill forms,
 and extract information.
 
 Prerequisites:
+    - Install browser extra: `pip install 'stirrup[browser]'` or `uv add 'stirrup[browser]'`
     - Install Chromium: `uvx browser-use install`
     - For cloud browser (optional): Set BROWSER_USE_API_KEY environment variable
 """
@@ -42,7 +43,7 @@ async def main() -> None:
 
     async with agent.session(output_dir="output/browser_use_example") as session:
         _finish_params, _history, _metadata = await session.run(
-            "Go to google.com, search for 'Stirrup AI agent framework', and tell me what the first result is about."
+            "Go to artificial analysis and select o3 on the AA Index score"
         )
 
 

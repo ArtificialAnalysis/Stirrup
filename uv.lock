@@ -5617,7 +5617,6 @@ version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
-    { name = "browser-use" },
     { name = "filetype" },
     { name = "httpx" },
     { name = "json-schema-to-pydantic" },
@@ -5632,11 +5631,15 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "browser-use" },
     { name = "docker" },
     { name = "e2b-code-interpreter" },
     { name = "litellm" },
     { name = "mcp" },
     { name = "python-dotenv" },
+]
+browser = [
+    { name = "browser-use" },
 ]
 docker = [
     { name = "docker" },
@@ -5667,7 +5670,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0" },
-    { name = "browser-use", specifier = ">=0.11.3" },
+    { name = "browser-use", marker = "extra == 'browser'", specifier = ">=0.11.3" },
     { name = "docker", marker = "extra == 'docker'", specifier = ">=7.0.0" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = ">=2.3.0" },
     { name = "filetype", specifier = ">=1.0.0" },
@@ -5681,11 +5684,11 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-dotenv", marker = "extra == 'docker'", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "stirrup", extras = ["litellm", "e2b", "docker", "mcp"], marker = "extra == 'all'" },
+    { name = "stirrup", extras = ["litellm", "e2b", "docker", "mcp", "browser"], marker = "extra == 'all'" },
     { name = "tenacity", specifier = ">=5.0.0" },
     { name = "trafilatura", specifier = ">=1.9.0" },
 ]
-provides-extras = ["litellm", "e2b", "docker", "mcp", "all"]
+provides-extras = ["litellm", "e2b", "docker", "mcp", "browser", "all"]
 
 [package.metadata.requires-dev]
 dev = [
