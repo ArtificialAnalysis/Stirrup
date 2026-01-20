@@ -505,6 +505,53 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         host_path = self._container_path_to_host(path)
         return host_path.exists() and host_path.is_file()
 
+    async def is_directory(self, path: str) -> bool:
+        """Check if a path is a directory in the container.
+
+        Since files are volume-mounted, checks directly on the host temp directory.
+
+        Args:
+            path: Path (relative or absolute container path).
+
+        Returns:
+            True if the path exists and is a directory, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside mounted directory.
+
+        """
+        host_path = self._container_path_to_host(path)
+        return host_path.exists() and host_path.is_dir()
+
+    async def list_files(self, path: str) -> list[str]:
+        """List all files recursively in a directory within the container.
+
+        Since files are volume-mounted, lists directly from the host temp directory.
+
+        Args:
+            path: Directory path (relative or absolute container path).
+
+        Returns:
+            List of file paths (relative to the given path) for all files in the directory.
+            Returns an empty list if the path is a file or doesn't exist.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside mounted directory.
+
+        """
+        host_path = self._container_path_to_host(path)
+        if not host_path.exists() or not host_path.is_dir():
+            return []
+
+        files = []
+        for file_path in host_path.rglob("*"):
+            if file_path.is_file():
+                rel_path = file_path.relative_to(host_path)
+                files.append(str(rel_path))
+        return files
+
     async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         """Execute a shell command in the Docker container.
 

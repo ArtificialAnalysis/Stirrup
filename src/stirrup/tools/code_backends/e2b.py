@@ -150,6 +150,68 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
 
         return await self._sbx.files.exists(path)
 
+    async def is_directory(self, path: str) -> bool:
+        """Check if a path is a directory in the E2B sandbox.
+
+        Args:
+            path: Path within the sandbox.
+
+        Returns:
+            True if the path exists and is a directory, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+
+        """
+        if self._sbx is None:
+            raise RuntimeError("ExecutionEnvironment not started.")
+
+        if not await self._sbx.files.exists(path):
+            return False
+
+        info = await self._sbx.files.get_info(path)
+        return info.type == FileType.DIR
+
+    async def list_files(self, path: str) -> list[str]:
+        """List all files recursively in a directory within the E2B sandbox.
+
+        Args:
+            path: Directory path within the sandbox.
+
+        Returns:
+            List of file paths (relative to the given path) for all files in the directory.
+            Returns an empty list if the path is a file or doesn't exist.
+
+        Raises:
+            RuntimeError: If environment not started.
+
+        """
+        if self._sbx is None:
+            raise RuntimeError("ExecutionEnvironment not started.")
+
+        if not await self._sbx.files.exists(path):
+            return []
+
+        info = await self._sbx.files.get_info(path)
+        if info.type != FileType.DIR:
+            return []
+
+        # Use find command to list all files recursively
+        result = await self.run_command(f"find {path} -type f")
+        if result.exit_code != 0:
+            return []
+
+        files = []
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                # Convert absolute path to relative path
+                rel_path = line.removeprefix(f"{path}/").removeprefix(path)
+                if rel_path.startswith("/"):
+                    rel_path = rel_path[1:]
+                if rel_path:
+                    files.append(rel_path)
+        return files
+
     async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         """Execute command in E2B execution environment, returning raw CommandResult."""
         if self._sbx is None:

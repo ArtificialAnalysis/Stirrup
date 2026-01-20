@@ -222,6 +222,49 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         resolved = self._resolve_and_validate_path(path)
         return resolved.exists() and resolved.is_file()
 
+    async def is_directory(self, path: str) -> bool:
+        """Check if a path is a directory in the temp directory.
+
+        Args:
+            path: Path (relative or absolute within the temp dir).
+
+        Returns:
+            True if the path exists and is a directory, False otherwise.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        return resolved.exists() and resolved.is_dir()
+
+    async def list_files(self, path: str) -> list[str]:
+        """List all files recursively in a directory within the temp directory.
+
+        Args:
+            path: Directory path (relative or absolute within the temp dir).
+
+        Returns:
+            List of file paths (relative to the given path) for all files in the directory.
+            Returns an empty list if the path is a file or doesn't exist.
+
+        Raises:
+            RuntimeError: If environment not started.
+            ValueError: If path is outside temp directory.
+
+        """
+        resolved = self._resolve_and_validate_path(path)
+        if not resolved.exists() or not resolved.is_dir():
+            return []
+
+        files = []
+        for file_path in resolved.rglob("*"):
+            if file_path.is_file():
+                rel_path = file_path.relative_to(resolved)
+                files.append(str(rel_path))
+        return files
+
     async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
         """Execute command in the temp directory.
 

@@ -43,7 +43,7 @@ async def main() -> None:
 
     async with agent.session(output_dir="output/browser_use_example") as session:
         _finish_params, _history, _metadata = await session.run(
-            "Go to artificial analysis and select o3 on the AA Index score"
+            "Go to artificial analysis and select GPT-5 (high) on the AA Index score"
         )
 
 

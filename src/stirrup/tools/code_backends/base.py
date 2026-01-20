@@ -245,6 +245,39 @@ class CodeExecToolProvider(ToolProvider, ABC):
         """
         ...
 
+    @abstractmethod
+    async def is_directory(self, path: str) -> bool:
+        """Check if a path is a directory in this execution environment.
+
+        Args:
+            path: Path within this execution environment.
+
+        Returns:
+            True if the path exists and is a directory, False otherwise.
+
+        Raises:
+            RuntimeError: If execution environment not started.
+
+        """
+        ...
+
+    @abstractmethod
+    async def list_files(self, path: str) -> list[str]:
+        """List all files recursively in a directory within this execution environment.
+
+        Args:
+            path: Directory path within this execution environment.
+
+        Returns:
+            List of file paths (relative to the given path) for all files in the directory.
+            Returns an empty list if the path is a file or doesn't exist.
+
+        Raises:
+            RuntimeError: If execution environment not started.
+
+        """
+        ...
+
     async def save_output_files(
         self,
         paths: list[str],
@@ -334,18 +367,44 @@ class CodeExecToolProvider(ToolProvider, ABC):
             try:
                 if source_env:
                     # Cross-environment transfer: read from source_env
-                    content = await source_env.read_file_bytes(path_str)
-                    filename = Path(path_str).name
-                    dest_path = f"{dest_dir_str}/{filename}" if dest_dir_str else filename
-                    logger.debug(
-                        "UPLOAD CROSS-ENV: %s (%d bytes) from %s -> %s",
-                        path_str,
-                        len(content),
-                        type(source_env).__name__,
-                        dest_path,
-                    )
-                    await self.write_file_bytes(dest_path, content)
-                    result.uploaded.append(UploadedFile(Path(path_str), dest_path, len(content)))
+                    # Check if it's a directory first
+                    if await source_env.is_directory(path_str):
+                        # Handle directory recursively
+                        # Preserve directory name when dest_dir not specified
+                        dir_name = Path(path_str).name
+                        files = await source_env.list_files(path_str)
+                        for rel_file_path in files:
+                            src_file_path = f"{path_str}/{rel_file_path}"
+                            # If dest_dir specified, put files directly there
+                            # Otherwise, preserve the source directory name
+                            if dest_dir_str:
+                                dest_path = f"{dest_dir_str}/{rel_file_path}"
+                            else:
+                                dest_path = f"{dir_name}/{rel_file_path}"
+                            content = await source_env.read_file_bytes(src_file_path)
+                            logger.debug(
+                                "UPLOAD CROSS-ENV (dir): %s (%d bytes) from %s -> %s",
+                                src_file_path,
+                                len(content),
+                                type(source_env).__name__,
+                                dest_path,
+                            )
+                            await self.write_file_bytes(dest_path, content)
+                            result.uploaded.append(UploadedFile(Path(src_file_path), dest_path, len(content)))
+                    else:
+                        # Single file transfer
+                        content = await source_env.read_file_bytes(path_str)
+                        filename = Path(path_str).name
+                        dest_path = f"{dest_dir_str}/{filename}" if dest_dir_str else filename
+                        logger.debug(
+                            "UPLOAD CROSS-ENV: %s (%d bytes) from %s -> %s",
+                            path_str,
+                            len(content),
+                            type(source_env).__name__,
+                            dest_path,
+                        )
+                        await self.write_file_bytes(dest_path, content)
+                        result.uploaded.append(UploadedFile(Path(path_str), dest_path, len(content)))
                 else:
                     # Local filesystem upload - must be handled by subclass
                     # This is a fallback that reads from local fs and writes to env
