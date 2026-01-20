@@ -33,10 +33,10 @@ async def main() -> None:
 
     async with agent.session(output_dir="output/open_responses_example") as session:
         _finish_params, _history, _metadata = await session.run(
-            "Solve this step by step: If a train travels 120 miles in 2 hours, "
-            "then stops for 30 minutes, then travels another 90 miles in 1.5 hours, "
-            "what is its average speed for the entire journey including the stop?"
-            "Output an excel document with the answer and the steps with formulas."
+            "Plan a software release with these tasks: Design (5 days), Backend (10 days, needs Design), "
+            "Frontend (8 days, needs Design), Testing (4 days, needs Backend and Frontend), "
+            "Documentation (3 days, can start after Backend). Two developers are available. "
+            "What's the minimum time to complete? Output an Excel Gantt chart with the schedule."
         )
 
 
