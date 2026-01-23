@@ -379,6 +379,10 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         exc_tb: object,
     ) -> None:
         """Stop container and cleanup temp directory."""
+        # Fix ownership of all files before cleanup (prevents permission errors on nested directories)
+        if self._container and self._temp_dir:
+            await self._fix_file_ownership()
+        
         # Stop and remove container
         if self._container:
             container = self._container  # Capture for lambda type narrowing
@@ -623,6 +627,47 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                 error_kind="execution_error",
             )
 
+    async def _fix_file_ownership(self, paths: list[str] | None = None) -> None:
+        """Fix ownership of files created by the container.
+        
+        Files and directories created inside the Docker container run as root,
+        which causes permission issues when trying to move/delete them from the host.
+        This method runs chown inside the container to fix ownership.
+        
+        Args:
+            paths: Specific paths to fix. If None, fixes all files in working_dir.
+                   Paths should be container paths (absolute or relative to working_dir).
+        """
+        if self._container is None:
+            return
+            
+        try:
+            # Get the host user ID to chown to
+            import os
+            host_uid = os.getuid()
+            host_gid = os.getgid()
+            
+            if paths:
+                # Fix specific paths
+                for path in paths:
+                    # Normalize path - handle both relative and absolute
+                    if not path.startswith('/'):
+                        container_path = f"{self._working_dir}/{path}"
+                    else:
+                        container_path = path
+                    
+                    # Use chown -R to handle directories recursively
+                    chown_cmd = f"chown -R {host_uid}:{host_gid} {container_path} 2>/dev/null || true"
+                    await self.run_command(chown_cmd, timeout=10)
+            else:
+                # Fix all files in working directory
+                chown_cmd = f"chown -R {host_uid}:{host_gid} {self._working_dir} 2>/dev/null || true"
+                await self.run_command(chown_cmd, timeout=10)
+                
+        except Exception as exc:
+            # Don't fail the operation if chown fails, just log warning
+            logger.warning("Failed to fix file ownership: %s", exc)
+
     async def save_output_files(
         self,
         paths: list[str],
@@ -661,6 +706,9 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         # If dest_env is provided, use the base class implementation (cross-env transfer)
         if dest_env is not None:
             return await super().save_output_files(paths, output_dir, dest_env)
+
+        # Fix ownership of files before moving them (solves permission issues with nested directories)
+        await self._fix_file_ownership(paths)
 
         # Local filesystem - use optimized move operation
         output_dir_path = Path(output_dir)
