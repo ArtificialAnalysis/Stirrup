@@ -258,6 +258,13 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                 stderr=str(exc),
                 error_kind="timeout",
             )
+        except Exception as exc:
+            return CommandResult(
+                exit_code=1,
+                stdout="",
+                stderr=str(exc),
+                error_kind="execution_error",
+            )
 
     async def save_output_files(
         self,

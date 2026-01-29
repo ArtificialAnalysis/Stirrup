@@ -107,6 +107,13 @@ class TestE2BCodeExecToolProvider:
                 result = await provider.run_command("sleep 1000")
                 assert result.error_kind == "timeout"
 
+                # Test unexpected Exception (catch-all handler)
+                mock_sandbox.commands.run = AsyncMock(side_effect=RuntimeError("E2B API failure"))
+                result = await provider.run_command("some command")
+                assert result.error_kind == "execution_error"
+                assert result.exit_code == 1
+                assert "E2B API failure" in result.stderr
+
     async def test_run_command_allowlist(self, mock_sandbox: MagicMock) -> None:
         """Test command allowlist enforcement."""
         provider = E2BCodeExecToolProvider(allowed_commands=[r"^echo", r"^python"])
