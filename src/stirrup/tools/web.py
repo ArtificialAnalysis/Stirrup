@@ -208,33 +208,40 @@ def _get_websearch_tool(
 
     async def websearch_executor(params: WebSearchParams) -> ToolResult[WebSearchMetadata]:
         """Execute web search and format results as XML with title, URL, and description."""
-        # Use provided client or create temporary one for backward compatibility
-        if client is not None:
-            data = await _search(params.query, client)
-        else:
-            async with httpx.AsyncClient(timeout=WEB_SEARCH_TIMEOUT) as temp_client:
-                data = await _search(params.query, temp_client)
+        try:
+            # Use provided client or create temporary one for backward compatibility
+            if client is not None:
+                data = await _search(params.query, client)
+            else:
+                async with httpx.AsyncClient(timeout=WEB_SEARCH_TIMEOUT) as temp_client:
+                    data = await _search(params.query, temp_client)
 
-        results = data.get("web", {}).get("results", [])
-        results_xml = (
-            "<results>\n"
-            + "\n".join(
-                (
-                    "<result>"
-                    f"\n<title>{escape(result.get('title', '') or '')}</title>"
-                    f"\n<url>{escape(result.get('url', '') or '')}</url>"
-                    f"\n<description>{escape(result.get('description', '') or '')}</description>"
-                    "\n</result>"
+            results = data.get("web", {}).get("results", [])
+            results_xml = (
+                "<results>\n"
+                + "\n".join(
+                    (
+                        "<result>"
+                        f"\n<title>{escape(result.get('title', '') or '')}</title>"
+                        f"\n<url>{escape(result.get('url', '') or '')}</url>"
+                        f"\n<description>{escape(result.get('description', '') or '')}</description>"
+                        "\n</result>"
+                    )
+                    for result in results
                 )
-                for result in results
+                + "\n</results>"
             )
-            + "\n</results>"
-        )
 
-        return ToolResult(
-            content=truncate_msg(results_xml, MAX_LENGTH_WEB_SEARCH_RESULTS),
-            metadata=WebSearchMetadata(pages_returned=len(results)),
-        )
+            return ToolResult(
+                content=truncate_msg(results_xml, MAX_LENGTH_WEB_SEARCH_RESULTS),
+                metadata=WebSearchMetadata(pages_returned=len(results)),
+            )
+        except httpx.HTTPError as exc:
+            return ToolResult(
+                content=f"<results><error>{truncate_msg(str(exc), 500)}</error></results>",
+                success=False,
+                metadata=WebSearchMetadata(pages_returned=0),
+            )
 
     return Tool[WebSearchParams, WebSearchMetadata](
         name="web_search",
