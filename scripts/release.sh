@@ -28,6 +28,14 @@ git pull
 NEW_VERSION=$(uv version --bump "$BUMP" --short)
 echo "Bumped to $NEW_VERSION"
 
+# Confirm before committing and pushing
+read -rp "About to release v$NEW_VERSION — continue? [y/N] " CONFIRM
+if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+    echo "Aborted."
+    git checkout pyproject.toml uv.lock
+    exit 1
+fi
+
 # Commit, tag, and push
 git add pyproject.toml uv.lock
 git commit -m "bump to v$NEW_VERSION"
