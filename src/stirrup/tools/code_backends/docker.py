@@ -106,7 +106,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         self._source = source
         self._is_dockerfile = is_dockerfile
         self._dockerfile_context = dockerfile_context
-        self._working_dir = working_dir
+        self._working_dir = working_dir.rstrip("/")
         self._temp_base_dir = temp_base_dir
         self._env_vars = env_vars
 
@@ -363,10 +363,12 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         self._temp_dir = None
 
     def _container_path_to_host(self, path: str) -> Path:
-        """Convert a container path to the corresponding host path.
+        """Convert a container or host path to the corresponding host path.
 
         Args:
-            path: Path in the container (relative or absolute).
+            path: Path to resolve. Can be relative to the container working directory,
+                an absolute container path (starting with working_dir), or an absolute
+                host path already within the temp directory.
 
         Returns:
             Resolved Path on the host filesystem.
@@ -384,7 +386,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         # Handle absolute host paths, absolute container paths, and relative paths
         if source_path.is_absolute():
             temp_dir_prefix = str(self._temp_dir) + os.sep
-            working_dir_prefix = self._working_dir.rstrip("/") + "/"
+            working_dir_prefix = self._working_dir + "/"
             if str(source_path).startswith(temp_dir_prefix):
                 # Already a valid host path within the temp directory
                 host_path = source_path
@@ -412,7 +414,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         Since files are volume-mounted, reads directly from the host temp directory.
 
         Args:
-            path: File path (relative or absolute container path).
+            path: File path (relative, absolute container, or absolute host path).
 
         Returns:
             File contents as bytes.
@@ -434,7 +436,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         Since files are volume-mounted, writes directly to the host temp directory.
 
         Args:
-            path: Destination path (relative or absolute container path).
+            path: Destination path (relative, absolute container, or absolute host path).
             content: File contents to write.
 
         Raises:
@@ -452,7 +454,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         Since files are volume-mounted, checks directly on the host temp directory.
 
         Args:
-            path: File path (relative or absolute container path).
+            path: File path (relative, absolute container, or absolute host path).
 
         Returns:
             True if the file exists, False otherwise.
@@ -471,7 +473,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         Since files are volume-mounted, checks directly on the host temp directory.
 
         Args:
-            path: Path (relative or absolute container path).
+            path: Path (relative, absolute container, or absolute host path).
 
         Returns:
             True if the path exists and is a directory, False otherwise.
@@ -490,7 +492,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         Since files are volume-mounted, lists directly from the host temp directory.
 
         Args:
-            path: Directory path (relative or absolute container path).
+            path: Directory path (relative, absolute container, or absolute host path).
 
         Returns:
             List of file paths (relative to the given path) for all files in the directory.
@@ -601,9 +603,11 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         using the base class implementation via read/write primitives.
 
         Args:
-            paths: List of file paths in the execution environment (relative or absolute container paths).
-                   Relative paths are resolved against the container working directory.
-                   Absolute container paths starting with working_dir are mapped to the host.
+            paths: List of file paths in the execution environment (relative, absolute container,
+                   or absolute host paths). Relative paths are resolved against the container
+                   working directory. Absolute container paths starting with working_dir are
+                   mapped to the host. Absolute host paths within the temp directory are
+                   accepted as-is.
             output_dir: Directory path to save files to.
             dest_env: If provided, output_dir is interpreted as a path within dest_env
                       (cross-environment transfer). If None, output_dir is a local
@@ -775,7 +779,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         """Read and return an image file from the Docker execution environment.
 
         Args:
-            path: Path to image file (relative to working directory, or absolute container path).
+            path: Path to image file (relative, absolute container, or absolute host path).
 
         Returns:
             ImageContentBlock containing the image data.
