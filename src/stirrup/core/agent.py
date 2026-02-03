@@ -65,6 +65,9 @@ class SessionState:
     - depth: Agent depth (0 = root, >0 = subagent)
     - output_dir: For root agent, this is a local filesystem path. For subagents,
       this is a path within the parent's exec env.
+    - exec_env_owned: Whether this session owns the exec_env and should clean it up.
+      When share_parent_exec_env=True, the subagent borrows the parent's exec_env
+      and exec_env_owned=False to prevent cleanup on subagent exit.
     """
 
     exit_stack: AsyncExitStack
@@ -72,6 +75,7 @@ class SessionState:
     output_dir: str | None = None  # String path (contextual: local for root, in parent env for subagent)
     parent_exec_env: CodeExecToolProvider | None = None
     depth: int = 0
+    exec_env_owned: bool = True  # Whether this session owns (and should cleanup) the exec_env
     uploaded_file_paths: list[str] = field(default_factory=list)  # Paths of files uploaded to exec_env
     skills_metadata: list[SkillMetadata] = field(default_factory=list)  # Loaded skills metadata
     logger: AgentLoggerBase | None = None  # Logger for pause/resume during user input
@@ -184,6 +188,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         turns_remaining_warning_threshold: int = TURNS_REMAINING_WARNING_THRESHOLD,
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
+        # Subagent options
+        share_parent_exec_env: bool = False,
         # Logging
         logger: AgentLoggerBase | None = None,
     ) -> None:
@@ -203,6 +209,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             context_summarization_cutoff: Fraction of context window (0-1) at which to trigger summarization
             run_sync_in_thread: Execute synchronous tool executors in a separate thread
             text_only_tool_responses: Extract images from tool responses as separate user messages
+            share_parent_exec_env: When True and used as a subagent, share the parent's code
+                                   execution environment instead of creating a new one. This
+                                   provides better performance (no file copying) and allows
+                                   the subagent to see all files in the parent's environment.
+                                   Only effective when the agent is used as a subagent via to_tool().
             logger: Optional logger instance. If None, creates AgentLogger() internally.
 
         """
@@ -224,6 +235,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
+        self._share_parent_exec_env = share_parent_exec_env
 
         # Logger (can be passed in or created here)
         self._logger: AgentLoggerBase = logger if logger is not None else AgentLogger()
@@ -572,22 +584,47 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             # (like ViewImageToolProvider) can access state.exec_env in second pass.
             active_tools: list[Tool] = []
 
-            # First pass: Initialize CodeExecToolProvider (at most one allowed)
-            code_exec_providers = [t for t in self._tools if isinstance(t, CodeExecToolProvider)]
-            if len(code_exec_providers) > 1:
-                raise ValueError(
-                    f"Agent can only have one CodeExecToolProvider, found {len(code_exec_providers)}: "
-                    f"{[type(p).__name__ for p in code_exec_providers]}"
-                )
+            # Check if we should share parent's exec_env (subagent with share_parent_exec_env=True)
+            should_share_exec_env = (
+                self._share_parent_exec_env
+                and current_depth > 0
+                and parent_state is not None
+                and parent_state.exec_env is not None
+            )
 
-            if code_exec_providers:
-                provider = code_exec_providers[0]
-                result = await exit_stack.enter_async_context(provider)
-                if isinstance(result, list):
-                    active_tools.extend(result)
-                else:
-                    active_tools.append(result)
-                state.exec_env = provider
+            if should_share_exec_env:
+                # SHARED EXEC ENV: Use parent's exec_env directly, don't create new one
+                state.exec_env = parent_state.exec_env  # type: ignore[union-attr]
+                state.exec_env_owned = False
+                logger.debug(
+                    "[%s __aenter__] Sharing parent's exec_env: %s (temp_dir=%s)",
+                    self._name,
+                    type(state.exec_env).__name__,
+                    getattr(state.exec_env, "_temp_dir", "N/A"),
+                )
+                # Skip CodeExecToolProvider initialization but still need to add code exec tool
+                # Create the tool from the shared exec_env using get_code_exec_tool()
+                # (the exec_env is already entered by parent, so we just create the tool wrapper)
+                code_exec_tool = state.exec_env.get_code_exec_tool()
+                active_tools.append(code_exec_tool)
+            else:
+                # OWNED EXEC ENV: Initialize our own CodeExecToolProvider (at most one allowed)
+                code_exec_providers = [t for t in self._tools if isinstance(t, CodeExecToolProvider)]
+                if len(code_exec_providers) > 1:
+                    raise ValueError(
+                        f"Agent can only have one CodeExecToolProvider, found {len(code_exec_providers)}: "
+                        f"{[type(p).__name__ for p in code_exec_providers]}"
+                    )
+
+                if code_exec_providers:
+                    provider = code_exec_providers[0]
+                    result = await exit_stack.enter_async_context(provider)
+                    if isinstance(result, list):
+                        active_tools.extend(result)
+                    else:
+                        active_tools.append(result)
+                    state.exec_env = provider
+                    state.exec_env_owned = True
 
             # Second pass: Initialize remaining ToolProviders and static Tools
             for tool in self._tools:
@@ -620,35 +657,57 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     raise ValueError("input_files specified but no CodeExecToolProvider configured")
 
                 logger.debug(
-                    "[%s __aenter__] Uploading input files: %s, depth=%d, parent_exec_env=%s, parent_exec_env._temp_dir=%s",
+                    "[%s __aenter__] Uploading input files: %s, depth=%d, parent_exec_env=%s, parent_exec_env._temp_dir=%s, exec_env_owned=%s",
                     self._name,
                     self._pending_input_files,
                     state.depth,
                     type(state.parent_exec_env).__name__ if state.parent_exec_env else None,
                     getattr(state.parent_exec_env, "_temp_dir", "N/A") if state.parent_exec_env else None,
+                    state.exec_env_owned,
                 )
 
                 if state.depth > 0 and state.parent_exec_env:
-                    # SUBAGENT: Read files from parent's exec env, write to subagent's exec env
-                    # input_files are paths within the parent's environment
-                    result = await state.exec_env.upload_files(
-                        *self._pending_input_files,
-                        source_env=state.parent_exec_env,
-                    )
+                    if not state.exec_env_owned:
+                        # SHARED EXEC ENV: Files already accessible - no transfer needed
+                        # Just record the paths as "uploaded" for system prompt
+                        if isinstance(self._pending_input_files, (str, Path)):
+                            state.uploaded_file_paths = [str(self._pending_input_files)]
+                        else:
+                            state.uploaded_file_paths = [str(p) for p in self._pending_input_files]
+                        logger.debug(
+                            "[%s __aenter__] Shared exec_env - files already accessible: %s",
+                            self._name,
+                            state.uploaded_file_paths,
+                        )
+                    else:
+                        # SEPARATE EXEC ENV: Read files from parent's exec env, write to subagent's exec env
+                        # input_files are paths within the parent's environment
+                        result = await state.exec_env.upload_files(
+                            *self._pending_input_files,
+                            source_env=state.parent_exec_env,
+                        )
+                        logger.debug(
+                            "[%s __aenter__] Upload result: uploaded=%s, failed=%s",
+                            self._name,
+                            result.uploaded,
+                            result.failed,
+                        )
+                        state.uploaded_file_paths = [uf.dest_path for uf in result.uploaded]
+                        if result.failed:
+                            raise RuntimeError(f"Failed to upload files: {result.failed}")
                 else:
                     # ROOT AGENT: Read files from local filesystem
                     resolved = self._resolve_input_files(self._pending_input_files)
                     result = await state.exec_env.upload_files(*resolved)
-
-                logger.debug(
-                    "[%s __aenter__] Upload result: uploaded=%s, failed=%s", self._name, result.uploaded, result.failed
-                )
-
-                # Store uploaded paths for system prompt
-                state.uploaded_file_paths = [uf.dest_path for uf in result.uploaded]
-
-                if result.failed:
-                    raise RuntimeError(f"Failed to upload files: {result.failed}")
+                    logger.debug(
+                        "[%s __aenter__] Upload result: uploaded=%s, failed=%s",
+                        self._name,
+                        result.uploaded,
+                        result.failed,
+                    )
+                    state.uploaded_file_paths = [uf.dest_path for uf in result.uploaded]
+                    if result.failed:
+                        raise RuntimeError(f"Failed to upload files: {result.failed}")
             self._pending_input_files = None  # Clear pending state
 
             # Upload skills directory if it exists and load metadata
@@ -667,7 +726,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 state.skills_metadata = parent_state.skills_metadata
                 logger.debug("[%s __aenter__] Inherited %d skills from parent", self._name, len(state.skills_metadata))
                 # Transfer skills directory from parent's exec_env to sub-agent's exec_env
-                if state.exec_env and parent_state.exec_env:
+                # (only if we have a separate exec_env)
+                if state.exec_env and parent_state.exec_env and state.exec_env_owned:
                     await state.exec_env.upload_files("skills", source_env=parent_state.exec_env)
 
             # Configure and enter logger context
@@ -767,8 +827,19 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             len(result.failed),
                         )
                     else:
-                        # SUBAGENT: Transfer to parent's exec env
-                        if state.parent_exec_env:
+                        # SUBAGENT: Handle file transfer based on exec_env ownership
+                        if not state.exec_env_owned:
+                            # SHARED EXEC ENV: Files already in parent's env - no transfer needed
+                            # Just record the paths for reporting to parent
+                            self._transferred_paths = list(paths)
+                            logger.debug(
+                                "[%s] SUBAGENT (depth=%d, shared_exec_env): Files already in parent env: %s",
+                                self._name,
+                                state.depth,
+                                self._transferred_paths,
+                            )
+                        elif state.parent_exec_env:
+                            # SEPARATE EXEC ENV: Transfer to parent's exec env
                             logger.debug(
                                 "[%s] SUBAGENT (depth=%d): Transferring %d file(s) to parent exec env: %s -> %s",
                                 self._name,
