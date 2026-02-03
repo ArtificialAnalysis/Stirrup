@@ -125,55 +125,6 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         """Return the container short ID, or None if not started."""
         return self._container.short_id if self._container else None
 
-    def _resolve_file_path(self, path: str) -> Path:
-        """Resolve a container path string to a validated host file path.
-
-        Args:
-            path: Path to file (relative to working directory, or absolute container path).
-
-        Returns:
-            Resolved absolute host Path to the file.
-
-        Raises:
-            RuntimeError: If execution environment not started.
-            ValueError: If path is outside mounted directory or is not a file.
-            FileNotFoundError: If file does not exist.
-
-        """
-        if self._temp_dir is None:
-            raise RuntimeError("ExecutionEnvironment not started. Use 'async with exec_env.create()' first.")
-
-        file_path = Path(path)
-
-        # Handle absolute host paths, absolute container paths, and relative paths
-        if file_path.is_absolute():
-            # Accept paths that are already host paths within the temp directory
-            temp_dir_str = str(self._temp_dir)
-            if str(file_path).startswith(temp_dir_str):
-                pass  # Already a valid host path
-            # Convert container absolute path to host path
-            # e.g., /workspace/image.png -> <temp_dir>/image.png
-            elif str(file_path).startswith(self._working_dir):
-                relative = file_path.relative_to(self._working_dir)
-                file_path = self._temp_dir / relative
-            else:
-                raise ValueError(f"Path is outside mounted directory: {path}")
-        else:
-            file_path = self._temp_dir / file_path
-
-        # Security check: ensure path is within temp directory
-        try:
-            file_path.resolve().relative_to(self._temp_dir.resolve())
-        except ValueError:
-            raise ValueError(f"Path is outside execution environment directory: {path}") from None
-
-        if not file_path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-        if not file_path.is_file():
-            raise ValueError(f"Path is not a file: {path}")
-
-        return file_path
-
     @classmethod
     def from_image(
         cls,
@@ -432,13 +383,14 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
 
         # Handle absolute host paths, absolute container paths, and relative paths
         if source_path.is_absolute():
-            # Accept paths that are already host paths within the temp directory
-            temp_dir_str = str(self._temp_dir)
-            if str(source_path).startswith(temp_dir_str):
+            temp_dir_prefix = str(self._temp_dir) + os.sep
+            working_dir_prefix = self._working_dir.rstrip("/") + "/"
+            if str(source_path).startswith(temp_dir_prefix):
+                # Already a valid host path within the temp directory
                 host_path = source_path
-            # Convert container absolute path to host path
-            # e.g., /workspace/output.txt -> <temp_dir>/output.txt
-            elif str(source_path).startswith(self._working_dir):
+            elif str(source_path).startswith(working_dir_prefix):
+                # Convert container absolute path to host path
+                # e.g., /workspace/output.txt -> <temp_dir>/output.txt
                 relative = source_path.relative_to(self._working_dir)
                 host_path = self._temp_dir / relative
             else:
