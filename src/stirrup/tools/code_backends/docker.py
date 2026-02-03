@@ -145,11 +145,15 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
 
         file_path = Path(path)
 
-        # Handle both absolute container paths and relative paths
+        # Handle absolute host paths, absolute container paths, and relative paths
         if file_path.is_absolute():
+            # Accept paths that are already host paths within the temp directory
+            temp_dir_str = str(self._temp_dir)
+            if str(file_path).startswith(temp_dir_str):
+                pass  # Already a valid host path
             # Convert container absolute path to host path
             # e.g., /workspace/image.png -> <temp_dir>/image.png
-            if str(file_path).startswith(self._working_dir):
+            elif str(file_path).startswith(self._working_dir):
                 relative = file_path.relative_to(self._working_dir)
                 file_path = self._temp_dir / relative
             else:
@@ -426,11 +430,15 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
 
         source_path = Path(path)
 
-        # Handle both absolute container paths and relative paths
+        # Handle absolute host paths, absolute container paths, and relative paths
         if source_path.is_absolute():
+            # Accept paths that are already host paths within the temp directory
+            temp_dir_str = str(self._temp_dir)
+            if str(source_path).startswith(temp_dir_str):
+                host_path = source_path
             # Convert container absolute path to host path
             # e.g., /workspace/output.txt -> <temp_dir>/output.txt
-            if str(source_path).startswith(self._working_dir):
+            elif str(source_path).startswith(self._working_dir):
                 relative = source_path.relative_to(self._working_dir)
                 host_path = self._temp_dir / relative
             else:
