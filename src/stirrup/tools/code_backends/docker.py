@@ -648,17 +648,13 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             host_gid = os.getgid()
 
             if paths:
-                # Fix specific paths
-                for path in paths:
-                    # Normalize path - handle both relative and absolute
-                    if not path.startswith("/"):
-                        container_path = f"{self._working_dir}/{path}"
-                    else:
-                        container_path = path
-
-                    # Use chown -R to handle directories recursively
-                    chown_cmd = f"chown -R {host_uid}:{host_gid} {shlex.quote(container_path)} 2>/dev/null || true"
-                    await self.run_command(chown_cmd, timeout=10)
+                # Normalize paths - handle both relative and absolute
+                container_paths = [
+                    f"{self._working_dir}/{path}" if not path.startswith("/") else path for path in paths
+                ]
+                quoted_paths = " ".join(shlex.quote(p) for p in container_paths)
+                chown_cmd = f"chown -R {host_uid}:{host_gid} {quoted_paths} 2>/dev/null || true"
+                await self.run_command(chown_cmd, timeout=10)
             else:
                 # Fix all files in working directory
                 chown_cmd = f"chown -R {host_uid}:{host_gid} {shlex.quote(self._working_dir)} 2>/dev/null || true"
