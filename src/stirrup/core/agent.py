@@ -25,6 +25,7 @@ from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
+    EffectiveThroughputUsage,
     ImageContentBlock,
     LLMClient,
     SubAgentMetadata,
@@ -132,6 +133,15 @@ def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage
         List of TokenUsage corresponding to each AssistantMessage in the flattened conversation history.
     """
     return [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)]
+
+
+def _get_total_effective_throughput(messages: list[list[ChatMessage]]) -> list[EffectiveThroughputUsage]:
+    """Return all measured effective throughput metadata from assistant messages."""
+    return [
+        msg.effective_throughput
+        for msg in chain.from_iterable(messages)
+        if isinstance(msg, AssistantMessage) and msg.effective_throughput is not None
+    ]
 
 
 class SubAgentParams(BaseModel):
@@ -605,6 +615,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Skip CodeExecToolProvider initialization but still need to add code exec tool
                 # Create the tool from the shared exec_env using get_code_exec_tool()
                 # (the exec_env is already entered by parent, so we just create the tool wrapper)
+                if state.exec_env is None:
+                    raise RuntimeError("Expected shared exec_env to be set, but it is None")
                 code_exec_tool = state.exec_env.get_code_exec_tool()
                 active_tools.append(code_exec_tool)
             else:
@@ -1163,6 +1175,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Add agent's own token usage to run_metadata under "token_usage" key
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
+        run_metadata["effective_throughput"] = _get_total_effective_throughput(full_msg_history)
 
         # Store for __aexit__ to access (on instance for this agent)
         self._last_finish_params = finish_params

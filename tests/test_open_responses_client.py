@@ -327,7 +327,7 @@ class TestOpenResponsesClient:
         assert isinstance(result, AssistantMessage)
         assert result.content == "Hello!"
         assert result.token_usage.input == 10
-        assert result.token_usage.output == 5
+        assert result.token_usage.answer == 5
 
     @pytest.mark.asyncio
     async def test_generate_with_tools(self) -> None:
@@ -410,7 +410,7 @@ class TestOpenResponsesClient:
         assert result.reasoning is not None
         assert result.reasoning.content == "Thinking step by step..."
         assert result.token_usage.reasoning == 80
-        assert result.token_usage.output == 20  # 100 - 80
+        assert result.token_usage.answer == 20  # 100 - 80
 
     @pytest.mark.asyncio
     async def test_generate_incomplete_raises_error(self) -> None:

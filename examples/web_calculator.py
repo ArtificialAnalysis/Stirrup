@@ -7,39 +7,45 @@ This example demonstrates how to create an agent that can:
 """
 
 # --8<-- [start:setup]
+import argparse
 import asyncio
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import CALCULATOR_TOOL, DEFAULT_TOOLS
+from stirrup.tools import CALCULATOR_TOOL
+from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
+from stirrup.tools.web import WebToolProvider
+
+DEFAULT_OPENROUTER_SLUG = "anthropic/claude-sonnet-4.5"
 
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
-    model="anthropic/claude-sonnet-4.5",
+    model=DEFAULT_OPENROUTER_SLUG,
 )
 
-# Create agent with default tools + calculator tool
+# Create agent with E2B execution + web tools + calculator
+# (This is just for the docs snippet above — the actual runnable code is in main() below)
 agent = Agent(
     client=client,
     name="web_calculator_agent",
-    tools=[*DEFAULT_TOOLS, CALCULATOR_TOOL],
+    tools=[E2BCodeExecToolProvider(), WebToolProvider(), CALCULATOR_TOOL],
 )
 # --8<-- [end:setup]
 
 
 # --8<-- [start:main]
-async def main() -> None:
+async def main(openrouter_slug: str) -> None:
     """Run a simple web-enabled calculator agent."""
     # Create client for OpenRouter
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
-        model="anthropic/claude-sonnet-4.5",
+        model=openrouter_slug,
         max_tokens=50_000,
     )
 
-    # Create agent with default tools (coding env, web_search, web_fetch) + calculator tool
-    tools = [*DEFAULT_TOOLS, CALCULATOR_TOOL]
+    # Create agent with E2B execution + web tools + calculator
+    tools = [E2BCodeExecToolProvider(), WebToolProvider(), CALCULATOR_TOOL]
     agent = Agent(
         client=client,
         name="web_calculator_agent",
@@ -48,7 +54,7 @@ async def main() -> None:
     )
 
     # Run with session context - handles all tool lifecycle and logging
-    async with agent.session() as session:
+    async with agent.session(output_dir="output") as session:
         _finish_params, _history, _metadata = await session.run(
             """Find the current world population and calculate what 10% of it would be.
             Use the web_search tool to find the current world population, then use
@@ -59,5 +65,19 @@ async def main() -> None:
 
 # --8<-- [end:main]
 
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments."""
+    parser = argparse.ArgumentParser(description="Run the web calculator example with an OpenRouter model slug.")
+    parser.add_argument(
+        "openrouter_slug",
+        nargs="?",
+        default=DEFAULT_OPENROUTER_SLUG,
+        help=f"OpenRouter model slug to use (default: {DEFAULT_OPENROUTER_SLUG})",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = parse_args()
+    asyncio.run(main(args.openrouter_slug))

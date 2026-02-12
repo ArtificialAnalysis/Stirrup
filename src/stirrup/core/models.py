@@ -28,6 +28,7 @@ __all__ = [
     "ChatMessage",
     "Content",
     "ContentBlock",
+    "EffectiveThroughputUsage",
     "EmptyParams",
     "ImageContentBlock",
     "LLMClient",
@@ -331,6 +332,26 @@ def _collect_all_token_usage(result: dict) -> "TokenUsage":
     return total
 
 
+def _collect_all_effective_throughput(result: dict) -> "EffectiveThroughputUsage":
+    """Recursively collect all effective_throughput metadata from a flattened aggregate_metadata result."""
+    total = EffectiveThroughputUsage(
+        num_calls=0,
+        sum_output_tokens_per_second=0.0,
+        output_tokens=0,
+        llm_call_duration_seconds=0.0,
+    )
+
+    for key, value in result.items():
+        if key == "effective_throughput" and isinstance(value, EffectiveThroughputUsage):
+            total = total + value
+        elif isinstance(value, dict):
+            nested_effective_throughput = value.get("effective_throughput")
+            if isinstance(nested_effective_throughput, EffectiveThroughputUsage):
+                total = total + nested_effective_throughput
+
+    return total
+
+
 def aggregate_metadata(
     metadata_dict: dict[str, list[Any]], prefix: str = "", return_json_serializable: bool = True
 ) -> dict | object:
@@ -388,6 +409,10 @@ def aggregate_metadata(
         if total_token_usage.total > 0:
             result["token_usage"] = [total_token_usage]
 
+        total_effective_throughput = _collect_all_effective_throughput(result)
+        if total_effective_throughput.num_calls > 0:
+            result["effective_throughput"] = [total_effective_throughput]
+
     if return_json_serializable:
         # Convert all Pydantic models to JSON-serializable dicts
         return to_json_serializable(result)
@@ -396,23 +421,69 @@ def aggregate_metadata(
 
 # Messages
 class TokenUsage(BaseModel):
-    """Token counts for LLM usage (input, output, reasoning tokens)."""
+    """Token counts for LLM usage.
+
+    Token terminology: output = reasoning + answer.
+    """
 
     input: int = 0
-    output: int = 0
+    answer: int = 0
     reasoning: int = 0
 
     @property
+    def output(self) -> int:
+        """Total output tokens (reasoning + answer)."""
+        return self.answer + self.reasoning
+
+    @property
     def total(self) -> int:
-        """Total token count across input, output, and reasoning."""
-        return self.input + self.output + self.reasoning
+        """Total token count across input, answer, and reasoning."""
+        return self.input + self.answer + self.reasoning
 
     def __add__(self, other: "TokenUsage") -> "TokenUsage":
         """Add two TokenUsage objects together, summing each field independently."""
         return TokenUsage(
             input=self.input + other.input,
-            output=self.output + other.output,
+            answer=self.answer + other.answer,
             reasoning=self.reasoning + other.reasoning,
+        )
+
+
+class EffectiveThroughputUsage(BaseModel):
+    """Aggregated effective throughput metadata measured over LLM call wall time.
+
+    Token terminology: output_tokens = reasoning_tokens + answer_tokens.
+    Throughput is computed over total output_tokens.
+    """
+
+    num_calls: int = 1
+    sum_output_tokens_per_second: float
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    llm_call_duration_seconds: float = 0.0
+    method: Literal["llm_call_wall_time"] = "llm_call_wall_time"
+
+    @property
+    def answer_tokens(self) -> int:
+        """Answer tokens (output_tokens - reasoning_tokens)."""
+        return self.output_tokens - self.reasoning_tokens
+
+    @property
+    def avg_output_tokens_per_second(self) -> float:
+        """Average effective throughput across all measured calls."""
+        if self.num_calls <= 0:
+            return 0.0
+        return self.sum_output_tokens_per_second / self.num_calls
+
+    def __add__(self, other: "EffectiveThroughputUsage") -> "EffectiveThroughputUsage":
+        """Combine effective throughput metadata across calls/runs."""
+        return EffectiveThroughputUsage(
+            num_calls=self.num_calls + other.num_calls,
+            sum_output_tokens_per_second=self.sum_output_tokens_per_second + other.sum_output_tokens_per_second,
+            output_tokens=self.output_tokens + other.output_tokens,
+            reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
+            llm_call_duration_seconds=self.llm_call_duration_seconds + other.llm_call_duration_seconds,
+            method=self.method,
         )
 
 
@@ -595,6 +666,7 @@ class AssistantMessage(BaseModel):
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    effective_throughput: EffectiveThroughputUsage | None = None
 
 
 class ToolMessage(BaseModel):

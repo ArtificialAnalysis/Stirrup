@@ -9,6 +9,7 @@ This is the default client for Stirrup.
 
 import logging
 import os
+from time import perf_counter
 from typing import Any
 
 from openai import (
@@ -20,7 +21,7 @@ from openai import (
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import to_openai_messages, to_openai_tools
+from stirrup.clients.utils import compute_effective_throughput, to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -164,7 +165,9 @@ class ChatCompletionsClient(LLMClient):
             request_kwargs["reasoning_effort"] = self._reasoning_effort
 
         # Make API call
+        start = perf_counter()
         response = await self._client.chat.completions.create(**request_kwargs)
+        llm_call_duration_seconds = perf_counter() - start
 
         choice = response.choices[0]
 
@@ -202,7 +205,14 @@ class ChatCompletionsClient(LLMClient):
         reasoning_tokens = 0
         if usage and hasattr(usage, "completion_tokens_details") and usage.completion_tokens_details:
             reasoning_tokens = getattr(usage.completion_tokens_details, "reasoning_tokens", 0) or 0
-            output_tokens = output_tokens - reasoning_tokens
+
+        answer_tokens = output_tokens - reasoning_tokens
+
+        effective_throughput = compute_effective_throughput(
+            output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+            llm_call_duration_seconds=llm_call_duration_seconds,
+        )
 
         return AssistantMessage(
             reasoning=reasoning,
@@ -210,7 +220,8 @@ class ChatCompletionsClient(LLMClient):
             tool_calls=tool_calls,
             token_usage=TokenUsage(
                 input=input_tokens,
-                output=output_tokens,
+                answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
+            effective_throughput=effective_throughput,
         )

@@ -145,9 +145,12 @@ class OpenAIClient:
         return AssistantMessage(
             content=message.content or "",
             tool_calls=[ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id) for tc in (message.tool_calls or [])],
-            token_usage=TokenUsage(input=response.usage.prompt_tokens, output=response.usage.completion_tokens),
+            token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
         )
 ```
+
+If your client uses streaming, you can also populate `AssistantMessage.effective_throughput`
+with `EffectiveThroughputUsage` metadata.
 
 ## Testing with Mock Client
 

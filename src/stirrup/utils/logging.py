@@ -60,17 +60,40 @@ def _format_token_usage(data: object) -> str:
         # Dict representation
         data_dict = cast(dict[str, Any], data)
         input_tokens: int = data_dict.get("input", 0)
-        output_tokens: int = data_dict.get("output", 0)
+        answer_tokens: int = data_dict.get("answer", 0)
         reasoning_tokens: int = data_dict.get("reasoning", 0)
-    elif hasattr(data, "input") and hasattr(data, "output"):
+    elif hasattr(data, "input") and hasattr(data, "answer"):
         # Pydantic TokenUsage object - use getattr for type safety
         input_tokens = int(getattr(data, "input", 0))
-        output_tokens = int(getattr(data, "output", 0))
+        answer_tokens = int(getattr(data, "answer", 0))
         reasoning_tokens = int(getattr(data, "reasoning", 0))
     else:
         return str(data)
-    total = input_tokens + output_tokens + reasoning_tokens
+    total = input_tokens + answer_tokens + reasoning_tokens
     return f"{total:,} tokens"
+
+
+def _format_effective_throughput(data: object) -> str:
+    """Format effective_throughput metadata as a human-readable string."""
+    if isinstance(data, dict):
+        data_dict = cast(dict[str, Any], data)
+        num_calls = int(data_dict.get("num_calls", 0))
+        sum_speed = float(data_dict.get("sum_output_tokens_per_second", 0.0))
+        output_tokens = int(data_dict.get("output_tokens", 0))
+        llm_call_duration_seconds = float(data_dict.get("llm_call_duration_seconds", 0.0))
+    elif hasattr(data, "num_calls") and hasattr(data, "sum_output_tokens_per_second"):
+        num_calls = int(getattr(data, "num_calls", 0))
+        sum_speed = float(getattr(data, "sum_output_tokens_per_second", 0.0))
+        output_tokens = int(getattr(data, "output_tokens", 0))
+        llm_call_duration_seconds = float(getattr(data, "llm_call_duration_seconds", 0.0))
+    else:
+        return str(data)
+
+    if llm_call_duration_seconds > 0:
+        avg_speed = output_tokens / llm_call_duration_seconds
+    else:
+        avg_speed = (sum_speed / num_calls) if num_calls > 0 else 0.0
+    return f"{avg_speed:.2f} tok/s ({num_calls} call(s))"
 
 
 def _get_nested_tools(data: object) -> dict[str, object]:
@@ -106,6 +129,12 @@ def _add_tool_branch(
             parent.add(f"[dim]token_usage:[/] {_format_token_usage(tool_data[0])}")
         else:
             parent.add(f"[dim]token_usage:[/] {_format_token_usage(tool_data)}")
+        return
+    if tool_name == "effective_throughput":
+        if isinstance(tool_data, list) and tool_data:
+            parent.add(f"[dim]effective_throughput:[/] {_format_effective_throughput(tool_data[0])}")
+        else:
+            parent.add(f"[dim]effective_throughput:[/] {_format_effective_throughput(tool_data)}")
         return
 
     # Case 1: List → aggregate using __add__, then recurse
@@ -540,10 +569,14 @@ class AgentLogger(AgentLoggerBase):
             if self.run_metadata:
                 aggregated = aggregate_metadata(self.run_metadata, return_json_serializable=False)
                 token_usage_list = aggregated.get("token_usage", [])
+                effective_throughput_list = aggregated.get("effective_throughput", [])
             else:
                 token_usage_list = []
+                effective_throughput_list = []
             tool_keys = (
-                [k for k in self.run_metadata if k not in ("token_usage", "finish")] if self.run_metadata else []
+                [k for k in self.run_metadata if k not in ("token_usage", "effective_throughput", "finish")]
+                if self.run_metadata
+                else []
             )
 
             # Build tool usage tree
@@ -587,7 +620,7 @@ class AgentLogger(AgentLoggerBase):
             token_panel = None
             if token_usage_list:
                 total_input = sum(getattr(u, "input", 0) for u in token_usage_list)
-                total_output = sum(getattr(u, "output", 0) for u in token_usage_list)
+                total_answer = sum(getattr(u, "answer", 0) for u in token_usage_list)
                 total_reasoning = sum(getattr(u, "reasoning", 0) for u in token_usage_list)
                 total_tokens = sum(getattr(u, "total", 0) for u in token_usage_list)
 
@@ -602,7 +635,7 @@ class AgentLogger(AgentLoggerBase):
                 token_table.add_column("Count", justify="right", style="green", footer=f"[bold]{total_tokens:,}[/]")
 
                 token_table.add_row("Input", f"{total_input:,}")
-                token_table.add_row("Output", f"{total_output:,}")
+                token_table.add_row("Answer", f"{total_answer:,}")
                 if total_reasoning > 0:
                     token_table.add_row("Reasoning", f"{total_reasoning:,}")
 
@@ -614,14 +647,58 @@ class AgentLogger(AgentLoggerBase):
                     expand=True,
                 )
 
-            # Display panels in 1:1:1 ratio layout (Tool Usage | Paths | Token Usage)
-            panels = [p for p in [tool_panel, paths_panel, token_panel] if p is not None]
+            throughput_panel = None
+            if effective_throughput_list:
+                total_calls = sum(getattr(s, "num_calls", 0) for s in effective_throughput_list)
+                sum_throughputs = sum(
+                    getattr(s, "sum_output_tokens_per_second", 0.0) for s in effective_throughput_list
+                )
+                avg_throughput = (sum_throughputs / total_calls) if total_calls > 0 else 0.0
+
+                total_llm_call_duration = sum(
+                    getattr(s, "llm_call_duration_seconds", 0.0) for s in effective_throughput_list
+                )
+                total_output_tokens = sum(getattr(s, "output_tokens", 0) for s in effective_throughput_list)
+                e2e_llm_throughput = (
+                    (total_output_tokens / total_llm_call_duration) if total_llm_call_duration > 0 else None
+                )
+
+                throughput_table = Table(
+                    box=box.SIMPLE,
+                    show_header=True,
+                    header_style="bold",
+                    expand=True,
+                )
+                throughput_table.add_column("Metric", style="cyan")
+                throughput_table.add_column("Value", justify="right", style="green")
+                if e2e_llm_throughput is not None:
+                    throughput_table.add_row("Effective OTPS", f"{e2e_llm_throughput:.2f}")
+                else:
+                    throughput_table.add_row("Effective OTPS", f"{avg_throughput:.2f}")
+                throughput_table.add_row("Calls", f"{total_calls:,}")
+                throughput_table.add_row("Total Generation Time (s)", f"{total_llm_call_duration:.2f}")
+
+                throughput_panel = Panel(
+                    throughput_table,
+                    title="[bold]Effective throughput[/]",
+                    title_align="left",
+                    border_style="blue",
+                    expand=True,
+                )
+
+            # Display panels in adaptive rows to avoid excessive truncation on narrow terminals.
+            panels = [p for p in [tool_panel, paths_panel, token_panel, throughput_panel] if p is not None]
             if panels:
-                layout_table = Table.grid(expand=True)
-                for _ in panels:
-                    layout_table.add_column(ratio=1)
-                layout_table.add_row(*panels)
-                console.print(layout_table)
+                min_panel_width = 44
+                max_columns = max(1, min(len(panels), console.size.width // min_panel_width))
+
+                for i in range(0, len(panels), max_columns):
+                    row = panels[i : i + max_columns]
+                    layout_table = Table.grid(expand=True)
+                    for _ in row:
+                        layout_table.add_column(ratio=1)
+                    layout_table.add_row(*row)
+                    console.print(layout_table)
                 console.print()
 
         console.rule(style="dim")

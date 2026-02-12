@@ -7,6 +7,7 @@ Requires the litellm extra: `pip install stirrup[litellm]`
 """
 
 import logging
+from time import perf_counter
 from typing import Any, Literal
 
 try:
@@ -20,7 +21,7 @@ except ImportError as e:
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import to_openai_messages, to_openai_tools
+from stirrup.clients.utils import compute_effective_throughput, to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -86,6 +87,7 @@ class LiteLLMClient(LLMClient):
     )
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
         """Generate assistant response with optional tool calls. Retries up to 3 times on timeout/connection errors."""
+        start = perf_counter()
         r = await acompletion(
             model=self.model_slug,
             messages=to_openai_messages(messages),
@@ -96,6 +98,7 @@ class LiteLLMClient(LLMClient):
             api_key=self._api_key,
             **self._kwargs,
         )
+        llm_call_duration_seconds = perf_counter() - start
 
         choice = r["choices"][0]
 
@@ -136,7 +139,14 @@ class LiteLLMClient(LLMClient):
         reasoning_tokens = 0
         if usage.completion_tokens_details:
             reasoning_tokens = usage.completion_tokens_details.reasoning_tokens or 0
-        output_tokens = usage.completion_tokens - reasoning_tokens
+        output_tokens = usage.completion_tokens
+        answer_tokens = output_tokens - reasoning_tokens
+
+        effective_throughput = compute_effective_throughput(
+            output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+            llm_call_duration_seconds=llm_call_duration_seconds,
+        )
 
         return AssistantMessage(
             reasoning=reasoning,
@@ -144,7 +154,8 @@ class LiteLLMClient(LLMClient):
             tool_calls=calls,
             token_usage=TokenUsage(
                 input=input_tokens,
-                output=output_tokens,
+                answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
+            effective_throughput=effective_throughput,
         )

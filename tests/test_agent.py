@@ -7,6 +7,7 @@ from stirrup.core.agent import Agent
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
+    EffectiveThroughputUsage,
     LLMClient,
     SystemMessage,
     TokenUsage,
@@ -15,6 +16,7 @@ from stirrup.core.models import (
     ToolMessage,
     ToolResult,
     UserMessage,
+    aggregate_metadata,
 )
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
@@ -53,7 +55,13 @@ async def test_agent_basic_finish() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
+            effective_throughput=EffectiveThroughputUsage(
+                num_calls=1,
+                sum_output_tokens_per_second=125.0,
+                output_tokens=50,
+                llm_call_duration_seconds=0.4,
+            ),
         )
     ]
 
@@ -83,6 +91,10 @@ async def test_agent_basic_finish() -> None:
     assert isinstance(run_metadata, dict)
     # Agent's own token usage metadata should be present
     assert "token_usage" in run_metadata
+    assert "effective_throughput" in run_metadata
+    assert len(run_metadata["effective_throughput"]) == 1
+    aggregated = aggregate_metadata(run_metadata, return_json_serializable=False)
+    assert aggregated["effective_throughput"][0].num_calls == 1
     assert len(message_history) == 1  # One turn
     assert client.call_count == 1
 
@@ -94,7 +106,7 @@ async def test_agent_max_turns() -> None:
         AssistantMessage(
             content=f"Turn {i}",
             tool_calls=[],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         )
         for i in range(5)
     ]
@@ -154,7 +166,7 @@ async def test_agent_tool_execution() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second turn: finish
         AssistantMessage(
@@ -166,7 +178,7 @@ async def test_agent_tool_execution() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 
@@ -222,7 +234,7 @@ async def test_agent_invalid_tool_call() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Then finish
         AssistantMessage(
@@ -234,7 +246,7 @@ async def test_agent_invalid_tool_call() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 
@@ -310,7 +322,7 @@ async def test_agent_finish_tool_validation() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: valid finish (status == "complete")
         AssistantMessage(
@@ -322,7 +334,7 @@ async def test_agent_finish_tool_validation() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 
@@ -361,7 +373,7 @@ async def test_finish_tool_validates_file_paths() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: finish with empty paths (should succeed)
         AssistantMessage(
@@ -373,7 +385,7 @@ async def test_finish_tool_validates_file_paths() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 

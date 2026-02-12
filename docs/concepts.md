@@ -82,7 +82,7 @@ history = [
         role='assistant',
         content="I'll search for Australia's population data...",
         tool_calls=[ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...')],
-        token_usage=TokenUsage(input=1523, output=156, reasoning=0)
+        token_usage=TokenUsage(input=1523, answer=156, reasoning=0)
     ),
     ToolMessage(role='tool', content="<results>...ABS data...</results>", name='web_search', ...),
     # ... additional turns ...
@@ -90,7 +90,7 @@ history = [
         role='assistant',
         content="All files are ready. Let me finish the task.",
         tool_calls=[ToolCall(name='finish', arguments='{"reason": "...", "paths": [...]}', ...)],
-        token_usage=TokenUsage(input=25102, output=285, reasoning=0)
+        token_usage=TokenUsage(input=25102, answer=285, reasoning=0)
     ),
     ToolMessage(role='tool', content="Successfully completed...", name='finish', ...),
 ]
@@ -101,6 +101,7 @@ history = [
 A dictionary containing metadata from tool executions:
 
 - `token_usage`: Total token counts (input, output, reasoning)
+- `effective_throughput`: Average effective throughput across measured calls (tokens/sec)
 - Per-tool metadata (e.g., `code_exec`, `web_search`, `web_fetch`)
 
 ```python
@@ -109,7 +110,8 @@ metadata = {
     "fetch_web_page": [WebFetchMetadata(num_uses=1, pages_fetched=['https://...'])],
     "code_exec": [ToolUseCountMetadata(num_uses=3)],
     "finish": [ToolUseCountMetadata(num_uses=1)],
-    "token_usage": [TokenUsage(input=239283, output=4189, reasoning=0)]
+    "effective_throughput": [EffectiveThroughputUsage(num_calls=3, sum_output_tokens_per_second=146.2)],
+    "token_usage": [TokenUsage(input=239283, answer=4189, reasoning=0)]
 }
 ```
 
@@ -120,6 +122,7 @@ from stirrup import aggregate_metadata
 
 aggregated = aggregate_metadata(metadata)
 print(f"Total tokens: {aggregated['token_usage'].total}")
+print(f"Avg effective throughput: {aggregated['effective_throughput'].avg_output_tokens_per_second:.2f} tok/s")
 ```
 
 ## Session

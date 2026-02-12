@@ -7,6 +7,7 @@ the Responses API via the `base_url` parameter.
 
 import logging
 import os
+from time import perf_counter
 from typing import Any
 
 from openai import (
@@ -18,6 +19,7 @@ from openai import (
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from stirrup.clients.utils import compute_effective_throughput
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -398,7 +400,9 @@ class OpenResponsesClient(LLMClient):
             request_kwargs["reasoning"] = {"effort": self._reasoning_effort}
 
         # Make API call
+        start = perf_counter()
         response = await self._client.responses.create(**request_kwargs)
+        llm_call_duration_seconds = perf_counter() - start
 
         # Check for incomplete response (context overflow)
         if response.status == "incomplete":
@@ -420,7 +424,14 @@ class OpenResponsesClient(LLMClient):
         reasoning_tokens = 0
         if usage and hasattr(usage, "output_tokens_details") and usage.output_tokens_details:
             reasoning_tokens = getattr(usage.output_tokens_details, "reasoning_tokens", 0) or 0
-            output_tokens = output_tokens - reasoning_tokens
+
+        answer_tokens = output_tokens - reasoning_tokens
+
+        effective_throughput = compute_effective_throughput(
+            output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+            llm_call_duration_seconds=llm_call_duration_seconds,
+        )
 
         return AssistantMessage(
             reasoning=reasoning,
@@ -428,7 +439,8 @@ class OpenResponsesClient(LLMClient):
             tool_calls=tool_calls,
             token_usage=TokenUsage(
                 input=input_tokens,
-                output=output_tokens,
+                answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
+            effective_throughput=effective_throughput,
         )
