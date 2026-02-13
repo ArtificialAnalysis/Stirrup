@@ -60,17 +60,64 @@ def _format_token_usage(data: object) -> str:
         # Dict representation
         data_dict = cast(dict[str, Any], data)
         input_tokens: int = data_dict.get("input", 0)
-        output_tokens: int = data_dict.get("output", 0)
+        answer_tokens: int = data_dict.get("answer", 0)
         reasoning_tokens: int = data_dict.get("reasoning", 0)
-    elif hasattr(data, "input") and hasattr(data, "output"):
+    elif hasattr(data, "input") and hasattr(data, "answer"):
         # Pydantic TokenUsage object - use getattr for type safety
         input_tokens = int(getattr(data, "input", 0))
-        output_tokens = int(getattr(data, "output", 0))
+        answer_tokens = int(getattr(data, "answer", 0))
         reasoning_tokens = int(getattr(data, "reasoning", 0))
     else:
         return str(data)
-    total = input_tokens + output_tokens + reasoning_tokens
+    total = input_tokens + answer_tokens + reasoning_tokens
     return f"{total:,} tokens"
+
+
+def _collect_model_speed_stats(
+    run_metadata: dict[str, list[Any]],
+) -> dict[str, dict[str, float | int | str]]:
+    """Collect _model_speed stats from run_metadata, merging across sub-agents by model slug.
+
+    Each agent stores _model_speed as a flat dict with a single model_slug.
+    This function merges stats from the current agent and all sub-agents,
+    grouping by model_slug to produce per-model totals.
+    """
+    merged: dict[str, dict[str, float | int | str]] = {}
+
+    def _merge(stats: dict) -> None:
+        slug = stats.get("model_slug")
+        if not slug:
+            return
+        if slug not in merged:
+            merged[slug] = {"model_slug": slug, "num_calls": 0, "output_tokens": 0, "duration": 0.0}
+        merged[slug]["num_calls"] = int(merged[slug]["num_calls"]) + int(stats.get("num_calls", 0))
+        merged[slug]["output_tokens"] = int(merged[slug]["output_tokens"]) + int(stats.get("output_tokens", 0))
+        merged[slug]["duration"] = float(merged[slug]["duration"]) + float(stats.get("duration", 0.0))
+
+    # Direct _model_speed at this level (flat dict with model_slug key)
+    direct = run_metadata.get("_model_speed")
+    if isinstance(direct, dict) and direct:
+        _merge(direct)
+
+    # Recurse into sub-agent metadata
+    for key, value_list in run_metadata.items():
+        if key.startswith("_"):
+            continue
+        if not isinstance(value_list, list):
+            continue
+        for item in value_list:
+            if hasattr(item, "run_metadata") and isinstance(item.run_metadata, dict):
+                nested = _collect_model_speed_stats(item.run_metadata)
+                for stats in nested.values():
+                    _merge(stats)
+
+    # Recompute e2e_otps after merging
+    for stats in merged.values():
+        dur = float(stats["duration"])
+        out = int(stats["output_tokens"])
+        stats["e2e_otps"] = out / dur if dur > 0 else 0.0
+
+    return merged
 
 
 def _get_nested_tools(data: object) -> dict[str, object]:
@@ -91,6 +138,7 @@ def _add_tool_branch(
     tool_name: str,
     tool_data: object,
     skip_fields: set[str],
+    tool_durations: dict[str, list[float]] | None = None,
 ) -> None:
     """Add a tool entry to the tree, handling nested sub-agent data recursively.
 
@@ -99,6 +147,7 @@ def _add_tool_branch(
         tool_name: Name of the tool or sub-agent
         tool_data: The tool's metadata (dict, Pydantic model, list, or scalar)
         skip_fields: Fields to skip when displaying dict contents
+        tool_durations: Optional mapping of tool name to list of execution durations
     """
     # Special case: token_usage formatted as total tokens
     if tool_name == "token_usage":
@@ -107,19 +156,20 @@ def _add_tool_branch(
         else:
             parent.add(f"[dim]token_usage:[/] {_format_token_usage(tool_data)}")
         return
-
     # Case 1: List → aggregate using __add__, then recurse
     if isinstance(tool_data, list) and tool_data:
         aggregated = _aggregate_list(tool_data)
         if aggregated is not None:
-            _add_tool_branch(parent, tool_name, aggregated, skip_fields)
+            _add_tool_branch(parent, tool_name, aggregated, skip_fields, tool_durations)
         return
 
     # Case 2: SubAgentMetadata → recurse into run_metadata only
     if _is_subagent_metadata(tool_data):
         branch = parent.add(f"[magenta]{tool_name}[/]")
         for nested_name, nested_data in sorted(_get_nested_tools(tool_data).items()):
-            _add_tool_branch(branch, nested_name, nested_data, skip_fields)
+            if nested_name.startswith("_"):
+                continue
+            _add_tool_branch(branch, nested_name, nested_data, skip_fields, tool_durations)
         return
 
     # Case 3: Leaf node - display fields as branches
@@ -133,10 +183,16 @@ def _add_tool_branch(
         parent.add(f"[magenta]{tool_name}[/]: {tool_data}")
         return
 
-    # Show num_uses inline with the tool name if present
+    # Show num_uses inline with the tool name if present, plus avg duration
     num_uses = data_dict.get("num_uses")
+    durations = tool_durations.get(tool_name, []) if tool_durations else []
+    avg_duration_str = ""
+    if durations:
+        avg_dur = sum(durations) / len(durations)
+        avg_duration_str = f", avg {avg_dur:.2f}s"
+
     if num_uses is not None:
-        branch = parent.add(f"[magenta]{tool_name}[/]: {num_uses} call(s)")
+        branch = parent.add(f"[magenta]{tool_name}[/]: {num_uses} call(s){avg_duration_str}")
     else:
         branch = parent.add(f"[magenta]{tool_name}[/]")
 
@@ -542,8 +598,13 @@ class AgentLogger(AgentLoggerBase):
                 token_usage_list = aggregated.get("token_usage", [])
             else:
                 token_usage_list = []
+            tool_durations: dict[str, list[float]] = (
+                self.run_metadata.get("_tool_durations", {}) if self.run_metadata else {}
+            )  # type: ignore[assignment]
             tool_keys = (
-                [k for k in self.run_metadata if k not in ("token_usage", "finish")] if self.run_metadata else []
+                [k for k in self.run_metadata if k not in ("token_usage", "_tool_durations", "_model_speed", "finish")]
+                if self.run_metadata
+                else []
             )
 
             # Build tool usage tree
@@ -552,7 +613,7 @@ class AgentLogger(AgentLoggerBase):
                 tool_tree = Tree("🔧 [bold]Tools[/]", guide_style="dim")
                 skip_fields = {"num_uses"}
                 for tool_name in sorted(tool_keys):
-                    _add_tool_branch(tool_tree, tool_name, self.run_metadata[tool_name], skip_fields)
+                    _add_tool_branch(tool_tree, tool_name, self.run_metadata[tool_name], skip_fields, tool_durations)
 
                 tool_panel = Panel(
                     tool_tree,
@@ -587,7 +648,7 @@ class AgentLogger(AgentLoggerBase):
             token_panel = None
             if token_usage_list:
                 total_input = sum(getattr(u, "input", 0) for u in token_usage_list)
-                total_output = sum(getattr(u, "output", 0) for u in token_usage_list)
+                total_answer = sum(getattr(u, "answer", 0) for u in token_usage_list)
                 total_reasoning = sum(getattr(u, "reasoning", 0) for u in token_usage_list)
                 total_tokens = sum(getattr(u, "total", 0) for u in token_usage_list)
 
@@ -602,7 +663,7 @@ class AgentLogger(AgentLoggerBase):
                 token_table.add_column("Count", justify="right", style="green", footer=f"[bold]{total_tokens:,}[/]")
 
                 token_table.add_row("Input", f"{total_input:,}")
-                token_table.add_row("Output", f"{total_output:,}")
+                token_table.add_row("Answer", f"{total_answer:,}")
                 if total_reasoning > 0:
                     token_table.add_row("Reasoning", f"{total_reasoning:,}")
 
@@ -614,14 +675,51 @@ class AgentLogger(AgentLoggerBase):
                     expand=True,
                 )
 
-            # Display panels in 1:1:1 ratio layout (Tool Usage | Paths | Token Usage)
-            panels = [p for p in [tool_panel, paths_panel, token_panel] if p is not None]
+            # Build model speed panel
+            throughput_panel = None
+            if self.run_metadata:
+                model_speed_stats = _collect_model_speed_stats(self.run_metadata)
+                if model_speed_stats:
+                    throughput_table = Table(
+                        box=box.SIMPLE,
+                        show_header=True,
+                        header_style="bold",
+                        expand=True,
+                    )
+                    throughput_table.add_column("Model", style="cyan", no_wrap=True)
+                    throughput_table.add_column("E2E OTPS", justify="right", style="green")
+                    throughput_table.add_column("Calls", justify="right", style="green")
+                    throughput_table.add_column("Time (s)", justify="right", style="green")
+
+                    for stats in model_speed_stats.values():
+                        throughput_table.add_row(
+                            str(stats["model_slug"]),
+                            f"{float(stats['e2e_otps']):.2f}",
+                            f"{int(stats['num_calls']):,}",
+                            f"{float(stats['duration']):.2f}",
+                        )
+
+                    throughput_panel = Panel(
+                        throughput_table,
+                        title="[bold]Model Speed[/]",
+                        title_align="left",
+                        border_style="blue",
+                        expand=True,
+                    )
+
+            # Display panels in adaptive rows to avoid excessive truncation on narrow terminals.
+            panels = [p for p in [tool_panel, paths_panel, token_panel, throughput_panel] if p is not None]
             if panels:
-                layout_table = Table.grid(expand=True)
-                for _ in panels:
-                    layout_table.add_column(ratio=1)
-                layout_table.add_row(*panels)
-                console.print(layout_table)
+                min_panel_width = 44
+                max_columns = max(1, min(len(panels), console.size.width // min_panel_width))
+
+                for i in range(0, len(panels), max_columns):
+                    row = panels[i : i + max_columns]
+                    layout_table = Table.grid(expand=True)
+                    for _ in row:
+                        layout_table.add_column(ratio=1)
+                    layout_table.add_row(*row)
+                    console.print(layout_table)
                 console.print()
 
         console.rule(style="dim")

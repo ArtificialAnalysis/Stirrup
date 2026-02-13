@@ -53,7 +53,9 @@ async def test_agent_basic_finish() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
+            request_start_time=100.0,
+            request_end_time=100.4,
         )
     ]
 
@@ -94,7 +96,7 @@ async def test_agent_max_turns() -> None:
         AssistantMessage(
             content=f"Turn {i}",
             tool_calls=[],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         )
         for i in range(5)
     ]
@@ -154,7 +156,7 @@ async def test_agent_tool_execution() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second turn: finish
         AssistantMessage(
@@ -166,7 +168,7 @@ async def test_agent_tool_execution() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 
@@ -222,7 +224,7 @@ async def test_agent_invalid_tool_call() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Then finish
         AssistantMessage(
@@ -234,7 +236,7 @@ async def test_agent_invalid_tool_call() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 
@@ -310,7 +312,7 @@ async def test_agent_finish_tool_validation() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: valid finish (status == "complete")
         AssistantMessage(
@@ -322,7 +324,7 @@ async def test_agent_finish_tool_validation() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 
@@ -361,7 +363,7 @@ async def test_finish_tool_validates_file_paths() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: finish with empty paths (should succeed)
         AssistantMessage(
@@ -373,7 +375,7 @@ async def test_finish_tool_validates_file_paths() -> None:
                     tool_call_id="call_2",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 

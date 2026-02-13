@@ -145,9 +145,12 @@ class OpenAIClient:
         return AssistantMessage(
             content=message.content or "",
             tool_calls=[ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id) for tc in (message.tool_calls or [])],
-            token_usage=TokenUsage(input=response.usage.prompt_tokens, output=response.usage.completion_tokens),
+            token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
         )
 ```
+
+You can optionally populate `request_start_time` and `request_end_time` on `AssistantMessage`
+to track generation speed. The derived `e2e_otps` property computes output tokens per second.
 
 ## Testing with Mock Client
 

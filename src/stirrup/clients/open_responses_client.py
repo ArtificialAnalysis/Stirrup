@@ -7,6 +7,7 @@ the Responses API via the `base_url` parameter.
 
 import logging
 import os
+from time import perf_counter
 from typing import Any
 
 from openai import (
@@ -398,7 +399,9 @@ class OpenResponsesClient(LLMClient):
             request_kwargs["reasoning"] = {"effort": self._reasoning_effort}
 
         # Make API call
+        request_start_time = perf_counter()
         response = await self._client.responses.create(**request_kwargs)
+        request_end_time = perf_counter()
 
         # Check for incomplete response (context overflow)
         if response.status == "incomplete":
@@ -420,7 +423,8 @@ class OpenResponsesClient(LLMClient):
         reasoning_tokens = 0
         if usage and hasattr(usage, "output_tokens_details") and usage.output_tokens_details:
             reasoning_tokens = getattr(usage.output_tokens_details, "reasoning_tokens", 0) or 0
-            output_tokens = output_tokens - reasoning_tokens
+
+        answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
             reasoning=reasoning,
@@ -428,7 +432,9 @@ class OpenResponsesClient(LLMClient):
             tool_calls=tool_calls,
             token_usage=TokenUsage(
                 input=input_tokens,
-                output=output_tokens,
+                answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
+            request_start_time=request_start_time,
+            request_end_time=request_end_time,
         )

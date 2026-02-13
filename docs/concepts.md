@@ -84,7 +84,7 @@ history = [
         role='assistant',
         content="I'll search for Australia's population data...",
         tool_calls=[ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...')],
-        token_usage=TokenUsage(input=1523, output=156, reasoning=0)
+        token_usage=TokenUsage(input=1523, answer=156, reasoning=0)
     ),
     ToolMessage(role='tool', content="<results>...ABS data...</results>", name='web_search', ...),
     # ... additional turns ...
@@ -92,7 +92,7 @@ history = [
         role='assistant',
         content="All files are ready. Let me finish the task.",
         tool_calls=[ToolCall(name='finish', arguments='{"reason": "...", "paths": [...]}', ...)],
-        token_usage=TokenUsage(input=25102, output=285, reasoning=0)
+        token_usage=TokenUsage(input=25102, answer=285, reasoning=0)
     ),
     ToolMessage(role='tool', content="Successfully completed...", name='finish', ...),
 ]
@@ -111,7 +111,7 @@ metadata = {
     "fetch_web_page": [WebFetchMetadata(num_uses=1, pages_fetched=['https://...'])],
     "code_exec": [ToolUseCountMetadata(num_uses=3)],
     "finish": [ToolUseCountMetadata(num_uses=1)],
-    "token_usage": [TokenUsage(input=239283, output=4189, reasoning=0)]
+    "token_usage": [TokenUsage(input=239283, answer=4189, reasoning=0)]
 }
 ```
 
@@ -123,6 +123,8 @@ from stirrup import aggregate_metadata
 aggregated = aggregate_metadata(metadata)
 print(f"Total tokens: {aggregated['token_usage'].total}")
 ```
+
+Speed metrics are available directly on each `AssistantMessage` via `request_start_time`, `request_end_time`, and the derived `e2e_otps` property. Similarly, `ToolMessage` has `tool_start_time`, `tool_end_time`, and a `tool_duration` property.
 
 ## Session
 

@@ -7,6 +7,8 @@ Requires the litellm extra: `pip install stirrup[litellm]`
 """
 
 import logging
+import warnings
+from time import perf_counter
 from typing import Any, Literal
 
 try:
@@ -49,8 +51,10 @@ class LiteLLMClient(LLMClient):
 
     def __init__(
         self,
-        model_slug: str,
-        max_tokens: int,
+        model: str | None = None,
+        max_tokens: int = 64_000,
+        *,
+        model_slug: str | None = None,
         api_key: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         kwargs: dict[str, Any] | None = None,
@@ -58,12 +62,23 @@ class LiteLLMClient(LLMClient):
         """Initialize LiteLLM client with model configuration and capabilities.
 
         Args:
-            model_slug: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
+            model: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
             max_tokens: Maximum context window size in tokens
+            model_slug: Deprecated. Use model instead.
             reasoning_effort: Reasoning effort level for extended thinking models (e.g., 'medium', 'high')
             kwargs: Additional arguments to pass to LiteLLM completion calls
         """
-        self._model_slug = model_slug
+        if model_slug is not None:
+            warnings.warn(
+                "The 'model_slug' parameter is deprecated. Use 'model' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if model is None:
+                model = model_slug
+        if model is None:
+            raise ValueError("model is required")
+        self._model = model
         self._max_tokens = max_tokens
         self._reasoning_effort: ReasoningEffort | None = reasoning_effort
         self._api_key = api_key
@@ -77,7 +92,7 @@ class LiteLLMClient(LLMClient):
     @property
     def model_slug(self) -> str:
         """Model identifier used by LiteLLM."""
-        return self._model_slug
+        return self._model
 
     @retry(
         retry=retry_if_exception_type((Timeout, APIConnectionError, RateLimitError)),
@@ -86,6 +101,7 @@ class LiteLLMClient(LLMClient):
     )
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
         """Generate assistant response with optional tool calls. Retries up to 3 times on timeout/connection errors."""
+        request_start_time = perf_counter()
         r = await acompletion(
             model=self.model_slug,
             messages=to_openai_messages(messages),
@@ -96,6 +112,7 @@ class LiteLLMClient(LLMClient):
             api_key=self._api_key,
             **self._kwargs,
         )
+        request_end_time = perf_counter()
 
         choice = r["choices"][0]
 
@@ -136,7 +153,8 @@ class LiteLLMClient(LLMClient):
         reasoning_tokens = 0
         if usage.completion_tokens_details:
             reasoning_tokens = usage.completion_tokens_details.reasoning_tokens or 0
-        output_tokens = usage.completion_tokens - reasoning_tokens
+        output_tokens = usage.completion_tokens
+        answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
             reasoning=reasoning,
@@ -144,7 +162,9 @@ class LiteLLMClient(LLMClient):
             tool_calls=calls,
             token_usage=TokenUsage(
                 input=input_tokens,
-                output=output_tokens,
+                answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
+            request_start_time=request_start_time,
+            request_end_time=request_end_time,
         )

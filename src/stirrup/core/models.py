@@ -356,10 +356,10 @@ def aggregate_metadata(
     """
     result: dict = {}
 
-    # First pass: aggregate all entries in this level
+    # First pass: aggregate all entries in this level (skip internal keys prefixed with _)
     aggregated_level: dict = {}
     for name, metadata_list in metadata_dict.items():
-        if not metadata_list:
+        if name.startswith("_") or not metadata_list:
             continue
         aggregated_level[name] = _aggregate_list(metadata_list)
 
@@ -396,22 +396,42 @@ def aggregate_metadata(
 
 # Messages
 class TokenUsage(BaseModel):
-    """Token counts for LLM usage (input, output, reasoning tokens)."""
+    """Token counts for LLM usage.
+
+    Token terminology: output = reasoning + answer.
+    """
 
     input: int = 0
-    output: int = 0
+    answer: int = 0
     reasoning: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecate_output_field(cls, data: dict | object) -> dict | object:  # type: ignore[override]
+        if isinstance(data, dict) and "output" in data:
+            warnings.warn(
+                "The 'output' field is deprecated. Use 'answer' instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            data.setdefault("answer", data.pop("output"))  # type: ignore[union-attr]
+        return data
+
+    @property
+    def output(self) -> int:
+        """Total output tokens (reasoning + answer)."""
+        return self.answer + self.reasoning
 
     @property
     def total(self) -> int:
-        """Total token count across input, output, and reasoning."""
-        return self.input + self.output + self.reasoning
+        """Total token count across input, answer, and reasoning."""
+        return self.input + self.answer + self.reasoning
 
     def __add__(self, other: "TokenUsage") -> "TokenUsage":
         """Add two TokenUsage objects together, summing each field independently."""
         return TokenUsage(
             input=self.input + other.input,
-            output=self.output + other.output,
+            answer=self.answer + other.answer,
             reasoning=self.reasoning + other.reasoning,
         )
 
@@ -595,6 +615,18 @@ class AssistantMessage(BaseModel):
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    request_start_time: float | None = None
+    request_end_time: float | None = None
+
+    @property
+    def e2e_otps(self) -> float | None:
+        """End-to-end output tokens per second."""
+        if self.request_start_time is None or self.request_end_time is None:
+            return None
+        duration = self.request_end_time - self.request_start_time
+        if duration <= 0 or self.token_usage.output <= 0:
+            return None
+        return self.token_usage.output / duration
 
 
 class ToolMessage(BaseModel):
@@ -615,6 +647,18 @@ class ToolMessage(BaseModel):
     name: str | None = None
     args_was_valid: bool = True
     success: bool = False
+    tool_start_time: float | None = None
+    tool_end_time: float | None = None
+
+    @property
+    def tool_duration(self) -> float | None:
+        """Tool execution duration in seconds."""
+        if self.tool_start_time is None or self.tool_end_time is None:
+            return None
+        duration = self.tool_end_time - self.tool_start_time
+        if duration < 0:
+            return None
+        return duration
 
 
 type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
@@ -628,19 +672,19 @@ class SubAgentMetadata(BaseModel):
     """
 
     message_history: list[list[ChatMessage]]
-    run_metadata: Annotated[dict[str, list[Any]], Field(default_factory=dict)]
+    run_metadata: Annotated[dict[str, Any], Field(default_factory=dict)]
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":
         """Combine metadata from multiple subagent calls."""
         # Concatenate message histories
         combined_history = self.message_history + other.message_history
-        # Merge run metadata (concatenate lists per key)
-        combined_meta: dict[str, list[Any]] = dict(self.run_metadata)
-        for key, metadata_list in other.run_metadata.items():
-            if key in combined_meta:
-                combined_meta[key] = combined_meta[key] + metadata_list
+        # Merge run metadata (concatenate lists per key, keep last for non-list internal keys)
+        combined_meta: dict[str, Any] = dict(self.run_metadata)
+        for key, value in other.run_metadata.items():
+            if key in combined_meta and isinstance(combined_meta[key], list) and isinstance(value, list):
+                combined_meta[key] = combined_meta[key] + value
             else:
-                combined_meta[key] = list(metadata_list)
+                combined_meta[key] = value
         return SubAgentMetadata(
             message_history=combined_history,
             run_metadata=combined_meta,

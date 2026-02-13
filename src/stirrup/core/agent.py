@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
 from pathlib import Path
+from time import perf_counter
 from types import TracebackType
 from typing import Annotated, Any, Self
 
@@ -132,6 +133,46 @@ def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage
         List of TokenUsage corresponding to each AssistantMessage in the flattened conversation history.
     """
     return [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)]
+
+
+def _get_tool_durations(messages: list[list[ChatMessage]]) -> dict[str, list[float]]:
+    """Collect tool execution durations grouped by tool name from message history."""
+    durations: dict[str, list[float]] = {}
+    for msg in chain.from_iterable(messages):
+        if isinstance(msg, ToolMessage) and msg.name and msg.tool_duration is not None:
+            durations.setdefault(msg.name, []).append(msg.tool_duration)
+    return durations
+
+
+def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -> dict[str, float | int | str]:
+    """Compute speed stats for this agent's model from AssistantMessages.
+
+    Returns a flat dict with model_slug, num_calls, output_tokens, duration, e2e_otps.
+    Returns empty dict if no timed messages found.
+    """
+    num_calls = 0
+    output_tokens = 0
+    duration = 0.0
+    for msg in chain.from_iterable(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        if msg.request_start_time is None or msg.request_end_time is None:
+            continue
+        msg_duration = msg.request_end_time - msg.request_start_time
+        if msg_duration <= 0:
+            continue
+        num_calls += 1
+        output_tokens += msg.token_usage.output
+        duration += msg_duration
+    if num_calls == 0:
+        return {}
+    return {
+        "model_slug": model_slug,
+        "num_calls": num_calls,
+        "output_tokens": output_tokens,
+        "duration": duration,
+        "e2e_otps": output_tokens / duration if duration > 0 else 0.0,
+    }
 
 
 class SubAgentParams(BaseModel):
@@ -610,6 +651,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Skip CodeExecToolProvider initialization but still need to add code exec tool
                 # Create the tool from the shared exec_env using get_code_exec_tool()
                 # (the exec_env is already entered by parent, so we just create the tool wrapper)
+                if state.exec_env is None:
+                    raise RuntimeError("Expected shared exec_env to be set, but it is None")
                 code_exec_tool = state.exec_env.get_code_exec_tool()
                 active_tools.append(code_exec_tool)
             else:
@@ -902,6 +945,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         if tool_call.name not in run_metadata:
             run_metadata[tool_call.name] = []
 
+        tool_start_time = perf_counter()
+
         if tool:
             try:
                 # Normalize empty arguments to valid empty JSON object
@@ -937,12 +982,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             LOGGER.debug(f"LLMClient tried to use the tool {tool_call.name} which is not in the tools list")
             result = ToolResult(content=f"{tool_call.name} is not a valid tool", success=False)
 
+        tool_end_time = perf_counter()
+
         return ToolMessage(
             content=result.content,
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             args_was_valid=args_valid,
             success=result.success,
+            tool_start_time=tool_start_time,
+            tool_end_time=tool_end_time,
         )
 
     async def step(
@@ -1176,9 +1225,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         full_msg_history.append(msgs)
 
-        # Add agent's own token usage to run_metadata under "token_usage" key
+        # Add agent's own token usage, tool durations, and model speed to run_metadata
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
-
+        run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
+        run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]
         # Store for __aexit__ to access (on instance for this agent)
         self._last_finish_params = finish_params
         self._last_run_metadata = run_metadata

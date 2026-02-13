@@ -9,6 +9,7 @@ This is the default client for Stirrup.
 
 import logging
 import os
+from time import perf_counter
 from typing import Any
 
 from openai import (
@@ -164,7 +165,9 @@ class ChatCompletionsClient(LLMClient):
             request_kwargs["reasoning_effort"] = self._reasoning_effort
 
         # Make API call
+        request_start_time = perf_counter()
         response = await self._client.chat.completions.create(**request_kwargs)
+        request_end_time = perf_counter()
 
         choice = response.choices[0]
 
@@ -202,7 +205,8 @@ class ChatCompletionsClient(LLMClient):
         reasoning_tokens = 0
         if usage and hasattr(usage, "completion_tokens_details") and usage.completion_tokens_details:
             reasoning_tokens = getattr(usage.completion_tokens_details, "reasoning_tokens", 0) or 0
-            output_tokens = output_tokens - reasoning_tokens
+
+        answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
             reasoning=reasoning,
@@ -210,7 +214,9 @@ class ChatCompletionsClient(LLMClient):
             tool_calls=tool_calls,
             token_usage=TokenUsage(
                 input=input_tokens,
-                output=output_tokens,
+                answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
+            request_start_time=request_start_time,
+            request_end_time=request_end_time,
         )
