@@ -396,3 +396,50 @@ async def test_finish_tool_validates_file_paths() -> None:
     # First finish should have failed with error about missing file
     tool_messages = [msg for group in history for msg in group if isinstance(msg, ToolMessage)]
     assert any("nonexistent.txt" in str(msg.content) and not msg.success for msg in tool_messages)
+
+
+async def test_no_successive_assistant_messages() -> None:
+    """Test agent adds continue message to avoid successive assistant messages."""
+    responses = [
+        # First: assistant message without tool calls
+        AssistantMessage(
+            content="Let me think about this",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+        # Second: finish after continue
+        AssistantMessage(
+            content="Now I'll finish",
+            tool_calls=[
+                ToolCall(
+                    name=FINISH_TOOL_NAME,
+                    arguments='{"reason": "Task completed", "paths": []}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=30,  # Use default max_turns so warning threshold won't be hit
+        turns_remaining_warning_threshold=5,  # Only warn in last 5 turns
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        finish_params, message_history, _ = await session.run([UserMessage(content="Test task")])
+
+    # Verify finish params
+    assert finish_params is not None
+    assert finish_params.reason == "Task completed"
+    assert client.call_count == 2
+
+    # Verify "Please continue the task" message was added after first assistant message
+    messages = message_history[0]
+    continue_messages = [m for m in messages if isinstance(m, UserMessage) and m.content == "Please continue the task"]
+    assert len(continue_messages) == 1

@@ -1154,6 +1154,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 full_msg_history.append(msgs)
                 msgs = await self.summarize_messages(msgs)
+
+            # Avoid successive assistant messages (only if next turn won't show turns remaining)
+            next_turn_will_show_warning = self._max_turns - (i + 1) <= self._turns_remaining_warning_threshold
+            if not tool_messages and not user_messages and not next_turn_will_show_warning:
+                msgs.extend([UserMessage(content="Please continue the task")])
         else:
             LOGGER.error(
                 f"Maximum number of turns reached: {self._max_turns}. The agent was not able to finish the task. Consider increasing the max_turns parameter.",
