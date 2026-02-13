@@ -188,6 +188,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         turns_remaining_warning_threshold: int = TURNS_REMAINING_WARNING_THRESHOLD,
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
+        allow_successive_assistant_messages: bool = False,
         # Subagent options
         share_parent_exec_env: bool = False,
         # Logging
@@ -209,6 +210,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             context_summarization_cutoff: Fraction of context window (0-1) at which to trigger summarization
             run_sync_in_thread: Execute synchronous tool executors in a separate thread
             text_only_tool_responses: Extract images from tool responses as separate user messages
+            allow_successive_assistant_messages: If False (default), automatically inject a continue
+                                                message when assistant responds without tool calls to
+                                                prevent successive assistant messages.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -235,6 +239,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
+        self._allow_successive_assistant_messages = allow_successive_assistant_messages
         self._share_parent_exec_env = share_parent_exec_env
 
         # Logger (can be passed in or created here)
@@ -1157,7 +1162,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
             next_turn_will_show_warning = self._max_turns - (i + 1) <= self._turns_remaining_warning_threshold
-            if not tool_messages and not user_messages and not next_turn_will_show_warning:
+            if not self._allow_successive_assistant_messages and not tool_messages and not user_messages and not next_turn_will_show_warning:
                 msgs.extend([UserMessage(content="Please continue the task")])
         else:
             LOGGER.error(

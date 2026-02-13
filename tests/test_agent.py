@@ -443,3 +443,51 @@ async def test_no_successive_assistant_messages() -> None:
     messages = message_history[0]
     continue_messages = [m for m in messages if isinstance(m, UserMessage) and m.content == "Please continue the task"]
     assert len(continue_messages) == 1
+
+
+async def test_allow_successive_assistant_messages() -> None:
+    """Test agent allows successive assistant messages when flag is enabled."""
+    responses = [
+        # First: assistant message without tool calls
+        AssistantMessage(
+            content="Let me think about this",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+        # Second: another assistant message without continue prompt
+        AssistantMessage(
+            content="Now I'll finish",
+            tool_calls=[
+                ToolCall(
+                    name=FINISH_TOOL_NAME,
+                    arguments='{"reason": "Task completed", "paths": []}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, output=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=30,
+        turns_remaining_warning_threshold=5,
+        allow_successive_assistant_messages=True,  # Enable successive messages
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        finish_params, message_history, _ = await session.run([UserMessage(content="Test task")])
+
+    # Verify finish params
+    assert finish_params is not None
+    assert finish_params.reason == "Task completed"
+    assert client.call_count == 2
+
+    # Verify NO "Please continue the task" message was added
+    messages = message_history[0]
+    continue_messages = [m for m in messages if isinstance(m, UserMessage) and m.content == "Please continue the task"]
+    assert len(continue_messages) == 0
