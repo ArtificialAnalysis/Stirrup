@@ -596,7 +596,9 @@ class AgentLogger(AgentLoggerBase):
                 token_usage_list = aggregated.get("token_usage", [])
             else:
                 token_usage_list = []
-            tool_durations = self.run_metadata.get("_tool_durations", {}) if self.run_metadata else {}
+            tool_durations: dict[str, list[float]] = (
+                self.run_metadata.get("_tool_durations", {}) if self.run_metadata else {}
+            )  # type: ignore[assignment]
             tool_keys = (
                 [k for k in self.run_metadata if k not in ("token_usage", "_tool_durations", "_model_speed", "finish")]
                 if self.run_metadata

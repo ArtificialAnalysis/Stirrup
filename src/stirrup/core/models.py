@@ -672,19 +672,19 @@ class SubAgentMetadata(BaseModel):
     """
 
     message_history: list[list[ChatMessage]]
-    run_metadata: Annotated[dict[str, list[Any]], Field(default_factory=dict)]
+    run_metadata: Annotated[dict[str, Any], Field(default_factory=dict)]
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":
         """Combine metadata from multiple subagent calls."""
         # Concatenate message histories
         combined_history = self.message_history + other.message_history
-        # Merge run metadata (concatenate lists per key)
-        combined_meta: dict[str, list[Any]] = dict(self.run_metadata)
-        for key, metadata_list in other.run_metadata.items():
-            if key in combined_meta:
-                combined_meta[key] = combined_meta[key] + metadata_list
+        # Merge run metadata (concatenate lists per key, keep last for non-list internal keys)
+        combined_meta: dict[str, Any] = dict(self.run_metadata)
+        for key, value in other.run_metadata.items():
+            if key in combined_meta and isinstance(combined_meta[key], list) and isinstance(value, list):
+                combined_meta[key] = combined_meta[key] + value
             else:
-                combined_meta[key] = list(metadata_list)
+                combined_meta[key] = value
         return SubAgentMetadata(
             message_history=combined_history,
             run_metadata=combined_meta,

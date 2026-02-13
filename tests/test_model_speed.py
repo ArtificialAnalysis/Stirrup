@@ -11,6 +11,7 @@ def test_e2e_otps_valid() -> None:
     """Valid timestamps and output tokens produce correct tok/s."""
     msg = AssistantMessage(
         content="hi",
+        tool_calls=[],
         token_usage=TokenUsage(input=10, answer=80, reasoning=20),
         request_start_time=100.0,
         request_end_time=102.5,
@@ -23,12 +24,14 @@ def test_e2e_otps_none_timestamps() -> None:
     """Returns None when timestamps are missing."""
     msg = AssistantMessage(
         content="hi",
+        tool_calls=[],
         token_usage=TokenUsage(input=10, answer=80, reasoning=20),
     )
     assert msg.e2e_otps is None
 
     msg2 = AssistantMessage(
         content="hi",
+        tool_calls=[],
         token_usage=TokenUsage(input=10, answer=80, reasoning=20),
         request_start_time=100.0,
     )
@@ -39,6 +42,7 @@ def test_e2e_otps_zero_duration() -> None:
     """Returns None when duration is zero."""
     msg = AssistantMessage(
         content="hi",
+        tool_calls=[],
         token_usage=TokenUsage(input=10, answer=80, reasoning=20),
         request_start_time=100.0,
         request_end_time=100.0,
@@ -50,6 +54,7 @@ def test_e2e_otps_zero_output_tokens() -> None:
     """Returns None when output tokens are zero."""
     msg = AssistantMessage(
         content="hi",
+        tool_calls=[],
         token_usage=TokenUsage(input=10, answer=0, reasoning=0),
         request_start_time=100.0,
         request_end_time=102.5,
