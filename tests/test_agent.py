@@ -474,7 +474,7 @@ async def test_allow_successive_assistant_messages() -> None:
         name="test-agent",
         max_turns=30,
         turns_remaining_warning_threshold=5,
-        allow_successive_assistant_messages=True,  # Enable successive messages
+        block_successive_assistant_messages=False,  # Disable blocking
         tools=[],
         finish_tool=SIMPLE_FINISH_TOOL,
     )
