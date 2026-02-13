@@ -28,7 +28,7 @@ __all__ = [
     "ChatMessage",
     "Content",
     "ContentBlock",
-    "EffectiveThroughputUsage",
+    "ModelSpeed",
     "EmptyParams",
     "ImageContentBlock",
     "LLMClient",
@@ -332,24 +332,32 @@ def _collect_all_token_usage(result: dict) -> "TokenUsage":
     return total
 
 
-def _collect_all_effective_throughput(result: dict) -> list["EffectiveThroughputUsage"]:
-    """Collect all effective_throughput metadata, grouped by model_slug."""
-    by_model: dict[str, EffectiveThroughputUsage] = {}
+def _collect_all_model_speed(result: dict) -> list["ModelSpeed"]:
+    """Collect all model_speed metadata, grouped by model_slug."""
+    by_model: dict[str, ModelSpeed] = {}
 
-    def _add(entry: "EffectiveThroughputUsage") -> None:
+    def _add(entry: "ModelSpeed") -> None:
         key = entry.model_slug
         if key in by_model:
             by_model[key] = by_model[key] + entry
         else:
             by_model[key] = entry
 
-    for key, value in result.items():
-        if key == "effective_throughput" and isinstance(value, EffectiveThroughputUsage):
+    def _add_any(value: object) -> None:
+        if isinstance(value, ModelSpeed):
             _add(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, ModelSpeed):
+                    _add(item)
+
+    for key, value in result.items():
+        if key == "model_speed":
+            _add_any(value)
         elif isinstance(value, dict):
-            nested = value.get("effective_throughput")
-            if isinstance(nested, EffectiveThroughputUsage):
-                _add(nested)
+            nested = value.get("model_speed")
+            if nested is not None:
+                _add_any(nested)
 
     return list(by_model.values())
 
@@ -411,9 +419,9 @@ def aggregate_metadata(
         if total_token_usage.total > 0:
             result["token_usage"] = [total_token_usage]
 
-        all_effective_throughput = _collect_all_effective_throughput(result)
-        if all_effective_throughput:
-            result["effective_throughput"] = all_effective_throughput
+        all_model_speed = _collect_all_model_speed(result)
+        if all_model_speed:
+            result["model_speed"] = all_model_speed
 
     if return_json_serializable:
         # Convert all Pydantic models to JSON-serializable dicts
@@ -431,6 +439,18 @@ class TokenUsage(BaseModel):
     input: int = 0
     answer: int = 0
     reasoning: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecate_output_field(cls, data: dict | object) -> dict | object:  # type: ignore[override]
+        if isinstance(data, dict) and "output" in data:
+            warnings.warn(
+                "The 'output' field is deprecated. Use 'answer' instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            data.setdefault("answer", data.pop("output"))  # type: ignore[union-attr]
+        return data
 
     @property
     def output(self) -> int:
@@ -451,20 +471,18 @@ class TokenUsage(BaseModel):
         )
 
 
-class EffectiveThroughputUsage(BaseModel):
-    """Aggregated effective throughput metadata measured over LLM call wall time.
+class ModelSpeed(BaseModel):
+    """Aggregated model speed metadata measured over LLM call wall time.
 
     Token terminology: output_tokens = reasoning_tokens + answer_tokens.
-    Throughput is computed over total output_tokens.
+    Speed is computed over total output_tokens.
     """
 
     model_slug: str = ""
     num_calls: int = 1
-    sum_output_tokens_per_second: float
     output_tokens: int = 0
     reasoning_tokens: int = 0
     llm_call_duration_seconds: float = 0.0
-    method: Literal["llm_call_wall_time"] = "llm_call_wall_time"
 
     @property
     def answer_tokens(self) -> int:
@@ -472,22 +490,22 @@ class EffectiveThroughputUsage(BaseModel):
         return self.output_tokens - self.reasoning_tokens
 
     @property
-    def avg_output_tokens_per_second(self) -> float:
-        """Average effective throughput across all measured calls."""
-        if self.num_calls <= 0:
+    def e2e_otps(self) -> float:
+        """End-to-end output tokens per second (weighted by token count)."""
+        if self.llm_call_duration_seconds <= 0:
             return 0.0
-        return self.sum_output_tokens_per_second / self.num_calls
+        return self.output_tokens / self.llm_call_duration_seconds
 
-    def __add__(self, other: "EffectiveThroughputUsage") -> "EffectiveThroughputUsage":
-        """Combine effective throughput metadata across calls with the same model."""
-        return EffectiveThroughputUsage(
+    def __add__(self, other: "ModelSpeed") -> "ModelSpeed":
+        """Combine model speed metadata across calls with the same model."""
+        if self.model_slug != other.model_slug:
+            raise ValueError(f"Cannot combine speed from different models: {self.model_slug!r} vs {other.model_slug!r}")
+        return ModelSpeed(
             model_slug=self.model_slug,
             num_calls=self.num_calls + other.num_calls,
-            sum_output_tokens_per_second=self.sum_output_tokens_per_second + other.sum_output_tokens_per_second,
             output_tokens=self.output_tokens + other.output_tokens,
             reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
             llm_call_duration_seconds=self.llm_call_duration_seconds + other.llm_call_duration_seconds,
-            method=self.method,
         )
 
 
@@ -670,7 +688,7 @@ class AssistantMessage(BaseModel):
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
-    effective_throughput: EffectiveThroughputUsage | None = None
+    model_speed: ModelSpeed | None = None
 
 
 class ToolMessage(BaseModel):

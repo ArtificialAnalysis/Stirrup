@@ -19,7 +19,7 @@ from openai import (
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import compute_effective_throughput
+from stirrup.clients.utils import compute_model_speed
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -427,7 +427,7 @@ class OpenResponsesClient(LLMClient):
 
         answer_tokens = output_tokens - reasoning_tokens
 
-        effective_throughput = compute_effective_throughput(
+        model_speed = compute_model_speed(
             model_slug=self.model_slug,
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens,
@@ -443,5 +443,5 @@ class OpenResponsesClient(LLMClient):
                 answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
-            effective_throughput=effective_throughput,
+            model_speed=model_speed,
         )

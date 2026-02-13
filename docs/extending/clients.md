@@ -149,8 +149,8 @@ class OpenAIClient:
         )
 ```
 
-If your client uses streaming, you can also populate `AssistantMessage.effective_throughput`
-with `EffectiveThroughputUsage` metadata.
+You can optionally populate `AssistantMessage.model_speed` with a `ModelSpeed`
+to track generation speed. See `compute_model_speed` in `stirrup.clients.utils` for a helper.
 
 ## Testing with Mock Client
 

@@ -7,6 +7,7 @@ Requires the litellm extra: `pip install stirrup[litellm]`
 """
 
 import logging
+import warnings
 from time import perf_counter
 from typing import Any, Literal
 
@@ -21,7 +22,7 @@ except ImportError as e:
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import compute_effective_throughput, to_openai_messages, to_openai_tools
+from stirrup.clients.utils import compute_model_speed, to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -50,8 +51,10 @@ class LiteLLMClient(LLMClient):
 
     def __init__(
         self,
-        model_slug: str,
-        max_tokens: int,
+        model: str | None = None,
+        max_tokens: int = 64_000,
+        *,
+        model_slug: str | None = None,
         api_key: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         kwargs: dict[str, Any] | None = None,
@@ -59,12 +62,23 @@ class LiteLLMClient(LLMClient):
         """Initialize LiteLLM client with model configuration and capabilities.
 
         Args:
-            model_slug: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
+            model: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
             max_tokens: Maximum context window size in tokens
+            model_slug: Deprecated. Use model instead.
             reasoning_effort: Reasoning effort level for extended thinking models (e.g., 'medium', 'high')
             kwargs: Additional arguments to pass to LiteLLM completion calls
         """
-        self._model_slug = model_slug
+        if model_slug is not None:
+            warnings.warn(
+                "The 'model_slug' parameter is deprecated. Use 'model' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if model is None:
+                model = model_slug
+        if model is None:
+            raise ValueError("model is required")
+        self._model = model
         self._max_tokens = max_tokens
         self._reasoning_effort: ReasoningEffort | None = reasoning_effort
         self._api_key = api_key
@@ -78,7 +92,7 @@ class LiteLLMClient(LLMClient):
     @property
     def model_slug(self) -> str:
         """Model identifier used by LiteLLM."""
-        return self._model_slug
+        return self._model
 
     @retry(
         retry=retry_if_exception_type((Timeout, APIConnectionError, RateLimitError)),
@@ -142,7 +156,7 @@ class LiteLLMClient(LLMClient):
         output_tokens = usage.completion_tokens
         answer_tokens = output_tokens - reasoning_tokens
 
-        effective_throughput = compute_effective_throughput(
+        model_speed = compute_model_speed(
             model_slug=self.model_slug,
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens,
@@ -158,5 +172,5 @@ class LiteLLMClient(LLMClient):
                 answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
-            effective_throughput=effective_throughput,
+            model_speed=model_speed,
         )

@@ -25,7 +25,7 @@ from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    EffectiveThroughputUsage,
+    ModelSpeed,
     ImageContentBlock,
     LLMClient,
     SubAgentMetadata,
@@ -135,12 +135,12 @@ def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage
     return [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)]
 
 
-def _get_total_effective_throughput(messages: list[list[ChatMessage]]) -> list[EffectiveThroughputUsage]:
-    """Return all measured effective throughput metadata from assistant messages."""
+def _get_total_model_speed(messages: list[list[ChatMessage]]) -> list[ModelSpeed]:
+    """Return all measured model speed metadata from assistant messages."""
     return [
-        msg.effective_throughput
+        msg.model_speed
         for msg in chain.from_iterable(messages)
-        if isinstance(msg, AssistantMessage) and msg.effective_throughput is not None
+        if isinstance(msg, AssistantMessage) and msg.model_speed is not None
     ]
 
 
@@ -1175,7 +1175,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Add agent's own token usage to run_metadata under "token_usage" key
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
-        run_metadata["effective_throughput"] = _get_total_effective_throughput(full_msg_history)
+        run_metadata["model_speed"] = _get_total_model_speed(full_msg_history)
 
         # Store for __aexit__ to access (on instance for this agent)
         self._last_finish_params = finish_params

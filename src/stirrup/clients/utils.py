@@ -12,7 +12,7 @@ from stirrup.core.models import (
     AudioContentBlock,
     ChatMessage,
     Content,
-    EffectiveThroughputUsage,
+    ModelSpeed,
     EmptyParams,
     ImageContentBlock,
     SystemMessage,
@@ -23,24 +23,24 @@ from stirrup.core.models import (
 )
 
 __all__ = [
-    "compute_effective_throughput",
+    "compute_model_speed",
     "content_to_openai",
     "to_openai_messages",
     "to_openai_tools",
 ]
 
 
-def compute_effective_throughput(
+def compute_model_speed(
     *,
     model_slug: str,
     output_tokens: int,
     reasoning_tokens: int,
     llm_call_duration_seconds: float | None,
-) -> EffectiveThroughputUsage | None:
-    """Compute effective throughput (output tokens/sec) using LLM call wall time only.
+) -> ModelSpeed | None:
+    """Compute model speed (output tokens/sec) using LLM call wall time only.
 
     Token terminology: output_tokens = reasoning_tokens + answer_tokens.
-    Throughput is computed over total output_tokens.
+    Speed is computed over total output_tokens.
 
     This is measured end-to-end for each LLM request (request start to response
     complete), and excludes tool execution time.
@@ -50,18 +50,12 @@ def compute_effective_throughput(
     if llm_call_duration_seconds is None or llm_call_duration_seconds <= 0:
         return None
 
-    output_tokens_per_second = output_tokens / llm_call_duration_seconds
-    if output_tokens_per_second <= 0:
-        return None
-
-    return EffectiveThroughputUsage(
+    return ModelSpeed(
         model_slug=model_slug,
         num_calls=1,
-        sum_output_tokens_per_second=output_tokens_per_second,
         output_tokens=output_tokens,
         reasoning_tokens=reasoning_tokens,
         llm_call_duration_seconds=llm_call_duration_seconds,
-        method="llm_call_wall_time",
     )
 
 

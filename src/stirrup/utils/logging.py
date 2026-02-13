@@ -73,25 +73,24 @@ def _format_token_usage(data: object) -> str:
     return f"{total:,} tokens"
 
 
-def _format_effective_throughput(data: object) -> str:
-    """Format effective_throughput metadata as a human-readable string."""
+def _format_model_speed(data: object) -> str:
+    """Format model_speed metadata as a human-readable string."""
     if isinstance(data, dict):
         data_dict = cast(dict[str, Any], data)
         num_calls = int(data_dict.get("num_calls", 0))
         output_tokens = int(data_dict.get("output_tokens", 0))
         llm_call_duration_seconds = float(data_dict.get("llm_call_duration_seconds", 0.0))
         model_slug = str(data_dict.get("model_slug", ""))
-    elif hasattr(data, "num_calls") and hasattr(data, "sum_output_tokens_per_second"):
+        e2e_otps = output_tokens / llm_call_duration_seconds if llm_call_duration_seconds > 0 else 0.0
+    elif hasattr(data, "e2e_otps"):
         num_calls = int(getattr(data, "num_calls", 0))
-        output_tokens = int(getattr(data, "output_tokens", 0))
-        llm_call_duration_seconds = float(getattr(data, "llm_call_duration_seconds", 0.0))
         model_slug = str(getattr(data, "model_slug", ""))
+        e2e_otps = float(getattr(data, "e2e_otps", 0.0))
     else:
         return str(data)
 
-    avg_speed = output_tokens / llm_call_duration_seconds if llm_call_duration_seconds > 0 else 0.0
     prefix = f"{model_slug}: " if model_slug else ""
-    return f"{prefix}{avg_speed:.2f} tok/s ({num_calls} call(s))"
+    return f"{prefix}{e2e_otps:.2f} tok/s ({num_calls} call(s))"
 
 
 def _get_nested_tools(data: object) -> dict[str, object]:
@@ -128,11 +127,12 @@ def _add_tool_branch(
         else:
             parent.add(f"[dim]token_usage:[/] {_format_token_usage(tool_data)}")
         return
-    if tool_name == "effective_throughput":
+    if tool_name == "model_speed":
         if isinstance(tool_data, list) and tool_data:
-            parent.add(f"[dim]effective_throughput:[/] {_format_effective_throughput(tool_data[0])}")
+            for entry in tool_data:
+                parent.add(f"[dim]model_speed:[/] {_format_model_speed(entry)}")
         else:
-            parent.add(f"[dim]effective_throughput:[/] {_format_effective_throughput(tool_data)}")
+            parent.add(f"[dim]model_speed:[/] {_format_model_speed(tool_data)}")
         return
 
     # Case 1: List → aggregate using __add__, then recurse
@@ -567,12 +567,12 @@ class AgentLogger(AgentLoggerBase):
             if self.run_metadata:
                 aggregated = aggregate_metadata(self.run_metadata, return_json_serializable=False)
                 token_usage_list = aggregated.get("token_usage", [])
-                effective_throughput_list = aggregated.get("effective_throughput", [])
+                model_speed_list = aggregated.get("model_speed", [])
             else:
                 token_usage_list = []
-                effective_throughput_list = []
+                model_speed_list = []
             tool_keys = (
-                [k for k in self.run_metadata if k not in ("token_usage", "effective_throughput", "finish")]
+                [k for k in self.run_metadata if k not in ("token_usage", "model_speed", "finish")]
                 if self.run_metadata
                 else []
             )
@@ -646,7 +646,7 @@ class AgentLogger(AgentLoggerBase):
                 )
 
             throughput_panel = None
-            if effective_throughput_list:
+            if model_speed_list:
                 throughput_table = Table(
                     box=box.SIMPLE,
                     show_header=True,
@@ -654,21 +654,20 @@ class AgentLogger(AgentLoggerBase):
                     expand=True,
                 )
                 throughput_table.add_column("Model", style="cyan")
-                throughput_table.add_column("Effective OTPS", justify="right", style="green")
+                throughput_table.add_column("End-to-end OTPS", justify="right", style="green")
                 throughput_table.add_column("Calls", justify="right", style="green")
                 throughput_table.add_column("Gen Time (s)", justify="right", style="green")
 
-                for entry in effective_throughput_list:
+                for entry in model_speed_list:
                     num_calls = getattr(entry, "num_calls", 0)
                     duration = getattr(entry, "llm_call_duration_seconds", 0.0)
-                    output_tokens = getattr(entry, "output_tokens", 0)
-                    otps = (output_tokens / duration) if duration > 0 else 0.0
+                    otps = float(getattr(entry, "e2e_otps", 0.0))
                     model = getattr(entry, "model_slug", "") or "unknown"
                     throughput_table.add_row(model, f"{otps:.2f}", f"{num_calls:,}", f"{duration:.2f}")
 
                 throughput_panel = Panel(
                     throughput_table,
-                    title="[bold]Effective throughput[/]",
+                    title="[bold]Model Speed[/]",
                     title_align="left",
                     border_style="blue",
                     expand=True,

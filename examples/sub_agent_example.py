@@ -60,7 +60,7 @@ async def main() -> None:
         client=client,
         name="supervisor_agent",
         tools=[research_subagent_tool, report_writing_subagent_tool, LocalCodeExecToolProvider()],
-        max_turns=6,
+        max_turns=5,
     )
 
     async with supervisor_agent.session(output_dir="output/sub_agent_example/") as session:
