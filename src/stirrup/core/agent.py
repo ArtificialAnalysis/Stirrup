@@ -144,34 +144,35 @@ def _get_tool_durations(messages: list[list[ChatMessage]]) -> dict[str, list[flo
     return durations
 
 
-def _get_model_speed_stats(
-    messages: list[list[ChatMessage]], model_slug: str
-) -> dict[str, dict[str, float | int | str]]:
-    """Compute per-model speed stats from AssistantMessages.
+def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -> dict[str, float | int | str]:
+    """Compute speed stats for this agent's model from AssistantMessages.
 
-    Returns dict keyed by model_slug with num_calls, output_tokens, duration, e2e_otps.
+    Returns a flat dict with model_slug, num_calls, output_tokens, duration, e2e_otps.
+    Returns empty dict if no timed messages found.
     """
-    by_model: dict[str, dict[str, float | int | str]] = {}
+    num_calls = 0
+    output_tokens = 0
+    duration = 0.0
     for msg in chain.from_iterable(messages):
         if not isinstance(msg, AssistantMessage):
             continue
         if msg.request_start_time is None or msg.request_end_time is None:
             continue
-        duration = msg.request_end_time - msg.request_start_time
-        if duration <= 0:
+        msg_duration = msg.request_end_time - msg.request_start_time
+        if msg_duration <= 0:
             continue
-        slug = model_slug
-        if slug not in by_model:
-            by_model[slug] = {"model_slug": slug, "num_calls": 0, "output_tokens": 0, "duration": 0.0}
-        by_model[slug]["num_calls"] = int(by_model[slug]["num_calls"]) + 1
-        by_model[slug]["output_tokens"] = int(by_model[slug]["output_tokens"]) + msg.token_usage.output
-        by_model[slug]["duration"] = float(by_model[slug]["duration"]) + duration
-    # Compute e2e_otps
-    for stats in by_model.values():
-        dur = float(stats["duration"])
-        out = int(stats["output_tokens"])
-        stats["e2e_otps"] = out / dur if dur > 0 else 0.0
-    return by_model
+        num_calls += 1
+        output_tokens += msg.token_usage.output
+        duration += msg_duration
+    if num_calls == 0:
+        return {}
+    return {
+        "model_slug": model_slug,
+        "num_calls": num_calls,
+        "output_tokens": output_tokens,
+        "duration": duration,
+        "e2e_otps": output_tokens / duration if duration > 0 else 0.0,
+    }
 
 
 class SubAgentParams(BaseModel):

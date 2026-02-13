@@ -76,20 +76,27 @@ def _format_token_usage(data: object) -> str:
 def _collect_model_speed_stats(
     run_metadata: dict[str, list[Any]],
 ) -> dict[str, dict[str, float | int | str]]:
-    """Collect _model_speed stats from run_metadata, merging across sub-agents by model slug."""
+    """Collect _model_speed stats from run_metadata, merging across sub-agents by model slug.
+
+    Each agent stores _model_speed as a flat dict with a single model_slug.
+    This function merges stats from the current agent and all sub-agents,
+    grouping by model_slug to produce per-model totals.
+    """
     merged: dict[str, dict[str, float | int | str]] = {}
 
-    def _merge(by_model: dict) -> None:
-        for slug, stats in by_model.items():
-            if slug not in merged:
-                merged[slug] = {"model_slug": slug, "num_calls": 0, "output_tokens": 0, "duration": 0.0}
-            merged[slug]["num_calls"] = int(merged[slug]["num_calls"]) + int(stats.get("num_calls", 0))
-            merged[slug]["output_tokens"] = int(merged[slug]["output_tokens"]) + int(stats.get("output_tokens", 0))
-            merged[slug]["duration"] = float(merged[slug]["duration"]) + float(stats.get("duration", 0.0))
+    def _merge(stats: dict) -> None:
+        slug = stats.get("model_slug")
+        if not slug:
+            return
+        if slug not in merged:
+            merged[slug] = {"model_slug": slug, "num_calls": 0, "output_tokens": 0, "duration": 0.0}
+        merged[slug]["num_calls"] = int(merged[slug]["num_calls"]) + int(stats.get("num_calls", 0))
+        merged[slug]["output_tokens"] = int(merged[slug]["output_tokens"]) + int(stats.get("output_tokens", 0))
+        merged[slug]["duration"] = float(merged[slug]["duration"]) + float(stats.get("duration", 0.0))
 
-    # Direct _model_speed at this level
+    # Direct _model_speed at this level (flat dict with model_slug key)
     direct = run_metadata.get("_model_speed")
-    if isinstance(direct, dict):
+    if isinstance(direct, dict) and direct:
         _merge(direct)
 
     # Recurse into sub-agent metadata
@@ -101,7 +108,8 @@ def _collect_model_speed_stats(
         for item in value_list:
             if hasattr(item, "run_metadata") and isinstance(item.run_metadata, dict):
                 nested = _collect_model_speed_stats(item.run_metadata)
-                _merge(nested)
+                for stats in nested.values():
+                    _merge(stats)
 
     # Recompute e2e_otps after merging
     for stats in merged.values():
