@@ -1162,7 +1162,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
             next_turn_will_show_warning = self._max_turns - (i + 1) <= self._turns_remaining_warning_threshold
-            if not self._allow_successive_assistant_messages and not tool_messages and not user_messages and not next_turn_will_show_warning:
+            if (
+                not self._allow_successive_assistant_messages
+                and not tool_messages
+                and not user_messages
+                and not next_turn_will_show_warning
+            ):
                 msgs.extend([UserMessage(content="Please continue the task")])
         else:
             LOGGER.error(
