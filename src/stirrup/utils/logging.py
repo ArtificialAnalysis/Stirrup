@@ -687,7 +687,7 @@ class AgentLogger(AgentLoggerBase):
                         expand=True,
                     )
                     throughput_table.add_column("Model", style="cyan", no_wrap=True)
-                    throughput_table.add_column("OTPS", justify="right", style="green")
+                    throughput_table.add_column("E2E OTPS", justify="right", style="green")
                     throughput_table.add_column("Calls", justify="right", style="green")
                     throughput_table.add_column("Time (s)", justify="right", style="green")
 

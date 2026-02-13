@@ -6,10 +6,10 @@ import logging
 import re
 import signal
 from contextlib import AsyncExitStack
-from time import perf_counter
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
 from pathlib import Path
+from time import perf_counter
 from types import TracebackType
 from typing import Annotated, Any, Self
 
