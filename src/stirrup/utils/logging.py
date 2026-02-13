@@ -167,6 +167,8 @@ def _add_tool_branch(
     if _is_subagent_metadata(tool_data):
         branch = parent.add(f"[magenta]{tool_name}[/]")
         for nested_name, nested_data in sorted(_get_nested_tools(tool_data).items()):
+            if nested_name.startswith("_"):
+                continue
             _add_tool_branch(branch, nested_name, nested_data, skip_fields, tool_durations)
         return
 
@@ -684,10 +686,10 @@ class AgentLogger(AgentLoggerBase):
                         header_style="bold",
                         expand=True,
                     )
-                    throughput_table.add_column("Model", style="cyan")
-                    throughput_table.add_column("End-to-end OTPS", justify="right", style="green")
+                    throughput_table.add_column("Model", style="cyan", no_wrap=True)
+                    throughput_table.add_column("OTPS", justify="right", style="green")
                     throughput_table.add_column("Calls", justify="right", style="green")
-                    throughput_table.add_column("Gen Time (s)", justify="right", style="green")
+                    throughput_table.add_column("Time (s)", justify="right", style="green")
 
                     for stats in model_speed_stats.values():
                         throughput_table.add_row(

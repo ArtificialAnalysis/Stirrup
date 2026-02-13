@@ -29,7 +29,7 @@ async def main() -> None:
         client=client,
         name="research_sub_agent",
         tools=[WebToolProvider(), LocalCodeExecToolProvider()],
-        max_turns=10,
+        max_turns=5,
         system_prompt=(
             "You are a research agent. When asked to complete research, save it all to a markdown file "
             "(using a code executor tool) and pass the filepath to the finish tool and mention it in the "
@@ -48,7 +48,7 @@ async def main() -> None:
         client=client,
         name="report_writing_sub_agent",
         tools=[DockerCodeExecToolProvider.from_image("ghcr.io/astral-sh/uv:python3.13-bookworm-slim")],
-        max_turns=10,
+        max_turns=6,
     )
 
     report_writing_subagent_tool = report_writing_agent.to_tool(
@@ -60,7 +60,7 @@ async def main() -> None:
         client=client,
         name="supervisor_agent",
         tools=[research_subagent_tool, report_writing_subagent_tool, LocalCodeExecToolProvider()],
-        max_turns=5,
+        max_turns=6,
     )
 
     async with supervisor_agent.session(output_dir="output/sub_agent_example/") as session:
