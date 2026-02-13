@@ -28,7 +28,6 @@ __all__ = [
     "ChatMessage",
     "Content",
     "ContentBlock",
-    "ModelSpeed",
     "EmptyParams",
     "ImageContentBlock",
     "LLMClient",
@@ -332,36 +331,6 @@ def _collect_all_token_usage(result: dict) -> "TokenUsage":
     return total
 
 
-def _collect_all_model_speed(result: dict) -> list["ModelSpeed"]:
-    """Collect all model_speed metadata, grouped by model_slug."""
-    by_model: dict[str, ModelSpeed] = {}
-
-    def _add(entry: "ModelSpeed") -> None:
-        key = entry.model_slug
-        if key in by_model:
-            by_model[key] = by_model[key] + entry
-        else:
-            by_model[key] = entry
-
-    def _add_any(value: object) -> None:
-        if isinstance(value, ModelSpeed):
-            _add(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, ModelSpeed):
-                    _add(item)
-
-    for key, value in result.items():
-        if key == "model_speed":
-            _add_any(value)
-        elif isinstance(value, dict):
-            nested = value.get("model_speed")
-            if nested is not None:
-                _add_any(nested)
-
-    return list(by_model.values())
-
-
 def aggregate_metadata(
     metadata_dict: dict[str, list[Any]], prefix: str = "", return_json_serializable: bool = True
 ) -> dict | object:
@@ -387,10 +356,10 @@ def aggregate_metadata(
     """
     result: dict = {}
 
-    # First pass: aggregate all entries in this level
+    # First pass: aggregate all entries in this level (skip internal keys prefixed with _)
     aggregated_level: dict = {}
     for name, metadata_list in metadata_dict.items():
-        if not metadata_list:
+        if name.startswith("_") or not metadata_list:
             continue
         aggregated_level[name] = _aggregate_list(metadata_list)
 
@@ -418,10 +387,6 @@ def aggregate_metadata(
         total_token_usage = _collect_all_token_usage(result)
         if total_token_usage.total > 0:
             result["token_usage"] = [total_token_usage]
-
-        all_model_speed = _collect_all_model_speed(result)
-        if all_model_speed:
-            result["model_speed"] = all_model_speed
 
     if return_json_serializable:
         # Convert all Pydantic models to JSON-serializable dicts
@@ -468,44 +433,6 @@ class TokenUsage(BaseModel):
             input=self.input + other.input,
             answer=self.answer + other.answer,
             reasoning=self.reasoning + other.reasoning,
-        )
-
-
-class ModelSpeed(BaseModel):
-    """Aggregated model speed metadata measured over LLM call wall time.
-
-    Token terminology: output_tokens = reasoning_tokens + answer_tokens.
-    Speed is computed over total output_tokens.
-    """
-
-    model_slug: str = ""
-    num_calls: int = 1
-    output_tokens: int = 0
-    reasoning_tokens: int = 0
-    llm_call_duration_seconds: float = 0.0
-
-    @property
-    def answer_tokens(self) -> int:
-        """Answer tokens (output_tokens - reasoning_tokens)."""
-        return self.output_tokens - self.reasoning_tokens
-
-    @property
-    def e2e_otps(self) -> float:
-        """End-to-end output tokens per second (weighted by token count)."""
-        if self.llm_call_duration_seconds <= 0:
-            return 0.0
-        return self.output_tokens / self.llm_call_duration_seconds
-
-    def __add__(self, other: "ModelSpeed") -> "ModelSpeed":
-        """Combine model speed metadata across calls with the same model."""
-        if self.model_slug != other.model_slug:
-            raise ValueError(f"Cannot combine speed from different models: {self.model_slug!r} vs {other.model_slug!r}")
-        return ModelSpeed(
-            model_slug=self.model_slug,
-            num_calls=self.num_calls + other.num_calls,
-            output_tokens=self.output_tokens + other.output_tokens,
-            reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
-            llm_call_duration_seconds=self.llm_call_duration_seconds + other.llm_call_duration_seconds,
         )
 
 
@@ -688,7 +615,18 @@ class AssistantMessage(BaseModel):
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
-    model_speed: ModelSpeed | None = None
+    request_start_time: float | None = None
+    request_end_time: float | None = None
+
+    @property
+    def e2e_otps(self) -> float | None:
+        """End-to-end output tokens per second."""
+        if self.request_start_time is None or self.request_end_time is None:
+            return None
+        duration = self.request_end_time - self.request_start_time
+        if duration <= 0 or self.token_usage.output <= 0:
+            return None
+        return self.token_usage.output / duration
 
 
 class ToolMessage(BaseModel):
@@ -709,6 +647,18 @@ class ToolMessage(BaseModel):
     name: str | None = None
     args_was_valid: bool = True
     success: bool = False
+    tool_start_time: float | None = None
+    tool_end_time: float | None = None
+
+    @property
+    def tool_duration(self) -> float | None:
+        """Tool execution duration in seconds."""
+        if self.tool_start_time is None or self.tool_end_time is None:
+            return None
+        duration = self.tool_end_time - self.tool_start_time
+        if duration < 0:
+            return None
+        return duration
 
 
 type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]

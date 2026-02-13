@@ -7,7 +7,6 @@ from stirrup.core.agent import Agent
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    ModelSpeed,
     LLMClient,
     SystemMessage,
     TokenUsage,
@@ -16,7 +15,6 @@ from stirrup.core.models import (
     ToolMessage,
     ToolResult,
     UserMessage,
-    aggregate_metadata,
 )
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
@@ -56,12 +54,8 @@ async def test_agent_basic_finish() -> None:
                 )
             ],
             token_usage=TokenUsage(input=100, answer=50),
-            model_speed=ModelSpeed(
-                model_slug="mock-model",
-                num_calls=1,
-                output_tokens=50,
-                llm_call_duration_seconds=0.4,
-            ),
+            request_start_time=100.0,
+            request_end_time=100.4,
         )
     ]
 
@@ -91,10 +85,6 @@ async def test_agent_basic_finish() -> None:
     assert isinstance(run_metadata, dict)
     # Agent's own token usage metadata should be present
     assert "token_usage" in run_metadata
-    assert "model_speed" in run_metadata
-    assert len(run_metadata["model_speed"]) == 1
-    aggregated = aggregate_metadata(run_metadata, return_json_serializable=False)
-    assert aggregated["model_speed"][0].num_calls == 1
     assert len(message_history) == 1  # One turn
     assert client.call_count == 1
 

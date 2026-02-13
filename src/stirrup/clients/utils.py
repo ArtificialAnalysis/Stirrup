@@ -12,7 +12,6 @@ from stirrup.core.models import (
     AudioContentBlock,
     ChatMessage,
     Content,
-    ModelSpeed,
     EmptyParams,
     ImageContentBlock,
     SystemMessage,
@@ -23,40 +22,10 @@ from stirrup.core.models import (
 )
 
 __all__ = [
-    "compute_model_speed",
     "content_to_openai",
     "to_openai_messages",
     "to_openai_tools",
 ]
-
-
-def compute_model_speed(
-    *,
-    model_slug: str,
-    output_tokens: int,
-    reasoning_tokens: int,
-    llm_call_duration_seconds: float | None,
-) -> ModelSpeed | None:
-    """Compute model speed (output tokens/sec) using LLM call wall time only.
-
-    Token terminology: output_tokens = reasoning_tokens + answer_tokens.
-    Speed is computed over total output_tokens.
-
-    This is measured end-to-end for each LLM request (request start to response
-    complete), and excludes tool execution time.
-    """
-    if output_tokens <= 0:
-        return None
-    if llm_call_duration_seconds is None or llm_call_duration_seconds <= 0:
-        return None
-
-    return ModelSpeed(
-        model_slug=model_slug,
-        num_calls=1,
-        output_tokens=output_tokens,
-        reasoning_tokens=reasoning_tokens,
-        llm_call_duration_seconds=llm_call_duration_seconds,
-    )
 
 
 def to_openai_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:

@@ -21,7 +21,7 @@ from openai import (
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import compute_model_speed, to_openai_messages, to_openai_tools
+from stirrup.clients.utils import to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -165,9 +165,9 @@ class ChatCompletionsClient(LLMClient):
             request_kwargs["reasoning_effort"] = self._reasoning_effort
 
         # Make API call
-        start = perf_counter()
+        request_start_time = perf_counter()
         response = await self._client.chat.completions.create(**request_kwargs)
-        llm_call_duration_seconds = perf_counter() - start
+        request_end_time = perf_counter()
 
         choice = response.choices[0]
 
@@ -208,13 +208,6 @@ class ChatCompletionsClient(LLMClient):
 
         answer_tokens = output_tokens - reasoning_tokens
 
-        model_speed = compute_model_speed(
-            model_slug=self.model_slug,
-            output_tokens=output_tokens,
-            reasoning_tokens=reasoning_tokens,
-            llm_call_duration_seconds=llm_call_duration_seconds,
-        )
-
         return AssistantMessage(
             reasoning=reasoning,
             content=msg.content or "",
@@ -224,5 +217,6 @@ class ChatCompletionsClient(LLMClient):
                 answer=answer_tokens,
                 reasoning=reasoning_tokens,
             ),
-            model_speed=model_speed,
+            request_start_time=request_start_time,
+            request_end_time=request_end_time,
         )

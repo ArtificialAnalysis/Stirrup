@@ -101,7 +101,6 @@ history = [
 A dictionary containing metadata from tool executions:
 
 - `token_usage`: Total token counts (input, output, reasoning)
-- `model_speed`: Average model speed across measured calls (tokens/sec)
 - Per-tool metadata (e.g., `code_exec`, `web_search`, `web_fetch`)
 
 ```python
@@ -110,7 +109,6 @@ metadata = {
     "fetch_web_page": [WebFetchMetadata(num_uses=1, pages_fetched=['https://...'])],
     "code_exec": [ToolUseCountMetadata(num_uses=3)],
     "finish": [ToolUseCountMetadata(num_uses=1)],
-    "model_speed": [ModelSpeed(num_calls=3, output_tokens=500, llm_call_duration_seconds=3.4)],
     "token_usage": [TokenUsage(input=239283, answer=4189, reasoning=0)]
 }
 ```
@@ -122,9 +120,9 @@ from stirrup import aggregate_metadata
 
 aggregated = aggregate_metadata(metadata)
 print(f"Total tokens: {aggregated['token_usage'].total}")
-for et in aggregated['model_speed']:
-    print(f"{et.model_slug}: {et.e2e_otps:.2f} tok/s")
 ```
+
+Speed metrics are available directly on each `AssistantMessage` via `request_start_time`, `request_end_time`, and the derived `e2e_otps` property. Similarly, `ToolMessage` has `tool_start_time`, `tool_end_time`, and a `tool_duration` property.
 
 ## Session
 

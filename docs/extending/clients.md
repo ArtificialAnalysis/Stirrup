@@ -149,8 +149,8 @@ class OpenAIClient:
         )
 ```
 
-You can optionally populate `AssistantMessage.model_speed` with a `ModelSpeed`
-to track generation speed. See `compute_model_speed` in `stirrup.clients.utils` for a helper.
+You can optionally populate `request_start_time` and `request_end_time` on `AssistantMessage`
+to track generation speed. The derived `e2e_otps` property computes output tokens per second.
 
 ## Testing with Mock Client
 

@@ -6,6 +6,7 @@ import logging
 import re
 import signal
 from contextlib import AsyncExitStack
+from time import perf_counter
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
 from pathlib import Path
@@ -25,7 +26,6 @@ from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    ModelSpeed,
     ImageContentBlock,
     LLMClient,
     SubAgentMetadata,
@@ -135,13 +135,43 @@ def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage
     return [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)]
 
 
-def _get_total_model_speed(messages: list[list[ChatMessage]]) -> list[ModelSpeed]:
-    """Return all measured model speed metadata from assistant messages."""
-    return [
-        msg.model_speed
-        for msg in chain.from_iterable(messages)
-        if isinstance(msg, AssistantMessage) and msg.model_speed is not None
-    ]
+def _get_tool_durations(messages: list[list[ChatMessage]]) -> dict[str, list[float]]:
+    """Collect tool execution durations grouped by tool name from message history."""
+    durations: dict[str, list[float]] = {}
+    for msg in chain.from_iterable(messages):
+        if isinstance(msg, ToolMessage) and msg.name and msg.tool_duration is not None:
+            durations.setdefault(msg.name, []).append(msg.tool_duration)
+    return durations
+
+
+def _get_model_speed_stats(
+    messages: list[list[ChatMessage]], model_slug: str
+) -> dict[str, dict[str, float | int | str]]:
+    """Compute per-model speed stats from AssistantMessages.
+
+    Returns dict keyed by model_slug with num_calls, output_tokens, duration, e2e_otps.
+    """
+    by_model: dict[str, dict[str, float | int | str]] = {}
+    for msg in chain.from_iterable(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        if msg.request_start_time is None or msg.request_end_time is None:
+            continue
+        duration = msg.request_end_time - msg.request_start_time
+        if duration <= 0:
+            continue
+        slug = model_slug
+        if slug not in by_model:
+            by_model[slug] = {"model_slug": slug, "num_calls": 0, "output_tokens": 0, "duration": 0.0}
+        by_model[slug]["num_calls"] = int(by_model[slug]["num_calls"]) + 1
+        by_model[slug]["output_tokens"] = int(by_model[slug]["output_tokens"]) + msg.token_usage.output
+        by_model[slug]["duration"] = float(by_model[slug]["duration"]) + duration
+    # Compute e2e_otps
+    for stats in by_model.values():
+        dur = float(stats["duration"])
+        out = int(stats["output_tokens"])
+        stats["e2e_otps"] = out / dur if dur > 0 else 0.0
+    return by_model
 
 
 class SubAgentParams(BaseModel):
@@ -909,6 +939,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         if tool_call.name not in run_metadata:
             run_metadata[tool_call.name] = []
 
+        tool_start_time = perf_counter()
+
         if tool:
             try:
                 # Normalize empty arguments to valid empty JSON object
@@ -944,12 +976,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             LOGGER.debug(f"LLMClient tried to use the tool {tool_call.name} which is not in the tools list")
             result = ToolResult(content=f"{tool_call.name} is not a valid tool", success=False)
 
+        tool_end_time = perf_counter()
+
         return ToolMessage(
             content=result.content,
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             args_was_valid=args_valid,
             success=result.success,
+            tool_start_time=tool_start_time,
+            tool_end_time=tool_end_time,
         )
 
     async def step(
@@ -1173,10 +1209,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         full_msg_history.append(msgs)
 
-        # Add agent's own token usage to run_metadata under "token_usage" key
+        # Add agent's own token usage, tool durations, and model speed to run_metadata
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
-        run_metadata["model_speed"] = _get_total_model_speed(full_msg_history)
-
+        run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
+        run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]
         # Store for __aexit__ to access (on instance for this agent)
         self._last_finish_params = finish_params
         self._last_run_metadata = run_metadata
