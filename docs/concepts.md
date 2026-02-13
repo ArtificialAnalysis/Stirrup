@@ -24,6 +24,7 @@ agent = Agent(
     context_summarization_cutoff=0.7,                     # (default: 0.7) Context % before summarization
     run_sync_in_thread=True,                              # (default: True) Run sync tools in thread
     text_only_tool_responses=True,                        # (default: True) Extract images from responses
+    block_successive_assistant_messages=True,               # (default: True) Inject continue prompt between assistant messages
     logger=None,                                          # (default: None) Custom logger instance
 )
 ```
@@ -41,6 +42,7 @@ agent = Agent(
     | `context_summarization_cutoff` | `float` | `0.7` | Context % before summarization |
     | `run_sync_in_thread` | `bool` | `True` | Run sync tools in separate thread |
     | `text_only_tool_responses` | `bool` | `True` | Extract images to user messages |
+    | `block_successive_assistant_messages` | `bool` | `True` | Inject continue prompt to prevent back-to-back assistant messages |
     | `logger` | `AgentLoggerBase \| None` | `None` | Custom logger instance |
 
 ### Understanding Agent Output
