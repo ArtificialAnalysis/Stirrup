@@ -407,7 +407,7 @@ async def test_no_successive_assistant_messages() -> None:
         AssistantMessage(
             content="Let me think about this",
             tool_calls=[],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: finish after continue
         AssistantMessage(
@@ -419,7 +419,7 @@ async def test_no_successive_assistant_messages() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 
@@ -454,7 +454,7 @@ async def test_allow_successive_assistant_messages() -> None:
         AssistantMessage(
             content="Let me think about this",
             tool_calls=[],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: another assistant message without continue prompt
         AssistantMessage(
@@ -466,7 +466,7 @@ async def test_allow_successive_assistant_messages() -> None:
                     tool_call_id="call_1",
                 )
             ],
-            token_usage=TokenUsage(input=100, output=50),
+            token_usage=TokenUsage(input=100, answer=50),
         ),
     ]
 

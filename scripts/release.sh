@@ -41,6 +41,6 @@ git add pyproject.toml uv.lock
 git commit -m "bump to v$NEW_VERSION"
 git push
 git tag -a "v$NEW_VERSION" -m "v$NEW_VERSION"
-git push --tags
+git push origin "v$NEW_VERSION"
 
 echo "Released v$NEW_VERSION — workflow will build, publish to PyPI, and create GitHub release."
