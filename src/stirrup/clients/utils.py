@@ -32,6 +32,7 @@ __all__ = [
 
 def compute_effective_throughput(
     *,
+    model_slug: str,
     output_tokens: int,
     reasoning_tokens: int,
     llm_call_duration_seconds: float | None,
@@ -54,6 +55,7 @@ def compute_effective_throughput(
         return None
 
     return EffectiveThroughputUsage(
+        model_slug=model_slug,
         num_calls=1,
         sum_output_tokens_per_second=output_tokens_per_second,
         output_tokens=output_tokens,

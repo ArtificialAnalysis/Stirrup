@@ -209,6 +209,7 @@ class ChatCompletionsClient(LLMClient):
         answer_tokens = output_tokens - reasoning_tokens
 
         effective_throughput = compute_effective_throughput(
+            model_slug=self.model_slug,
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens,
             llm_call_duration_seconds=llm_call_duration_seconds,

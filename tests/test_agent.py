@@ -57,6 +57,7 @@ async def test_agent_basic_finish() -> None:
             ],
             token_usage=TokenUsage(input=100, answer=50),
             effective_throughput=EffectiveThroughputUsage(
+                model_slug="mock-model",
                 num_calls=1,
                 sum_output_tokens_per_second=125.0,
                 output_tokens=50,

@@ -332,24 +332,26 @@ def _collect_all_token_usage(result: dict) -> "TokenUsage":
     return total
 
 
-def _collect_all_effective_throughput(result: dict) -> "EffectiveThroughputUsage":
-    """Recursively collect all effective_throughput metadata from a flattened aggregate_metadata result."""
-    total = EffectiveThroughputUsage(
-        num_calls=0,
-        sum_output_tokens_per_second=0.0,
-        output_tokens=0,
-        llm_call_duration_seconds=0.0,
-    )
+def _collect_all_effective_throughput(result: dict) -> list["EffectiveThroughputUsage"]:
+    """Collect all effective_throughput metadata, grouped by model_slug."""
+    by_model: dict[str, EffectiveThroughputUsage] = {}
+
+    def _add(entry: "EffectiveThroughputUsage") -> None:
+        key = entry.model_slug
+        if key in by_model:
+            by_model[key] = by_model[key] + entry
+        else:
+            by_model[key] = entry
 
     for key, value in result.items():
         if key == "effective_throughput" and isinstance(value, EffectiveThroughputUsage):
-            total = total + value
+            _add(value)
         elif isinstance(value, dict):
-            nested_effective_throughput = value.get("effective_throughput")
-            if isinstance(nested_effective_throughput, EffectiveThroughputUsage):
-                total = total + nested_effective_throughput
+            nested = value.get("effective_throughput")
+            if isinstance(nested, EffectiveThroughputUsage):
+                _add(nested)
 
-    return total
+    return list(by_model.values())
 
 
 def aggregate_metadata(
@@ -409,9 +411,9 @@ def aggregate_metadata(
         if total_token_usage.total > 0:
             result["token_usage"] = [total_token_usage]
 
-        total_effective_throughput = _collect_all_effective_throughput(result)
-        if total_effective_throughput.num_calls > 0:
-            result["effective_throughput"] = [total_effective_throughput]
+        all_effective_throughput = _collect_all_effective_throughput(result)
+        if all_effective_throughput:
+            result["effective_throughput"] = all_effective_throughput
 
     if return_json_serializable:
         # Convert all Pydantic models to JSON-serializable dicts
@@ -456,6 +458,7 @@ class EffectiveThroughputUsage(BaseModel):
     Throughput is computed over total output_tokens.
     """
 
+    model_slug: str = ""
     num_calls: int = 1
     sum_output_tokens_per_second: float
     output_tokens: int = 0
@@ -476,8 +479,9 @@ class EffectiveThroughputUsage(BaseModel):
         return self.sum_output_tokens_per_second / self.num_calls
 
     def __add__(self, other: "EffectiveThroughputUsage") -> "EffectiveThroughputUsage":
-        """Combine effective throughput metadata across calls/runs."""
+        """Combine effective throughput metadata across calls with the same model."""
         return EffectiveThroughputUsage(
+            model_slug=self.model_slug,
             num_calls=self.num_calls + other.num_calls,
             sum_output_tokens_per_second=self.sum_output_tokens_per_second + other.sum_output_tokens_per_second,
             output_tokens=self.output_tokens + other.output_tokens,

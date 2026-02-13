@@ -78,22 +78,20 @@ def _format_effective_throughput(data: object) -> str:
     if isinstance(data, dict):
         data_dict = cast(dict[str, Any], data)
         num_calls = int(data_dict.get("num_calls", 0))
-        sum_speed = float(data_dict.get("sum_output_tokens_per_second", 0.0))
         output_tokens = int(data_dict.get("output_tokens", 0))
         llm_call_duration_seconds = float(data_dict.get("llm_call_duration_seconds", 0.0))
+        model_slug = str(data_dict.get("model_slug", ""))
     elif hasattr(data, "num_calls") and hasattr(data, "sum_output_tokens_per_second"):
         num_calls = int(getattr(data, "num_calls", 0))
-        sum_speed = float(getattr(data, "sum_output_tokens_per_second", 0.0))
         output_tokens = int(getattr(data, "output_tokens", 0))
         llm_call_duration_seconds = float(getattr(data, "llm_call_duration_seconds", 0.0))
+        model_slug = str(getattr(data, "model_slug", ""))
     else:
         return str(data)
 
-    if llm_call_duration_seconds > 0:
-        avg_speed = output_tokens / llm_call_duration_seconds
-    else:
-        avg_speed = (sum_speed / num_calls) if num_calls > 0 else 0.0
-    return f"{avg_speed:.2f} tok/s ({num_calls} call(s))"
+    avg_speed = output_tokens / llm_call_duration_seconds if llm_call_duration_seconds > 0 else 0.0
+    prefix = f"{model_slug}: " if model_slug else ""
+    return f"{prefix}{avg_speed:.2f} tok/s ({num_calls} call(s))"
 
 
 def _get_nested_tools(data: object) -> dict[str, object]:
@@ -649,34 +647,24 @@ class AgentLogger(AgentLoggerBase):
 
             throughput_panel = None
             if effective_throughput_list:
-                total_calls = sum(getattr(s, "num_calls", 0) for s in effective_throughput_list)
-                sum_throughputs = sum(
-                    getattr(s, "sum_output_tokens_per_second", 0.0) for s in effective_throughput_list
-                )
-                avg_throughput = (sum_throughputs / total_calls) if total_calls > 0 else 0.0
-
-                total_llm_call_duration = sum(
-                    getattr(s, "llm_call_duration_seconds", 0.0) for s in effective_throughput_list
-                )
-                total_output_tokens = sum(getattr(s, "output_tokens", 0) for s in effective_throughput_list)
-                e2e_llm_throughput = (
-                    (total_output_tokens / total_llm_call_duration) if total_llm_call_duration > 0 else None
-                )
-
                 throughput_table = Table(
                     box=box.SIMPLE,
                     show_header=True,
                     header_style="bold",
                     expand=True,
                 )
-                throughput_table.add_column("Metric", style="cyan")
-                throughput_table.add_column("Value", justify="right", style="green")
-                if e2e_llm_throughput is not None:
-                    throughput_table.add_row("Effective OTPS", f"{e2e_llm_throughput:.2f}")
-                else:
-                    throughput_table.add_row("Effective OTPS", f"{avg_throughput:.2f}")
-                throughput_table.add_row("Calls", f"{total_calls:,}")
-                throughput_table.add_row("Total Generation Time (s)", f"{total_llm_call_duration:.2f}")
+                throughput_table.add_column("Model", style="cyan")
+                throughput_table.add_column("Effective OTPS", justify="right", style="green")
+                throughput_table.add_column("Calls", justify="right", style="green")
+                throughput_table.add_column("Gen Time (s)", justify="right", style="green")
+
+                for entry in effective_throughput_list:
+                    num_calls = getattr(entry, "num_calls", 0)
+                    duration = getattr(entry, "llm_call_duration_seconds", 0.0)
+                    output_tokens = getattr(entry, "output_tokens", 0)
+                    otps = (output_tokens / duration) if duration > 0 else 0.0
+                    model = getattr(entry, "model_slug", "") or "unknown"
+                    throughput_table.add_row(model, f"{otps:.2f}", f"{num_calls:,}", f"{duration:.2f}")
 
                 throughput_panel = Panel(
                     throughput_table,
