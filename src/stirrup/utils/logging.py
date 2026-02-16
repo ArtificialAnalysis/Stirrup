@@ -979,7 +979,7 @@ class AgentLogger(AgentLoggerBase):
         result_text = truncate_msg(result_text, 1000)
 
         # Format as XML with syntax highlighting
-        content = Syntax(result_text, "xml", theme="monokai", word_wrap=True)
+        content = Syntax(result_text, "text", theme="monokai", word_wrap=True)
 
         # Status indicator in title with agent name
         status = "✓" if tool_message.args_was_valid else "✗"
