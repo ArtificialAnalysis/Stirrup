@@ -149,6 +149,38 @@ class TestDockerCodeExecToolProvider:
                 result = await provider.save_output_files([abs_path], temp_output_dir)
                 assert len(result.saved) == 1
 
+    async def test_save_output_files_preserves_subdirectories(
+        self, mock_docker_client: MagicMock, tmp_path: Path, temp_output_dir: Path
+    ) -> None:
+        """Test that saving files preserves subdirectory structure."""
+        provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
+
+        with (
+            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+        ):
+            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+            async with provider as _:
+                # Create files in subdirectories (simulating container creating them)
+                subdir_a = provider.temp_dir / "subdir_a"
+                subdir_b = provider.temp_dir / "subdir_b"
+                subdir_a.mkdir()
+                subdir_b.mkdir()
+                (subdir_a / "results.csv").write_text("content a")
+                (subdir_b / "results.csv").write_text("content b")
+
+                # Save both files with relative paths
+                result = await provider.save_output_files(
+                    ["subdir_a/results.csv", "subdir_b/results.csv"], temp_output_dir
+                )
+                assert len(result.saved) == 2
+                assert len(result.failed) == 0
+
+                # Both files should exist with correct content
+                assert (temp_output_dir / "subdir_a" / "results.csv").read_text() == "content a"
+                assert (temp_output_dir / "subdir_b" / "results.csv").read_text() == "content b"
+
     async def test_upload_files(
         self, mock_docker_client: MagicMock, tmp_path: Path, sample_file: Path, sample_dir: Path
     ) -> None:

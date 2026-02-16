@@ -415,7 +415,17 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
                     continue
 
                 file_size = source_path.stat().st_size
-                dest_path = output_dir_path / source_path.name
+                # Preserve directory structure: use original relative path if available,
+                # otherwise derive relative path from resolved absolute path
+                if Path(source_path_str).is_absolute():
+                    try:
+                        relative = source_path.resolve().relative_to(self._temp_dir.resolve())
+                    except ValueError:
+                        relative = Path(source_path.name)
+                else:
+                    relative = Path(source_path_str)
+                dest_path = output_dir_path / relative
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # Move file (overwrites if exists)
                 shutil.move(str(source_path), str(dest_path))

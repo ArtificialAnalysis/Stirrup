@@ -4,7 +4,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from pydantic import BaseModel, Field
@@ -303,8 +303,10 @@ class CodeExecToolProvider(ToolProvider, ABC):
         for source_path in paths:
             try:
                 content = await self.read_file_bytes(source_path)
-                filename = Path(source_path).name
-                dest_path = f"{output_dir_str}/{filename}"
+                # Preserve directory structure for relative paths
+                source = PurePosixPath(source_path)
+                relative_path = str(source) if not source.is_absolute() else source.name
+                dest_path = f"{output_dir_str}/{relative_path}"
 
                 if dest_env:
                     # Transfer to another exec env (cross-environment)
@@ -319,7 +321,7 @@ class CodeExecToolProvider(ToolProvider, ABC):
                     result.saved.append(SavedFile(source_path, Path(dest_path), len(content)))
                 else:
                     # Save to local filesystem
-                    output_path = Path(output_dir) / filename
+                    output_path = Path(output_dir) / relative_path
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     logger.debug(
                         "SAVE TO LOCAL: %s (%d bytes) -> %s",

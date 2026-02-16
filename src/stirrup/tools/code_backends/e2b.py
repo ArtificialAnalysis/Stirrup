@@ -1,6 +1,6 @@
 """E2B cloud execution environment backend for code execution."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 
@@ -318,8 +318,11 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                 file_bytes = await self._sbx.files.read(env_path, format="bytes", request_timeout=self._request_timeout)
                 content = bytes(file_bytes)
 
-                # Save with original filename directly in output_dir
-                local_path = output_dir_path / Path(env_path).name
+                # Preserve directory structure for relative paths
+                source = PurePosixPath(env_path)
+                relative_path = str(source) if not source.is_absolute() else source.name
+                local_path = output_dir_path / relative_path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # Write file
                 local_path.write_bytes(content)

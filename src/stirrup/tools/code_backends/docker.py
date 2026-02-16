@@ -691,7 +691,13 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                     continue
 
                 file_size = host_path.stat().st_size
-                dest_path = output_dir_path / host_path.name
+                # Preserve directory structure: derive relative path from host path
+                try:
+                    relative = host_path.resolve().relative_to(self._temp_dir.resolve())
+                except ValueError:
+                    relative = Path(host_path.name)
+                dest_path = output_dir_path / relative
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # Move file (overwrites if exists)
                 shutil.move(str(host_path), str(dest_path))

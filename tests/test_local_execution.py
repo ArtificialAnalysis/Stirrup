@@ -94,6 +94,29 @@ class TestLocalCodeExecToolProvider:
             assert len(result.failed) == 1
             assert "nonexistent.txt" in result.failed
 
+    async def test_save_output_files_preserves_subdirectories(self, temp_output_dir: Path) -> None:
+        """Test that saving files preserves subdirectory structure."""
+        provider = LocalCodeExecToolProvider()
+
+        async with provider as _:
+            # Create files in subdirectories
+            await provider.run_command("mkdir -p subdir_a subdir_b")
+            await provider.run_command("echo 'content a' > subdir_a/results.csv")
+            await provider.run_command("echo 'content b' > subdir_b/results.csv")
+
+            # Save both files - should not overwrite each other
+            result = await provider.save_output_files(["subdir_a/results.csv", "subdir_b/results.csv"], temp_output_dir)
+            assert len(result.saved) == 2
+            assert len(result.failed) == 0
+
+            # Both files should exist with correct content
+            assert (temp_output_dir / "subdir_a" / "results.csv").read_text().strip() == "content a"
+            assert (temp_output_dir / "subdir_b" / "results.csv").read_text().strip() == "content b"
+
+            # Output paths should include subdirectories
+            assert result.saved[0].output_path == temp_output_dir / "subdir_a" / "results.csv"
+            assert result.saved[1].output_path == temp_output_dir / "subdir_b" / "results.csv"
+
     async def test_upload_files(self, sample_file: Path, sample_dir: Path) -> None:
         """Test uploading files to the execution environment."""
         provider = LocalCodeExecToolProvider()
