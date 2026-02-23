@@ -844,7 +844,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 original_handler = signal.getsignal(signal.SIGINT)
                 signal.signal(signal.SIGINT, signal.SIG_IGN)
                 try:
-                    cache_manager.save_state(
+                    await anyio.to_thread.run_sync(
+                        cache_manager.save_state,
                         self._current_task_hash,
                         self._current_run_state,
                         exec_env_dir,

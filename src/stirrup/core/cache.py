@@ -227,6 +227,57 @@ def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
     return [deserialize_message(msg_data) for msg_data in data]
 
 
+def _sync_files_incremental(src: Path, dst: Path) -> None:
+    """Sync src directory into dst incrementally (new/modified files only; delete orphans).
+
+    Comparison is by mtime + size (rsync heuristic). dst is updated in-place and
+    never deleted first, so the existing cache remains valid if interrupted.
+
+    Symlinks are not followed to avoid loops; non-regular files (sockets, devices,
+    named pipes) are skipped since they cannot be meaningfully cached.
+
+    Args:
+        src: Source directory (execution environment temp dir).
+        dst: Destination directory (cache files dir).
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+
+    # Pass 1: copy new or modified regular files from src -> dst
+    # followlinks=False prevents infinite loops from symlink cycles in the exec env
+    for src_root_str, _dirnames, filenames in os.walk(src, followlinks=False):
+        src_root = Path(src_root_str)
+        rel = src_root.relative_to(src)
+        dst_root = dst / rel
+        dst_root.mkdir(parents=True, exist_ok=True)
+
+        for filename in filenames:
+            src_file = src_root / filename
+            # Skip non-regular files (sockets, devices, named pipes, symlinks)
+            # shutil.copy2 cannot handle these and they carry no cacheable state
+            if not src_file.is_file():
+                continue
+            dst_file = dst_root / filename
+            if dst_file.exists():
+                src_stat = os.stat(src_file)
+                dst_stat = os.stat(dst_file)
+                if src_stat.st_size == dst_stat.st_size and src_stat.st_mtime <= dst_stat.st_mtime:
+                    continue  # unchanged — skip
+            shutil.copy2(src_file, dst_file)
+
+    # Pass 2: remove files/dirs from dst that no longer exist in src
+    for dst_root_str, dirnames, filenames in os.walk(dst, topdown=False):
+        dst_root = Path(dst_root_str)
+        rel = dst_root.relative_to(dst)
+        src_root = src / rel
+        for filename in filenames:
+            if not (src_root / filename).exists():
+                (dst_root / filename).unlink()
+        for dirname in dirnames:
+            dst_subdir = dst_root / dirname
+            if not (src_root / dirname).exists():
+                shutil.rmtree(dst_subdir)
+
+
 @dataclass
 class CacheState:
     """Serializable state for resuming an agent run.
@@ -330,7 +381,12 @@ class CacheManager:
             task_hash: Unique identifier for this task/cache.
             state: CacheState to persist.
             exec_env_dir: Optional path to execution environment temp directory.
-                         If provided, all files will be copied to cache.
+                         If provided, files are incrementally synced into the cache
+                         (only new or modified files copied; deleted files removed).
+                         The cache directory is updated in-place and never deleted
+                         first, so existing cached files remain valid if interrupted.
+                         This method is synchronous; callers in async contexts should
+                         offload it via ``anyio.to_thread.run_sync``.
         """
         cache_dir = self._get_cache_dir(task_hash)
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -370,13 +426,11 @@ class CacheManager:
                 temp_file.unlink()
             raise
 
-        # Copy execution environment files if provided
+        # Incrementally sync execution environment files if provided
         if exec_env_dir and exec_env_dir.exists():
             files_dir = self._get_files_dir(task_hash)
-            if files_dir.exists():
-                shutil.rmtree(files_dir)  # Clear existing files
-            shutil.copytree(exec_env_dir, files_dir, dirs_exist_ok=True)
-            logger.info("Saved execution environment files to %s", files_dir)
+            _sync_files_incremental(exec_env_dir, files_dir)
+            logger.info("Incrementally synced execution environment files to %s", files_dir)
 
     def load_state(self, task_hash: str) -> CacheState | None:
         """Load cached state for a task hash.
