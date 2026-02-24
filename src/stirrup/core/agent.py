@@ -1,5 +1,6 @@
 # Context var for passing parent depth to sub-agent executors
 import contextvars
+import functools
 import glob as glob_module
 import inspect
 import logging
@@ -844,12 +845,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 original_handler = signal.getsignal(signal.SIGINT)
                 signal.signal(signal.SIGINT, signal.SIG_IGN)
                 try:
-                    await anyio.to_thread.run_sync(
+                    save_fn = functools.partial(
                         cache_manager.save_state,
                         self._current_task_hash,
                         self._current_run_state,
                         exec_env_dir,
+                        model=self._client.model_slug,
+                        tool_names=sorted(self._active_tools.keys()),
                     )
+                    await anyio.to_thread.run_sync(save_fn)
                 finally:
                     signal.signal(signal.SIGINT, original_handler)
                 self._logger.info(f"Cached state for task {self._current_task_hash}")
@@ -1102,7 +1106,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Try to resume from cache if requested
         if self._resume:
             state = _SESSION_STATE.get()
-            cached = cache_manager.load_state(task_hash)
+            cached = cache_manager.load_state(
+                    task_hash,
+                    model=self._client.model_slug,
+                    tool_names=sorted(self._active_tools.keys()),
+                )
             if cached:
                 # Restore files to exec env
                 if state.exec_env and state.exec_env.temp_dir:

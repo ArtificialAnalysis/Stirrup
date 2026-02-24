@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from importlib.metadata import version as _pkg_version
+
 from pydantic import TypeAdapter
 
 from stirrup.core.models import (
@@ -25,6 +27,11 @@ from stirrup.core.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+try:
+    _STIRRUP_VERSION = _pkg_version("stirrup")
+except Exception:
+    _STIRRUP_VERSION = "unknown"
 
 # Default cache directory relative to the project root
 DEFAULT_CACHE_DIR = Path("~/.cache/stirrup/").expanduser()
@@ -332,6 +339,47 @@ class CacheState:
         )
 
 
+@dataclass
+class CacheManifest:
+    """Session fingerprint written alongside state.json for validation on resume."""
+
+    model: str
+    """Model identifier used in the session that wrote this cache."""
+
+    tool_names: list[str]
+    """Sorted list of active tool names at cache write time."""
+
+    task_hash: str
+    """Task hash (same as directory name); redundant but useful for debugging."""
+
+    stirrup_version: str
+    """Package version string at write time."""
+
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    """ISO timestamp when manifest was written."""
+
+    def to_dict(self) -> dict:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            "model": self.model,
+            "tool_names": self.tool_names,
+            "task_hash": self.task_hash,
+            "stirrup_version": self.stirrup_version,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CacheManifest":
+        """Create CacheManifest from JSON dictionary."""
+        return cls(
+            model=data.get("model", ""),
+            tool_names=data.get("tool_names", []),
+            task_hash=data.get("task_hash", ""),
+            stirrup_version=data.get("stirrup_version", "unknown"),
+            timestamp=data.get("timestamp", ""),
+        )
+
+
 class CacheManager:
     """Manages cache operations for agent sessions.
 
@@ -367,11 +415,18 @@ class CacheManager:
         """Get files directory path for a task hash."""
         return self._get_cache_dir(task_hash) / "files"
 
+    def _get_manifest_file(self, task_hash: str) -> Path:
+        """Get manifest.json file path for a task hash."""
+        return self._get_cache_dir(task_hash) / "manifest.json"
+
     def save_state(
         self,
         task_hash: str,
         state: CacheState,
         exec_env_dir: Path | None = None,
+        *,
+        model: str = "",
+        tool_names: list[str] | None = None,
     ) -> None:
         """Save cache state and optionally archive execution environment files.
 
@@ -409,6 +464,28 @@ class CacheManager:
             # Atomic rename (on POSIX systems)
             temp_file.replace(state_file)
             logger.info("Saved cache state to %s (turn %d)", state_file, state.turn)
+
+            # Write manifest.json atomically alongside state.json
+            manifest = CacheManifest(
+                model=model,
+                tool_names=sorted(tool_names) if tool_names is not None else [],
+                task_hash=task_hash,
+                stirrup_version=_STIRRUP_VERSION,
+            )
+            manifest_file = self._get_manifest_file(task_hash)
+            manifest_temp = manifest_file.with_suffix(".json.tmp")
+            try:
+                with open(manifest_temp, "w", encoding="utf-8") as mf:
+                    json.dump(manifest.to_dict(), mf, indent=2, ensure_ascii=False)
+                    mf.flush()
+                    os.fsync(mf.fileno())
+                manifest_temp.replace(manifest_file)
+                logger.debug("Wrote manifest to %s", manifest_file)
+            except Exception as me:
+                logger.warning("Failed to write manifest for task %s: %s", task_hash, me)
+                if manifest_temp.exists():
+                    manifest_temp.unlink()
+                # Non-fatal: state is still cached; next resume just skips validation
         except Exception as e:
             logger.exception("Failed to save cache state: %s", e)
             # Try direct write as fallback
@@ -432,11 +509,21 @@ class CacheManager:
             _sync_files_incremental(exec_env_dir, files_dir)
             logger.info("Incrementally synced execution environment files to %s", files_dir)
 
-    def load_state(self, task_hash: str) -> CacheState | None:
+    def load_state(
+        self,
+        task_hash: str,
+        *,
+        model: str = "",
+        tool_names: list[str] | None = None,
+    ) -> CacheState | None:
         """Load cached state for a task hash.
 
         Args:
             task_hash: Unique identifier for the task/cache.
+            model: Current session model identifier. If provided (along with a saved
+                   manifest), validated against the cached model; a mismatch emits a warning.
+            tool_names: Current session active tool names. If provided, validated against
+                        the cached tool set; added/removed tools are reported in the warning.
 
         Returns:
             CacheState if cache exists, None otherwise.
@@ -451,6 +538,38 @@ class CacheManager:
                 data = json.load(f)
             state = CacheState.from_dict(data)
             logger.info("Loaded cache state from %s (turn %d)", state_file, state.turn)
+
+            # Validate manifest if caller provided current session fingerprint
+            if model or tool_names is not None:
+                manifest_file = self._get_manifest_file(task_hash)
+                if manifest_file.exists():
+                    try:
+                        with open(manifest_file, encoding="utf-8") as mf:
+                            manifest = CacheManifest.from_dict(json.load(mf))
+                        mismatches: list[str] = []
+                        if model and manifest.model and manifest.model != model:
+                            mismatches.append(
+                                f"model changed: cached={manifest.model!r}, current={model!r}"
+                            )
+                        if tool_names is not None and manifest.tool_names:
+                            added = set(tool_names) - set(manifest.tool_names)
+                            removed = set(manifest.tool_names) - set(tool_names)
+                            if added or removed:
+                                mismatches.append(
+                                    f"tools changed: added={sorted(added)}, removed={sorted(removed)}"
+                                )
+                        if mismatches:
+                            logger.warning(
+                                "Resuming cache for task %s with session mismatch: %s. "
+                                "Cached state may be invalid.",
+                                task_hash,
+                                "; ".join(mismatches),
+                            )
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.debug("Could not parse manifest for task %s: %s", task_hash, e)
+                else:
+                    logger.debug("No manifest for task %s — skipping validation", task_hash)
+
             return state
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning("Failed to load cache for task %s: %s", task_hash, e)
