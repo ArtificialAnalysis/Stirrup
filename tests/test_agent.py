@@ -1,5 +1,6 @@
 """Tests for agent core functionality."""
 
+import pytest
 from pydantic import BaseModel
 
 from stirrup.constants import FINISH_TOOL_NAME
@@ -493,3 +494,67 @@ async def test_allow_successive_assistant_messages() -> None:
     messages = message_history[0]
     continue_messages = [m for m in messages if isinstance(m, UserMessage) and m.content == "Please continue the task"]
     assert len(continue_messages) == 0
+
+
+async def test_agent_duplicate_tool_names_raises() -> None:
+    """Agent raises ValueError at session entry if two tools share a name."""
+    dup_tool = Tool[dict, None](
+        name="my_tool",
+        description="first",
+        parameters=dict,
+        executor=lambda _: ToolResult(content="ok"),
+    )
+    dup_tool2 = Tool[dict, None](
+        name="my_tool",  # same name — should trigger validation error
+        description="second",
+        parameters=dict,
+        executor=lambda _: ToolResult(content="ok"),
+    )
+
+    agent = Agent(
+        client=MockLLMClient(responses=[]),
+        name="test_agent",
+        tools=[dup_tool, dup_tool2],
+    )
+
+    with pytest.raises(ValueError, match="duplicate tool names"):
+        async with agent.session():
+            pass
+
+
+async def test_agent_unique_tool_names_ok() -> None:
+    """Agent with all unique tool names enters session without error."""
+    client = MockLLMClient(
+        responses=[
+            AssistantMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        name=FINISH_TOOL_NAME,
+                        arguments='{"reason": "done", "paths": []}',
+                        tool_call_id="call_1",
+                    )
+                ],
+                token_usage=TokenUsage(input=10, answer=5),
+            )
+        ]
+    )
+    tool_a = Tool[dict, None](
+        name="tool_a",
+        description="a",
+        parameters=dict,
+        executor=lambda _: ToolResult(content="ok"),
+    )
+    tool_b = Tool[dict, None](
+        name="tool_b",
+        description="b",
+        parameters=dict,
+        executor=lambda _: ToolResult(content="ok"),
+    )
+
+    agent = Agent(client=client, name="test_agent", tools=[tool_a, tool_b])
+    async with agent.session() as session:
+        finish_params, _, _ = await session.run("go")
+
+    assert finish_params is not None
+    assert finish_params.reason == "done"
