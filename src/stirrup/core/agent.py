@@ -601,6 +601,30 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                 raise
                             # cell_contents can raise ValueError if empty - ignore
 
+    def _validate_no_duplicate_tool_names(self, active_tools: list[Tool]) -> None:
+        """Raise ValueError if any two tools share the same name.
+
+        The finish tool is included in the check since it occupies the same
+        routing namespace as regular tools.
+
+        Raises:
+            ValueError: If duplicate tool names are found.
+        """
+        all_tool_names = [self._finish_tool.name] + [t.name for t in active_tools]
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for name in all_tool_names:
+            if name in seen:
+                if name not in duplicates:
+                    duplicates.append(name)
+            else:
+                seen.add(name)
+        if duplicates:
+            raise ValueError(
+                f"Agent '{self._name}' has duplicate tool names: {sorted(duplicates)}. "
+                "Each tool (including sub-agents) must have a unique name."
+            )
+
     async def __aenter__(self) -> Self:
         """Enter session context: set up tools, logging, and resources.
 
@@ -695,6 +719,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             # Build active tools dict with finish tool (stored on instance, not session)
             self._active_tools = {FINISH_TOOL_NAME: self._finish_tool}
             self._active_tools.update({t.name: t for t in active_tools})
+
+            # Validate no duplicate tool names (catches duplicate sub-agent names early)
+            self._validate_no_duplicate_tool_names(active_tools)
 
             # Validate subagent code exec requirements (only at root level)
             if current_depth == 0:
