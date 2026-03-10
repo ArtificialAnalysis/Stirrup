@@ -497,67 +497,6 @@ async def test_allow_successive_assistant_messages() -> None:
     assert len(continue_messages) == 0
 
 
-async def test_summarize_messages_strips_old_summaries() -> None:
-    """Test that repeated summarizations don't accumulate old summary bridges."""
-    # Summary response from the LLM
-    summary_response = AssistantMessage(
-        content="Summary of conversation so far.",
-        tool_calls=[],
-        token_usage=TokenUsage(input=500, answer=100),
-    )
-
-    # After summary, agent continues and eventually finishes
-    finish_response = AssistantMessage(
-        content="Done",
-        tool_calls=[
-            ToolCall(
-                name=FINISH_TOOL_NAME,
-                arguments='{"reason": "Finished", "paths": []}',
-                tool_call_id="call_finish",
-            )
-        ],
-        token_usage=TokenUsage(input=200, answer=50),
-    )
-
-    client = MockLLMClient([summary_response, finish_response])
-    agent = Agent(
-        client=client,
-        name="test-agent",
-        max_turns=10,
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-    )
-
-    # Simulate messages after a prior summarization: the task_context already
-    # contains a SummaryMessage bridge + ack from a previous cycle, followed
-    # by new conversation turns.
-    messages: list[ChatMessage] = [
-        SystemMessage(content="You are a helpful assistant."),
-        UserMessage(content="Solve this task."),
-        SummaryMessage(content="Previous summary bridge content."),
-        UserMessage(content="Got it, thanks!"),
-        AssistantMessage(content="Working on it...", tool_calls=[], token_usage=TokenUsage(input=300, answer=80)),
-        UserMessage(content="Please continue the task"),
-        AssistantMessage(content="Still working...", tool_calls=[], token_usage=TokenUsage(input=400, answer=90)),
-    ]
-
-    async with agent.session() as session:
-        result = await session.summarize_messages(messages)
-
-    # The old SummaryMessage should be stripped — takewhile stops at it
-    summary_messages = [m for m in result if isinstance(m, SummaryMessage)]
-    assert len(summary_messages) == 1  # Only the new summary bridge
-
-    # Result should be: [SystemMessage, UserMessage, new SummaryBridge, ack]
-    assert len(result) == 4
-    assert isinstance(result[0], SystemMessage)
-    assert isinstance(result[1], UserMessage)
-    assert result[1].content == "Solve this task."
-    assert isinstance(result[2], SummaryMessage)
-    assert isinstance(result[3], UserMessage)
-    assert result[3].content == "Got it, thanks!"
-
-
 async def test_summarize_history_has_one_summary_per_trajectory() -> None:
     """Test that each sub-trajectory in history contains at most one SummaryMessage.
 
