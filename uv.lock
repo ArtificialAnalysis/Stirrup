@@ -5569,6 +5569,27 @@ wheels = [
 ]
 
 [[package]]
+name = "slack-bolt"
+version = "1.27.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "slack-sdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/28/50ed0b86e48b48e6ddcc71de93b91c8ac14a55d1249e4bff0586494a2f90/slack_bolt-1.27.0.tar.gz", hash = "sha256:3db91d64e277e176a565c574ae82748aa8554f19e41a4fceadca4d65374ce1e0", size = 129101, upload-time = "2025-11-13T20:17:46.878Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/a8/1acb355759747ba4da5f45c1a33d641994b9e04b914908c9434f18bd97e8/slack_bolt-1.27.0-py2.py3-none-any.whl", hash = "sha256:c43c94bf34740f2adeb9b55566c83f1e73fed6ba2878bd346cdfd6fd8ad22360", size = 230428, upload-time = "2025-11-13T20:17:45.465Z" },
+]
+
+[[package]]
+name = "slack-sdk"
+version = "3.40.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/f7/4a968e1d091569ff7f6da929695728c3eacf10afcda7c424b70df2c3700b/slack_sdk-3.40.0.tar.gz", hash = "sha256:87b9a79d1d6e19a2b1877727a0ec6f016d82d30a6a410389fba87c221c99f10e", size = 249478, upload-time = "2026-02-10T22:12:13.445Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/72/428fb01a1043ddbb3f66297363406d6e69ddff5ad89c4d07945a3753a235/slack_sdk-3.40.0-py2.py3-none-any.whl", hash = "sha256:f2bada5ed3adb10a01e154e90db01d6d8938d0461b5790c12bcb807b2d28bbe2", size = 312786, upload-time = "2026-02-10T22:12:11.258Z" },
+]
+
+[[package]]
 name = "sniffio"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -5637,6 +5658,7 @@ all = [
     { name = "litellm" },
     { name = "mcp" },
     { name = "python-dotenv" },
+    { name = "slack-bolt" },
 ]
 browser = [
     { name = "browser-use" },
@@ -5653,6 +5675,9 @@ litellm = [
 ]
 mcp = [
     { name = "mcp" },
+]
+slack = [
+    { name = "slack-bolt" },
 ]
 
 [package.dev-dependencies]
@@ -5684,11 +5709,12 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-dotenv", marker = "extra == 'docker'", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "stirrup", extras = ["litellm", "e2b", "docker", "mcp", "browser"], marker = "extra == 'all'" },
+    { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
+    { name = "stirrup", extras = ["litellm", "e2b", "docker", "mcp", "browser", "slack"], marker = "extra == 'all'" },
     { name = "tenacity", specifier = ">=5.0.0" },
     { name = "trafilatura", specifier = ">=1.9.0" },
 ]
-provides-extras = ["litellm", "e2b", "docker", "mcp", "browser", "all"]
+provides-extras = ["litellm", "e2b", "docker", "mcp", "browser", "slack", "all"]
 
 [package.metadata.requires-dev]
 dev = [
