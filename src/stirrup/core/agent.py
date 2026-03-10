@@ -29,6 +29,7 @@ from stirrup.core.models import (
     ImageContentBlock,
     LLMClient,
     SubAgentMetadata,
+    SummaryMessage,
     SystemMessage,
     TokenUsage,
     Tool,
@@ -1036,7 +1037,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
     async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Condense message history using LLM to stay within context window."""
-        task_context: list[ChatMessage] = list(takewhile(lambda m: not isinstance(m, AssistantMessage), messages))
+        task_context: list[ChatMessage] = list(
+            takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages)
+        )
 
         summary_prompt = [*messages, UserMessage(content=MESSAGE_SUMMARIZER)]
 
@@ -1044,7 +1047,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         summary = await self._client.generate(summary_prompt, self._active_tools)
 
         summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
-        summary_bridge = UserMessage(content=summary_bridge_prompt)
+        summary_bridge = SummaryMessage(content=summary_bridge_prompt)
+        # UserMessage (not AssistantMessage) to avoid consecutive assistant messages which some providers reject
         acknowledgement_msg = UserMessage(content="Got it, thanks!")
 
         # Log the completed summary

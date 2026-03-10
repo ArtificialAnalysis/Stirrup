@@ -600,6 +600,12 @@ class UserMessage(BaseModel):
     content: Content
 
 
+class SummaryMessage(UserMessage):
+    """Summary message to the LLM."""
+
+    pass
+
+
 class Reasoning(BaseModel):
     """Extended thinking/reasoning content from models that support chain-of-thought reasoning."""
 
