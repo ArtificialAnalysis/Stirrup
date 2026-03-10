@@ -86,6 +86,7 @@ _SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("s
 
 __all__ = [
     "Agent",
+    "SessionAgent",
     "SubAgentParams",
 ]
 
@@ -294,8 +295,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._clear_cache_on_success: bool = True
         self._cache_on_interrupt: bool = True
 
-        # Instance-scoped state (populated during __aenter__, isolated per agent instance)
-        self._active_tools: dict[str, Tool] = {}
+        # Eagerly register static tools + finish tool (available without a session)
+        self._active_tools: dict[str, Tool] = {FINISH_TOOL_NAME: self._finish_tool}
+        for tool in self._tools:
+            if isinstance(tool, Tool):
+                self._active_tools[tool.name] = tool
+        self._has_tool_providers = any(isinstance(t, ToolProvider) for t in self._tools)
+
         self._last_finish_params: Any = None  # FinishParams type parameter
         self._last_run_metadata: dict[str, list[Any]] = {}
         self._transferred_paths: list[str] = []  # Paths transferred to parent (for subagents)
@@ -600,11 +606,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                 raise
                             # cell_contents can raise ValueError if empty - ignore
 
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self) -> "SessionAgent[FinishParams, FinishMeta]":
         """Enter session context: set up tools, logging, and resources.
 
-        Creates a new SessionState and stores it in the _SESSION_STATE ContextVar,
-        allowing concurrent sessions from the same Agent instance.
+        Returns a SessionAgent wrapping this agent's state, providing access to
+        both static tools and ToolProvider-created tools. The SessionAgent shares
+        this agent's __dict__, so state changes are visible to __aexit__.
         """
         exit_stack = AsyncExitStack()
         await exit_stack.__aenter__()
@@ -691,8 +698,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     # Static Tool, use directly
                     active_tools.append(tool)
 
-            # Build active tools dict with finish tool (stored on instance, not session)
-            self._active_tools = {FINISH_TOOL_NAME: self._finish_tool}
+            # Merge session-initialized tools into _active_tools (static tools already registered at init)
             self._active_tools.update({t.name: t for t in active_tools})
 
             # Validate subagent code exec requirements (only at root level)
@@ -790,7 +796,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._original_sigint = signal.getsignal(signal.SIGINT)
                 signal.signal(signal.SIGINT, self._handle_interrupt)
 
-            return self
+            return SessionAgent.from_agent(self)
 
         except Exception:
             await exit_stack.__aexit__(None, None, None)
@@ -927,6 +933,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             self._logger.run_metadata = self._last_run_metadata
             self._logger.output_dir = str(state.output_dir) if state.output_dir else None
             self._logger.__exit__(exc_type, exc_val, exc_tb)
+
+            # Reset active tools to static-only (remove session-initialized tools)
+            self._active_tools = {FINISH_TOOL_NAME: self._finish_tool}
+            for tool in self._tools:
+                if isinstance(tool, Tool):
+                    self._active_tools[tool.name] = tool
 
             # Cleanup all async resources
             await state.exit_stack.__aexit__(exc_type, exc_val, exc_tb)
@@ -1088,6 +1100,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             ])
 
         """
+
+        # Guard: fail if ToolProviders are attached but we're not in a session
+        if self._has_tool_providers and not isinstance(self, SessionAgent):
+            provider_names = [type(t).__name__ for t in self._tools if isinstance(t, ToolProvider)]
+            raise RuntimeError(
+                f"Agent.run() called without a session, but the agent has ToolProviders "
+                f"that require session initialization: {provider_names}. "
+                f"Use `async with agent.session(...) as session: await session.run(...)` instead."
+            )
 
         # Compute task hash for caching/resume
         task_hash = compute_task_hash(init_msgs)
@@ -1396,3 +1417,25 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             parameters=SubAgentParams,
             executor=sub_agent_executor,  # ty: ignore[invalid-argument-type]
         )
+
+
+class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, FinishMeta]):
+    """Agent running inside an active session with full tool access.
+
+    Returned by ``async with agent.session(...) as session``. A SessionAgent
+    shares its ``__dict__`` with the parent Agent, so it has the same
+    configuration and state. The key difference is that ToolProvider-created
+    tools have been initialized and are available in ``_active_tools``.
+
+    ``Agent.run()`` raises ``RuntimeError`` when ToolProviders are present
+    but the caller is not a SessionAgent. This makes the invalid state
+    (calling ``run()`` with uninitialized ToolProviders) a type-level
+    distinction rather than just a runtime flag.
+    """
+
+    @classmethod
+    def from_agent(cls, agent: Agent[FinishParams, FinishMeta]) -> "SessionAgent[FinishParams, FinishMeta]":
+        """Create a SessionAgent sharing the given Agent's ``__dict__``."""
+        sa: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
+        sa.__dict__ = agent.__dict__
+        return sa

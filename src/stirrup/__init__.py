@@ -28,7 +28,7 @@ Example usage:
 """
 
 from stirrup import tools
-from stirrup.core.agent import Agent
+from stirrup.core.agent import Agent, SessionAgent
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     Addable,
@@ -62,6 +62,7 @@ __all__ = [
     "EmptyParams",
     "ImageContentBlock",
     "LLMClient",
+    "SessionAgent",
     "SubAgentMetadata",
     "SystemMessage",
     "TokenUsage",
