@@ -23,9 +23,10 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 class MockLLMClient(LLMClient):
     """Mock LLM client for testing."""
 
-    def __init__(self, responses: list[AssistantMessage]) -> None:
+    def __init__(self, responses: list[AssistantMessage], max_tokens: int = 100_000) -> None:
         self.responses = responses
         self.call_count = 0
+        self._max_tokens = max_tokens
 
     @property
     def model_slug(self) -> str:
@@ -33,7 +34,7 @@ class MockLLMClient(LLMClient):
 
     @property
     def max_tokens(self) -> int:
-        return 100_000
+        return self._max_tokens
 
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
         response = self.responses[self.call_count]
@@ -555,3 +556,90 @@ async def test_summarize_messages_strips_old_summaries() -> None:
     assert isinstance(result[2], SummaryMessage)
     assert isinstance(result[3], UserMessage)
     assert result[3].content == "Got it, thanks!"
+
+
+async def test_summarize_history_has_one_summary_per_trajectory() -> None:
+    """Test that each sub-trajectory in history contains at most one SummaryMessage.
+
+    Simulates an agent run where summarization triggers twice. Verifies:
+    - history[0] (pre-first-summary) has 0 SummaryMessages
+    - history[1] (post-first-summary) has exactly 1 SummaryMessage
+    - history[2] (post-second-summary, final) has exactly 1 SummaryMessage
+    """
+    # max_tokens=1000 and cutoff=0.3 means summarization triggers when
+    # token_usage.total >= 300. Turns without tool calls also trigger
+    # "Please continue" messages from block_successive_assistant_messages.
+
+    responses = [
+        # Turn 1: high token usage triggers first summarization
+        AssistantMessage(
+            content="Working on it",
+            tool_calls=[],
+            token_usage=TokenUsage(input=250, answer=100),  # total=350 >= 300
+        ),
+        # First summarization generate call
+        AssistantMessage(
+            content="First summary of progress.",
+            tool_calls=[],
+            token_usage=TokenUsage(input=200, answer=50),
+        ),
+        # Turn 2: high token usage triggers second summarization
+        AssistantMessage(
+            content="Continuing work",
+            tool_calls=[],
+            token_usage=TokenUsage(input=250, answer=100),  # total=350 >= 300
+        ),
+        # Second summarization generate call
+        AssistantMessage(
+            content="Second summary of progress.",
+            tool_calls=[],
+            token_usage=TokenUsage(input=200, answer=50),
+        ),
+        # Turn 3: finish
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=FINISH_TOOL_NAME,
+                    arguments='{"reason": "Completed", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses, max_tokens=1000)
+
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=10,
+        turns_remaining_warning_threshold=2,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    async with agent.session() as session:
+        _finish_params, history, _ = await session.run(
+            [SystemMessage(content="System prompt"), UserMessage(content="Do the task")]
+        )
+
+    # Should have 3 sub-trajectories: pre-summary, post-1st-summary, post-2nd-summary (final)
+    assert len(history) == 3
+
+    # history[0]: original conversation before first summarization — no summaries
+    summaries_0 = [m for m in history[0] if isinstance(m, SummaryMessage)]
+    assert len(summaries_0) == 0
+
+    # history[1]: after first summarization — exactly 1 SummaryMessage
+    summaries_1 = [m for m in history[1] if isinstance(m, SummaryMessage)]
+    assert len(summaries_1) == 1
+
+    # history[2]: after second summarization — exactly 1 SummaryMessage (not 2)
+    summaries_2 = [m for m in history[2] if isinstance(m, SummaryMessage)]
+    assert len(summaries_2) == 1
+
+    # The summary content should be different between history[1] and history[2]
+    assert summaries_1[0].content != summaries_2[0].content

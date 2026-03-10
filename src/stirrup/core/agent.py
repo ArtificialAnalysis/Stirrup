@@ -1037,7 +1037,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
     async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Condense message history using LLM to stay within context window."""
-        task_context: list[ChatMessage] = list(takewhile(lambda m: not isinstance(m, SummaryMessage), messages))
+        task_context: list[ChatMessage] = list(
+            takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages)
+        )
 
         summary_prompt = [*messages, UserMessage(content=MESSAGE_SUMMARIZER)]
 
