@@ -622,6 +622,7 @@ class AssistantMessage(BaseModel):
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    metadata: Annotated[dict[str, Any], Field(default_factory=dict)]
     request_start_time: float | None = None
     request_end_time: float | None = None
 
