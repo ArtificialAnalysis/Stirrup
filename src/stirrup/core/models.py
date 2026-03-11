@@ -118,6 +118,7 @@ class ImageContentBlock(BinaryContentBlock):
     allowed_mime_types: ClassVar[set[str]] = {
         "image/jpeg",  # JPEG
         "image/png",  # PNG
+        "image/webp",  # WebP
         "image/gif",  # GIF
         "image/bmp",  # BMP
         "image/tiff",  # TIFF
