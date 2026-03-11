@@ -11,6 +11,7 @@ from math import isinf, isnan, sqrt
 from tempfile import NamedTemporaryFile
 from types import TracebackType
 from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, overload, runtime_checkable
+from uuid import uuid4
 
 import filetype
 from moviepy import AudioFileClip, VideoFileClip
@@ -617,6 +618,7 @@ class Reasoning(BaseModel):
 class AssistantMessage(BaseModel):
     """LLM response message with optional tool calls and token usage tracking."""
 
+    id: str = Field(default_factory=lambda: uuid4().hex)
     role: Literal["assistant"] = "assistant"
     reasoning: Reasoning | None = None
     content: Content
