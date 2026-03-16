@@ -103,7 +103,7 @@ class BinaryContentBlock(BaseModel, ABC):
     def _check_mime(self) -> Self:
         """Validate MIME type against allowed list and verify content is readable."""
         if self.allowed_mime_types and self.mime_type not in self.allowed_mime_types:
-            raise ValueError("Unsupported mime_type {self.mime_type!r}; allowed: {allowed}")
+            raise ValueError(f"Unsupported mime_type {self.mime_type!r}; allowed: {self.allowed_mime_types}")
         self._probe()  # light corruption check; no heavy work
         return self
 
