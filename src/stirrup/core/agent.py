@@ -2,6 +2,7 @@
 import contextvars
 import glob as glob_module
 import inspect
+import json
 import logging
 import re
 import signal
@@ -177,6 +178,40 @@ def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -
     }
 
 
+def _coerce_embedded_json(value: Any, schema: dict[str, Any]) -> Any:
+    schema_type = schema.get("type")
+
+    if isinstance(value, str) and schema_type in {"object", "array"}:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+
+        if schema_type == "object" and isinstance(parsed, dict):
+            value = parsed
+        elif schema_type == "array" and isinstance(parsed, list):
+            value = parsed
+        else:
+            return value
+
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties")
+        return {
+            key: _coerce_embedded_json(
+                item,
+                properties.get(key, additional if isinstance(additional, dict) else {}),
+            )
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        item_schema = schema.get("items", {})
+        return [_coerce_embedded_json(item, item_schema) for item in value]
+
+    return value
+
+
 class SubAgentParams(BaseModel):
     """Parameters for sub-agent tool invocation."""
 
@@ -232,6 +267,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
         block_successive_assistant_messages: bool = True,
+        normalize_embedded_json_tool_args: bool = False,
         # Subagent options
         share_parent_exec_env: bool = False,
         # Logging
@@ -256,6 +292,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             block_successive_assistant_messages: If True (default), automatically inject a continue
                                                message when assistant responds without tool calls to
                                                prevent successive assistant messages.
+            normalize_embedded_json_tool_args: If True, parse stringified JSON nested inside
+                                               tool arguments when the schema expects an object
+                                               or array.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -283,6 +322,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
         self._block_successive_assistant_messages = block_successive_assistant_messages
+        self._normalize_embedded_json_tool_args = normalize_embedded_json_tool_args
         self._share_parent_exec_env = share_parent_exec_env
 
         # Logger (can be passed in or created here)
@@ -965,7 +1005,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             try:
                 # Normalize empty arguments to valid empty JSON object
                 args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
-                params = tool.parameters.model_validate_json(args)
+                if self._normalize_embedded_json_tool_args:
+                    raw_args = json.loads(args)
+                    normalized_args = _coerce_embedded_json(raw_args, tool.parameters.model_json_schema())
+                    params = tool.parameters.model_validate(normalized_args)
+                else:
+                    params = tool.parameters.model_validate_json(args)
 
                 # Set parent depth for sub-agent tools to read
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)
@@ -984,7 +1029,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Store metadata if present
                 if result.metadata is not None:
                     run_metadata[tool_call.name].append(result.metadata)
-            except ValidationError:
+            except (json.JSONDecodeError, ValidationError):
                 LOGGER.debug(
                     "LLMClient tried to use the tool %s but the tool arguments are not valid: %r",
                     tool_call.name,

@@ -262,6 +262,60 @@ async def test_run_tool_preserves_image_content() -> None:
     assert tool_message.content[0].mime_type == "image/png"
 
 
+async def test_run_tool_normalizes_embedded_json_args_when_enabled() -> None:
+    """Test run_tool normalizes stringified nested JSON only when enabled."""
+
+    class NestedParams(BaseModel):
+        payload: dict[str, int]
+        items: list[int]
+
+    def nested_executor(params: NestedParams) -> ToolResult:
+        return ToolResult(content=f"payload={params.payload};items={params.items}")
+
+    nested_tool = Tool[NestedParams, None](
+        name="nested_tool",
+        description="Parse nested JSON",
+        parameters=NestedParams,
+        executor=nested_executor,  # ty: ignore[invalid-argument-type]
+    )
+    tool_call = ToolCall(
+        name="nested_tool",
+        arguments='{"payload":"{\\"count\\":1}","items":"[1,2]"}',
+        tool_call_id="call_1",
+    )
+
+    enabled_agent = Agent(
+        client=MockLLMClient([]),
+        name="test-agent-enabled",
+        max_turns=1,
+        tools=[nested_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        normalize_embedded_json_tool_args=True,
+    )
+
+    async with enabled_agent.session() as session:
+        enabled_message = await session.run_tool(tool_call, run_metadata={})
+
+    assert enabled_message.success is True
+    assert enabled_message.args_was_valid is True
+    assert enabled_message.content == "payload={'count': 1};items=[1, 2]"
+
+    disabled_agent = Agent(
+        client=MockLLMClient([]),
+        name="test-agent-disabled",
+        max_turns=1,
+        tools=[nested_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with disabled_agent.session() as session:
+        disabled_message = await session.run_tool(tool_call, run_metadata={})
+
+    assert disabled_message.success is False
+    assert disabled_message.args_was_valid is False
+    assert disabled_message.content == "Tool arguments are not valid"
+
+
 async def test_agent_invalid_tool_call() -> None:
     """Test agent handles invalid tool calls gracefully."""
     # Create mock responses
