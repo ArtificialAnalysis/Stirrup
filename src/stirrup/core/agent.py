@@ -178,7 +178,10 @@ def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -
     }
 
 
-def _coerce_embedded_json(value: Any, schema: dict[str, Any]) -> Any:
+type JsonSchema = dict[str, object]
+
+
+def _coerce_embedded_json(value: object, schema: JsonSchema) -> object:
     schema_type = schema.get("type")
 
     if isinstance(value, str) and schema_type in {"object", "array"}:
@@ -187,26 +190,28 @@ def _coerce_embedded_json(value: Any, schema: dict[str, Any]) -> Any:
         except json.JSONDecodeError:
             return value
 
-        if schema_type == "object" and isinstance(parsed, dict):
-            value = parsed
-        elif schema_type == "array" and isinstance(parsed, list):
+        if (schema_type == "object" and isinstance(parsed, dict)) or (schema_type == "array" and isinstance(parsed, list)):
             value = parsed
         else:
             return value
 
     if isinstance(value, dict):
-        properties = schema.get("properties", {})
+        properties = schema.get("properties")
+        property_schemas = properties if isinstance(properties, dict) else {}
         additional = schema.get("additionalProperties")
         return {
             key: _coerce_embedded_json(
                 item,
-                properties.get(key, additional if isinstance(additional, dict) else {}),
+                property_schemas.get(key)
+                if isinstance(property_schemas.get(key), dict)
+                else additional if isinstance(additional, dict) else {},
             )
             for key, item in value.items()
         }
 
     if isinstance(value, list):
-        item_schema = schema.get("items", {})
+        items = schema.get("items")
+        item_schema = items if isinstance(items, dict) else {}
         return [_coerce_embedded_json(item, item_schema) for item in value]
 
     return value
