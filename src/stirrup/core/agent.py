@@ -24,6 +24,7 @@ from stirrup.constants import (
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -1098,6 +1099,36 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         return assistant_message, tool_messages, finish_params
 
+    async def _step_with_overflow_recovery(
+        self,
+        messages: list[ChatMessage],
+        full_msg_history: list[list[ChatMessage]],
+        run_metadata: dict[str, list[Any]],
+        *,
+        turn: int = 0,
+        max_turns: int = 0,
+    ) -> tuple[AssistantMessage, list[ToolMessage], FinishParams | None, list[ChatMessage]]:
+        """Run one step, summarizing once if the client reports context overflow."""
+        try:
+            assistant_message, tool_messages, finish_params = await self.step(
+                messages,
+                run_metadata,
+                turn=turn,
+                max_turns=max_turns,
+            )
+            return assistant_message, tool_messages, finish_params, messages
+        except ContextOverflowError:
+            self._logger.context_summarization_start(1.0, self._context_summarization_cutoff)
+            full_msg_history.append(list(messages))
+            summarized_messages = await self.summarize_messages(messages)
+            assistant_message, tool_messages, finish_params = await self.step(
+                summarized_messages,
+                run_metadata,
+                turn=turn,
+                max_turns=max_turns,
+            )
+            return assistant_message, tool_messages, finish_params, summarized_messages
+
     async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Condense message history using LLM to stay within context window."""
         task_context: list[ChatMessage] = list(
@@ -1250,8 +1281,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.user_message(num_turns_remaining_msg)
 
             # Pass turn info to step() for real-time logging
-            assistant_message, tool_messages, finish_params = await self.step(
+            assistant_message, tool_messages, finish_params, msgs = await self._step_with_overflow_recovery(
                 msgs,
+                full_msg_history,
                 run_metadata,
                 turn=i + 1,
                 max_turns=self._max_turns,
