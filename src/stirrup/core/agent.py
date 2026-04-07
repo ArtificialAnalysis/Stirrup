@@ -189,6 +189,17 @@ def _split_latest_assistant_suffix(
     return None
 
 
+def _copy_messages_for_summarized_trajectory(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Copy preserved messages, zeroing assistant token usage in the new trajectory."""
+    copied_messages: list[ChatMessage] = []
+    for message in messages:
+        if isinstance(message, AssistantMessage):
+            copied_messages.append(message.model_copy(update={"token_usage": TokenUsage()}))
+            continue
+        copied_messages.append(message.model_copy())
+    return copied_messages
+
+
 type JsonSchema = dict[str, object]
 
 
@@ -1160,7 +1171,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     raise ContextOverflowError("Message summarization overflowed with no AssistantMessage left to peel.")
 
                 messages_to_summarize, latest_suffix = split_messages
-                preserved_tail = [*latest_suffix, *preserved_tail]
+                copied_suffix = _copy_messages_for_summarized_trajectory(latest_suffix)
+                preserved_tail = [*copied_suffix, *preserved_tail]
                 continue
 
             summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)

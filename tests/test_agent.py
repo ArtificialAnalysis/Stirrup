@@ -768,6 +768,8 @@ async def test_summarize_messages_peels_latest_turn_on_overflow() -> None:
     assert summarized[3].content == "Got it, thanks!"
     assert isinstance(summarized[4], AssistantMessage)
     assert summarized[4].content == "Using a tool now"
+    assert summarized[4].token_usage.total == 0
+    assert messages[3].token_usage.total == 180
     assert isinstance(summarized[5], ToolMessage)
     assert summarized[5].content == "Echo: hello"
 
