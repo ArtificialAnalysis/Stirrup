@@ -4,9 +4,11 @@ from io import BytesIO
 
 from PIL import Image
 from pydantic import BaseModel
+import pytest
 
 from stirrup.constants import FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -27,9 +29,10 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 class MockLLMClient(LLMClient):
     """Mock LLM client for testing."""
 
-    def __init__(self, responses: list[AssistantMessage], max_tokens: int = 100_000) -> None:
+    def __init__(self, responses: list[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
         self.responses = responses
         self.call_count = 0
+        self.calls: list[list[ChatMessage]] = []
         self._max_tokens = max_tokens
 
     @property
@@ -41,8 +44,11 @@ class MockLLMClient(LLMClient):
         return self._max_tokens
 
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+        self.calls.append(list(messages))
         response = self.responses[self.call_count]
         self.call_count += 1
+        if isinstance(response, Exception):
+            raise response
         return response
 
 
@@ -686,3 +692,102 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
 
     # The summary content should be different between history[1] and history[2]
     assert summaries_1[0].content != summaries_2[0].content
+
+
+async def test_summarize_messages_peels_latest_turn_on_overflow() -> None:
+    """Retry summarization without the newest assistant-led suffix when needed."""
+
+    class EchoParams(BaseModel):
+        message: str
+
+    def echo_executor(params: EchoParams) -> ToolResult:
+        return ToolResult(content=f"Echo: {params.message}")
+
+    echo_tool = Tool[EchoParams, None](
+        name="echo",
+        description="Echo a message",
+        parameters=EchoParams,
+        executor=echo_executor,  # ty: ignore[invalid-argument-type]
+    )
+
+    client = MockLLMClient(
+        [
+            ContextOverflowError("summary overflow"),
+            AssistantMessage(
+                content="Condensed earlier progress.",
+                tool_calls=[],
+                token_usage=TokenUsage(input=50, answer=20),
+            ),
+        ]
+    )
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        tools=[echo_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    messages = [
+        SystemMessage(content="System prompt"),
+        UserMessage(content="Do the task"),
+        AssistantMessage(
+            content="Earlier progress",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=40),
+        ),
+        AssistantMessage(
+            content="Using a tool now",
+            tool_calls=[ToolCall(name="echo", arguments='{"message": "hello"}', tool_call_id="call_1")],
+            token_usage=TokenUsage(input=120, answer=60),
+        ),
+        ToolMessage(
+            content="Echo: hello",
+            tool_call_id="call_1",
+            name="echo",
+            success=True,
+        ),
+    ]
+
+    async with agent.session() as session:
+        summarized = await session.summarize_messages(messages)
+
+    assert client.call_count == 2
+
+    retry_prompt = client.calls[1]
+    assert len(retry_prompt) == 4
+    assert isinstance(retry_prompt[0], SystemMessage)
+    assert isinstance(retry_prompt[1], UserMessage)
+    assert isinstance(retry_prompt[2], AssistantMessage)
+    assert retry_prompt[2].content == "Earlier progress"
+    assert isinstance(retry_prompt[3], UserMessage)
+
+    assert isinstance(summarized[0], SystemMessage)
+    assert isinstance(summarized[1], UserMessage)
+    assert isinstance(summarized[2], SummaryMessage)
+    assert isinstance(summarized[3], UserMessage)
+    assert summarized[3].content == "Got it, thanks!"
+    assert isinstance(summarized[4], AssistantMessage)
+    assert summarized[4].content == "Using a tool now"
+    assert isinstance(summarized[5], ToolMessage)
+    assert summarized[5].content == "Echo: hello"
+
+
+async def test_summarize_messages_raises_when_nothing_can_be_peeled() -> None:
+    """Raise ContextOverflowError when summarization cannot shrink the trajectory."""
+
+    client = MockLLMClient([ContextOverflowError("summary overflow")])
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    messages = [
+        SystemMessage(content="System prompt"),
+        UserMessage(content="Do the task"),
+    ]
+
+    async with agent.session() as session:
+        with pytest.raises(ContextOverflowError, match="no AssistantMessage left to peel"):
+            await session.summarize_messages(messages)

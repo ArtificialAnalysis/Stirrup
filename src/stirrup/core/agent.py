@@ -179,6 +179,16 @@ def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -
     }
 
 
+def _split_latest_assistant_suffix(
+    messages: list[ChatMessage],
+) -> tuple[list[ChatMessage], list[ChatMessage]] | None:
+    """Split messages into older history and the newest assistant-led suffix."""
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], AssistantMessage):
+            return messages[:index], messages[index:]
+    return None
+
+
 type JsonSchema = dict[str, object]
 
 
@@ -1131,25 +1141,38 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
     async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Condense message history using LLM to stay within context window."""
-        task_context: list[ChatMessage] = list(
-            takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages)
-        )
+        messages_to_summarize = list(messages)
+        preserved_tail: list[ChatMessage] = []
 
-        summary_prompt = [*messages, UserMessage(content=MESSAGE_SUMMARIZER)]
+        while True:
+            task_context: list[ChatMessage] = list(
+                takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages_to_summarize)
+            )
 
-        # We need to pass the tools to the client so that it has context of tools used in the conversation
-        summary = await self._client.generate(summary_prompt, self._active_tools)
+            summary_prompt = [*messages_to_summarize, UserMessage(content=MESSAGE_SUMMARIZER)]
 
-        summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
-        summary_bridge = SummaryMessage(content=summary_bridge_prompt)
-        # UserMessage (not AssistantMessage) to avoid consecutive assistant messages which some providers reject
-        acknowledgement_msg = UserMessage(content="Got it, thanks!")
+            try:
+                # We need to pass the tools to the client so that it has context of tools used in the conversation
+                summary = await self._client.generate(summary_prompt, self._active_tools)
+            except ContextOverflowError:
+                split_messages = _split_latest_assistant_suffix(messages_to_summarize)
+                if split_messages is None:
+                    raise ContextOverflowError("Message summarization overflowed with no AssistantMessage left to peel.")
 
-        # Log the completed summary
-        summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
-        self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
+                messages_to_summarize, latest_suffix = split_messages
+                preserved_tail = [*latest_suffix, *preserved_tail]
+                continue
 
-        return [*task_context, summary_bridge, acknowledgement_msg]
+            summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
+            summary_bridge = SummaryMessage(content=summary_bridge_prompt)
+            # UserMessage (not AssistantMessage) to avoid consecutive assistant messages which some providers reject
+            acknowledgement_msg = UserMessage(content="Got it, thanks!")
+
+            # Log the completed summary
+            summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
+            self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
+
+            return [*task_context, summary_bridge, acknowledgement_msg, *preserved_tail]
 
     async def run(
         self,
