@@ -57,6 +57,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         request_timeout: int = SANDBOX_REQUEST_TIMEOUT,
         template: str | None = None,
         allowed_commands: list[str] | None = None,
+        sandbox_kwargs: dict | None = None,
     ) -> None:
         """Initialize E2B execution environment configuration.
 
@@ -66,20 +67,25 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             allowed_commands: Optional list of regex patterns. If provided, only
                              commands matching at least one pattern are allowed.
                              If None, all commands are allowed.
+            sandbox_kwargs: Additional keyword arguments forwarded to
+                            ``AsyncSandbox.create`` (e.g. ``allow_internet_access=False``,
+                            ``metadata={...}``, ``envs={...}``). ``timeout`` and
+                            ``template`` take precedence over matching keys here.
 
         """
         super().__init__(allowed_commands=allowed_commands)
         self._timeout = timeout
         self._request_timeout = request_timeout
         self._template = template
+        self._sandbox_kwargs = sandbox_kwargs or {}
         self._sbx: AsyncSandbox | None = None
 
     async def __aenter__(self) -> Tool[CodeExecutionParams, ToolUseCountMetadata]:
         """Initialize the E2B sandbox environment and return the code_exec tool."""
+        kwargs: dict = {**self._sandbox_kwargs, "timeout": self._timeout}
         if self._template:
-            self._sbx = await AsyncSandbox.create(timeout=self._timeout, template=self._template)
-        else:
-            self._sbx = await AsyncSandbox.create(timeout=self._timeout)
+            kwargs["template"] = self._template
+        self._sbx = await AsyncSandbox.create(**kwargs)
         return self.get_code_exec_tool()
 
     async def __aexit__(
