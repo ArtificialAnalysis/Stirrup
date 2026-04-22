@@ -1,12 +1,18 @@
 """Tests for agent core functionality."""
 
+from pathlib import Path
+
+import pytest
 from pydantic import BaseModel
 
 from stirrup.constants import FINISH_TOOL_NAME
+from stirrup.core import cache as cache_module
 from stirrup.core.agent import Agent
+from stirrup.core.cache import CacheManager, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
+    EmptyMetadata,
     LLMClient,
     SummaryMessage,
     SystemMessage,
@@ -20,10 +26,12 @@ from stirrup.core.models import (
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
-class MockLLMClient(LLMClient):
+class MockLLMClient(LLMClient[EmptyMetadata]):
     """Mock LLM client for testing."""
 
-    def __init__(self, responses: list[AssistantMessage], max_tokens: int = 100_000) -> None:
+    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+
+    def __init__(self, responses: list[AssistantMessage[EmptyMetadata]], max_tokens: int = 100_000) -> None:
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
@@ -36,7 +44,11 @@ class MockLLMClient(LLMClient):
     def max_tokens(self) -> int:
         return self._max_tokens
 
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+    async def generate(
+        self,
+        messages: list[ChatMessage[EmptyMetadata]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[EmptyMetadata]:  # noqa: ARG002
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
@@ -582,3 +594,86 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
 
     # The summary content should be different between history[1] and history[2]
     assert summaries_1[0].content != summaries_2[0].content
+
+
+async def test_agent_resume_loads_cached_state_and_clears_cache_on_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test cache save/load and resume flow for an interrupted run."""
+    # Use a temporary cache directory
+    monkeypatch.setattr(cache_module, "DEFAULT_CACHE_DIR", tmp_path)
+
+    init_msgs = [UserMessage(content="Test task")]
+    task_hash = compute_task_hash(init_msgs)
+    cache_manager = CacheManager(cache_base_dir=tmp_path)
+
+    # Create an unfinished run that should be cached on exit
+    first_client = MockLLMClient(
+        [
+            AssistantMessage(
+                content="Still working",
+                tool_calls=[],
+                token_usage=TokenUsage(input=100, answer=50),
+            )
+        ]
+    )
+    first_agent = Agent(
+        client=first_client,
+        name="test-agent",
+        max_turns=1,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    # Run once without finishing to create the cache
+    async with first_agent.session(cache_on_interrupt=False) as session:
+        finish_params, _, _ = await session.run(init_msgs)
+
+    # Verify cache was written with the pre-step state
+    assert finish_params is None
+    assert first_client.call_count == 1
+    assert (tmp_path / task_hash / "state.json").exists()
+
+    cached = cache_manager.load_state(task_hash, EmptyMetadata)
+    assert cached is not None
+    assert cached.turn == 0
+    assert cached.full_msg_history == []
+    assert len(cached.msgs) == 2
+    assert isinstance(cached.msgs[0], SystemMessage)
+    assert isinstance(cached.msgs[1], UserMessage)
+    assert cached.msgs[1].content == "Test task"
+
+    # Resume the same task and finish successfully
+    second_client = MockLLMClient(
+        [
+            AssistantMessage(
+                content="Done",
+                tool_calls=[
+                    ToolCall(
+                        name=FINISH_TOOL_NAME,
+                        arguments='{"reason": "Resumed successfully", "paths": []}',
+                        tool_call_id="call_1",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            )
+        ]
+    )
+    second_agent = Agent(
+        client=second_client,
+        name="test-agent",
+        max_turns=1,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with second_agent.session(resume=True, cache_on_interrupt=False) as session:
+        finish_params, history, _ = await session.run(init_msgs)
+
+    # Verify the resumed run completed and cleared the cache
+    assert finish_params is not None
+    assert finish_params.reason == "Resumed successfully"
+    assert second_client.call_count == 1
+    assert len(history) == 1
+    assert cache_manager.load_state(task_hash, EmptyMetadata) is None
