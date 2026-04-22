@@ -4,36 +4,28 @@ Provides functionality to cache agent state (messages, run metadata, execution e
 on non-success exits and restore that state for resumption in new runs.
 """
 
-import base64
 import hashlib
 import json
 import logging
 import os
 import shutil
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
-from stirrup.core.models import (
-    AudioContentBlock,
-    ChatMessage,
-    ImageContentBlock,
-    VideoContentBlock,
-)
+from stirrup.core.models import ChatMessage
 
 logger = logging.getLogger(__name__)
 
 # Default cache directory relative to the project root
 DEFAULT_CACHE_DIR = Path("~/.cache/stirrup/").expanduser()
 
-# TypeAdapter for deserializing ChatMessage discriminated union
-ChatMessageAdapter: TypeAdapter[ChatMessage] = TypeAdapter(ChatMessage)
 
-
-def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
+def compute_task_hash[GenerationMetadataT: BaseModel | None](
+    init_msgs: str | list[ChatMessage[GenerationMetadataT]],
+) -> str:
     """Compute deterministic hash from initial messages for cache identification.
 
     Args:
@@ -45,9 +37,8 @@ def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
     if isinstance(init_msgs, str):
         content = init_msgs
     else:
-        # Serialize messages to JSON for hashing
         content = json.dumps(
-            [serialize_message(msg) for msg in init_msgs],
+            [msg.model_dump(mode="json") for msg in init_msgs],
             sort_keys=True,
             ensure_ascii=True,
         )
@@ -56,188 +47,36 @@ def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
     return hash_bytes[:12]
 
 
-def _serialize_content_block(block: Any) -> dict | str:  # noqa: ANN401
-    """Serialize a content block, encoding binary data as base64.
+def serialize_message[GenerationMetadataT: BaseModel | None](msg: ChatMessage[GenerationMetadataT]) -> dict:
+    """Serialize a ChatMessage to JSON-compatible format."""
+    return msg.model_dump(mode="json")
 
-    Args:
-        block: A content block (string, ImageContentBlock, VideoContentBlock, AudioContentBlock).
 
-    Returns:
-        JSON-serializable representation with base64-encoded binary data.
-    """
-    if isinstance(block, str):
-        return block
-    elif isinstance(block, ImageContentBlock):
-        return {
-            "kind": "image_content_block",
-            "data": base64.b64encode(block.data).decode("ascii"),
-        }
-    elif isinstance(block, VideoContentBlock):
-        return {
-            "kind": "video_content_block",
-            "data": base64.b64encode(block.data).decode("ascii"),
-        }
-    elif isinstance(block, AudioContentBlock):
-        return {
-            "kind": "audio_content_block",
-            "data": base64.b64encode(block.data).decode("ascii"),
-        }
-    elif isinstance(block, dict):
-        # Handle dict from model_dump that might contain unencoded bytes
-        # This can happen when Pydantic fails to base64-encode bytes in mode="json"
-        if "data" in block and isinstance(block["data"], bytes):
-            return {
-                **block,
-                "data": base64.b64encode(block["data"]).decode("ascii"),
-            }
-        return block
+def deserialize_message(
+    data: dict,
+    generation_metadata_type: type[BaseModel] | None = None,
+) -> ChatMessage[BaseModel | None]:
+    """Deserialize a ChatMessage from JSON format."""
+    if generation_metadata_type is None and data.get("metadata") in (None, {}):
+        data["metadata"] = None
+
+    if generation_metadata_type is None:
+        adapter: TypeAdapter[Any] = TypeAdapter(ChatMessage[None])
     else:
-        raise ValueError(f"Unknown content block type: {type(block)}")
+        adapter = TypeAdapter(ChatMessage[generation_metadata_type])  # ty: ignore[invalid-type-form]
+    return adapter.validate_python(data)
 
 
-def _deserialize_content_block(data: dict | str) -> Any:  # noqa: ANN401
-    """Deserialize a content block, decoding base64 binary data.
-
-    Args:
-        data: JSON-serialized content block.
-
-    Returns:
-        Restored content block with decoded binary data.
-    """
-    if isinstance(data, str):
-        return data
-    if not isinstance(data, dict):
-        return data
-
-    kind = data.get("kind")
-    if kind == "image_content_block":
-        return ImageContentBlock(data=base64.b64decode(data["data"]))
-    elif kind == "video_content_block":
-        return VideoContentBlock(data=base64.b64decode(data["data"]))
-    elif kind == "audio_content_block":
-        return AudioContentBlock(data=base64.b64decode(data["data"]))
-    else:
-        # Unknown or already-processed block
-        return data
-
-
-def serialize_message(msg: ChatMessage) -> dict:
-    """Serialize a ChatMessage to JSON-compatible format.
-
-    Handles binary content blocks (images, video, audio) by base64 encoding.
-
-    Args:
-        msg: A ChatMessage (SystemMessage, UserMessage, AssistantMessage, ToolMessage).
-
-    Returns:
-        JSON-serializable dictionary.
-    """
-    # Use Pydantic's model_dump for base serialization
-    data = msg.model_dump(mode="json")
-
-    # Handle content field which may contain binary blocks
-    content = data.get("content")
-    if isinstance(content, list):
-        data["content"] = [_serialize_content_block(block) for block in content]
-    elif content is not None and not isinstance(content, str):
-        data["content"] = _serialize_content_block(content)
-
-    return data
-
-
-def deserialize_message(data: dict) -> ChatMessage:
-    """Deserialize a ChatMessage from JSON format.
-
-    Handles base64-encoded binary content blocks.
-
-    Args:
-        data: JSON dictionary representing a ChatMessage.
-
-    Returns:
-        Restored ChatMessage object.
-    """
-    # Handle content field which may contain base64-encoded binary blocks
-    content = data.get("content")
-    if isinstance(content, list):
-        data["content"] = [_deserialize_content_block(block) for block in content]
-    elif content is not None and not isinstance(content, str):
-        data["content"] = _deserialize_content_block(content)
-
-    # Use TypeAdapter for discriminated union deserialization
-    return ChatMessageAdapter.validate_python(data)
-
-
-def serialize_messages(msgs: list[ChatMessage]) -> list[dict]:
-    """Serialize a list of ChatMessages to JSON-compatible format.
-
-    Args:
-        msgs: List of ChatMessage objects.
-
-    Returns:
-        List of JSON-serializable dictionaries.
-    """
-    return [serialize_message(msg) for msg in msgs]
-
-
-def _serialize_metadata_item(item: Any) -> Any:  # noqa: ANN401
-    """Serialize a single metadata item to JSON-compatible format.
-
-    Handles Pydantic models by calling model_dump(mode='json').
-    Handles bytes by base64 encoding them.
-    """
-    from pydantic import BaseModel
-
-    if isinstance(item, BaseModel):
-        return item.model_dump(mode="json")
-    elif isinstance(item, bytes):
-        # Base64 encode raw bytes to make them JSON-serializable
-        return base64.b64encode(item).decode("ascii")
-    elif isinstance(item, dict):
-        return {k: _serialize_metadata_item(v) for k, v in item.items()}
-    elif isinstance(item, list):
-        return [_serialize_metadata_item(i) for i in item]
-    else:
-        return item
-
-
-def _serialize_run_metadata(run_metadata: dict[str, list[Any]]) -> dict[str, list[Any]]:
-    """Serialize run_metadata dict containing Pydantic models to JSON-compatible format.
-
-    Args:
-        run_metadata: Dict mapping tool names to lists of metadata (may contain Pydantic models).
-
-    Returns:
-        JSON-serializable dictionary.
-    """
-    return {
-        tool_name: [_serialize_metadata_item(item) for item in metadata_list]
-        for tool_name, metadata_list in run_metadata.items()
-    }
-
-
-def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
-    """Deserialize a list of ChatMessages from JSON format.
-
-    Args:
-        data: List of JSON dictionaries representing ChatMessages.
-
-    Returns:
-        List of restored ChatMessage objects.
-    """
-    return [deserialize_message(msg_data) for msg_data in data]
-
-
-@dataclass
-class CacheState:
+class CacheState[GenerationMetadataT: BaseModel | None](BaseModel):
     """Serializable state for resuming an agent run.
 
     Captures all necessary state to resume execution from a specific turn.
     """
 
-    msgs: list[ChatMessage]
+    msgs: list[ChatMessage[GenerationMetadataT]]
     """Current conversation messages in the active run loop."""
 
-    full_msg_history: list[list[ChatMessage]]
+    full_msg_history: list[list[ChatMessage[GenerationMetadataT]]]
     """Groups of messages (separated when context summarization occurs)."""
 
     turn: int
@@ -249,36 +88,11 @@ class CacheState:
     task_hash: str
     """Hash of the original init_msgs for verification on resume."""
 
-    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     """ISO timestamp when cache was created."""
 
     agent_name: str = ""
     """Name of the agent that created this cache."""
-
-    def to_dict(self) -> dict:
-        """Convert to JSON-serializable dictionary."""
-        return {
-            "msgs": serialize_messages(self.msgs),
-            "full_msg_history": [serialize_messages(group) for group in self.full_msg_history],
-            "turn": self.turn,
-            "run_metadata": _serialize_run_metadata(self.run_metadata),
-            "task_hash": self.task_hash,
-            "timestamp": self.timestamp,
-            "agent_name": self.agent_name,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "CacheState":
-        """Create CacheState from JSON dictionary."""
-        return cls(
-            msgs=deserialize_messages(data["msgs"]),
-            full_msg_history=[deserialize_messages(group) for group in data["full_msg_history"]],
-            turn=data["turn"],
-            run_metadata=data["run_metadata"],
-            task_hash=data["task_hash"],
-            timestamp=data.get("timestamp", ""),
-            agent_name=data.get("agent_name", ""),
-        )
 
 
 class CacheManager:
@@ -316,10 +130,10 @@ class CacheManager:
         """Get files directory path for a task hash."""
         return self._get_cache_dir(task_hash) / "files"
 
-    def save_state(
+    def save_state[GenerationMetadataT: BaseModel | None](
         self,
         task_hash: str,
-        state: CacheState,
+        state: CacheState[GenerationMetadataT],
         exec_env_dir: Path | None = None,
     ) -> None:
         """Save cache state and optionally archive execution environment files.
@@ -340,11 +154,10 @@ class CacheManager:
         temp_file = state_file.with_suffix(".json.tmp")
 
         try:
-            state_data = state.to_dict()
             logger.debug("Serialized cache state: turn=%d, msgs=%d", state.turn, len(state.msgs))
 
             with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(state_data, f, indent=2, ensure_ascii=False)
+                f.write(state.model_dump_json(indent=2))
                 f.flush()
                 os.fsync(f.fileno())  # Ensure data is written to disk
 
@@ -359,7 +172,7 @@ class CacheManager:
             try:
                 logger.warning("Attempting direct write as fallback")
                 with open(state_file, "w", encoding="utf-8") as f:
-                    json.dump(state_data, f, indent=2, ensure_ascii=False)
+                    f.write(state.model_dump_json(indent=2))
                     f.flush()
                     os.fsync(f.fileno())
                 logger.info("Fallback write succeeded to %s", state_file)
@@ -378,7 +191,11 @@ class CacheManager:
             shutil.copytree(exec_env_dir, files_dir, dirs_exist_ok=True)
             logger.info("Saved execution environment files to %s", files_dir)
 
-    def load_state(self, task_hash: str) -> CacheState | None:
+    def load_state(
+        self,
+        task_hash: str,
+        generation_metadata_type: type[BaseModel] | None = None,
+    ) -> CacheState[BaseModel | None] | None:
         """Load cached state for a task hash.
 
         Args:
@@ -394,8 +211,12 @@ class CacheManager:
 
         try:
             with open(state_file, encoding="utf-8") as f:
-                data = json.load(f)
-            state = CacheState.from_dict(data)
+                raw_json = f.read()
+            if generation_metadata_type is None:
+                state_model: type[BaseModel] = CacheState[None]
+            else:
+                state_model = CacheState[generation_metadata_type]  # ty: ignore[invalid-type-form]
+            state = state_model.model_validate_json(raw_json)
             logger.info("Loaded cache state from %s (turn %d)", state_file, state.turn)
             return state
         except (json.JSONDecodeError, KeyError, ValueError) as e:

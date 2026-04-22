@@ -43,11 +43,13 @@ LOGGER = logging.getLogger(__name__)
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "default"]
 
 
-class LiteLLMClient(LLMClient):
+class LiteLLMClient(LLMClient[None]):
     """LiteLLM-based client supporting multiple LLM providers with unified interface.
 
     Includes automatic retries for transient failures and token usage tracking.
     """
+
+    generation_metadata_type = None
 
     def __init__(
         self,
@@ -99,7 +101,11 @@ class LiteLLMClient(LLMClient):
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
     )
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+    async def generate(
+        self,
+        messages: list[ChatMessage[None]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[None]:
         """Generate assistant response with optional tool calls. Retries up to 3 times on timeout/connection errors."""
         request_start_time = perf_counter()
         r = await acompletion(
@@ -156,7 +162,7 @@ class LiteLLMClient(LLMClient):
         output_tokens = usage.completion_tokens
         answer_tokens = output_tokens - reasoning_tokens
 
-        return AssistantMessage(
+        return AssistantMessage[None](
             reasoning=reasoning,
             content=msg.get("content") or "",
             tool_calls=calls,

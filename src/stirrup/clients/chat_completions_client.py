@@ -40,7 +40,7 @@ __all__ = [
 LOGGER = logging.getLogger(__name__)
 
 
-class ChatCompletionsClient(LLMClient):
+class ChatCompletionsClient(LLMClient[None]):
     """OpenAI SDK-based client supporting OpenAI and OpenAI-compatible APIs.
 
     Uses the official OpenAI Python SDK directly for chat completions.
@@ -60,6 +60,8 @@ class ChatCompletionsClient(LLMClient):
         ...     api_key="your-api-key",
         ... )
     """
+
+    generation_metadata_type = None
 
     def __init__(
         self,
@@ -128,9 +130,9 @@ class ChatCompletionsClient(LLMClient):
     )
     async def generate(
         self,
-        messages: list[ChatMessage],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage:
+    ) -> AssistantMessage[None]:
         """Generate assistant response with optional tool calls.
 
         Retries up to 3 times on transient errors (connection, timeout, rate limit,
@@ -208,7 +210,7 @@ class ChatCompletionsClient(LLMClient):
 
         answer_tokens = output_tokens - reasoning_tokens
 
-        return AssistantMessage(
+        return AssistantMessage[None](
             reasoning=reasoning,
             content=msg.content or "",
             tool_calls=tool_calls,

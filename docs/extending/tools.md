@@ -139,6 +139,9 @@ async def my_tool(params: MyParams) -> ToolResult[APICallMetadata]:
     )
 ```
 
+Tool metadata should be a Pydantic model, or `None` if the tool has no metadata.
+If you want Stirrup to aggregate that metadata across calls, implement `__add__`.
+
 ## Tools Returning Images
 
 ```python

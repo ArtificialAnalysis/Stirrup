@@ -451,33 +451,34 @@ class ToolUseCountMetadata(BaseModel):
         return self.__class__(num_uses=self.num_uses + other.num_uses)
 
 
-class ToolResult[M](BaseModel):
+class ToolResult[ToolMetadataT: BaseModel | None](BaseModel):
     """Result from a tool executor with optional metadata.
 
-    Generic over metadata type M. M should implement Addable protocol for aggregation support,
-    but this is not enforced at the class level due to Pydantic schema generation limitations.
+    Generic over metadata type ``ToolMetadataT``. Tool metadata should be a
+    Pydantic model when present, and should implement ``__add__`` if it needs
+    to aggregate cleanly across tool calls.
 
     Attributes:
         content: The result content (string, list of content blocks, or images)
         success: Whether the tool call was successful. For finish tools, controls if agent terminates.
-        metadata: Optional metadata (e.g., usage stats) that implements Addable for aggregation
+        metadata: Optional Pydantic metadata for the tool call
     """
 
     content: Content
     success: bool = True
-    metadata: M | None = None
+    metadata: ToolMetadataT | None = None
 
 
 class EmptyParams(BaseModel):
     """Empty parameter model for tools that don't require parameters."""
 
 
-class Tool[P: BaseModel, M](BaseModel):
+class Tool[P: BaseModel, ToolMetadataT: BaseModel | None](BaseModel):
     """Tool definition with name, description, parameter schema, and executor function.
 
     Generic over:
         P: Parameter model type (Pydantic BaseModel subclass, or EmptyParams for parameterless tools)
-        M: Metadata type (should implement Addable for aggregation; use None for tools without metadata)
+        ToolMetadataT: Tool metadata model type, or None for tools without metadata
 
     Tools are simple, stateless callables. For tools requiring lifecycle management
     (setup/teardown, resource pooling), use a ToolProvider instead.
@@ -508,7 +509,7 @@ class Tool[P: BaseModel, M](BaseModel):
     name: str
     description: str
     parameters: type[P] = EmptyParams  # type: ignore[assignment]
-    executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
+    executor: Callable[[P], ToolResult[ToolMetadataT] | Awaitable[ToolResult[ToolMetadataT]]]
 
 
 class ToolProvider(ABC):
@@ -554,21 +555,29 @@ class ToolProvider(ABC):
 
 
 @runtime_checkable
-class LLMClient(Protocol):
+class LLMClient[GenerationMetadataT: BaseModel | None](Protocol):
     """Protocol defining the interface for LLM client implementations.
 
     Any LLM client must implement this protocol to work with the Agent class.
     Provides text generation with tool support and model capability inspection.
+    ``generation_metadata_type`` is an explicit runtime hook for cache/message
+    deserialization; the generic parameter alone is not dependable enough at runtime.
     """
 
     @abstractmethod
-    async def generate(self, messages: list["ChatMessage"], tools: dict[str, Tool]) -> "AssistantMessage": ...
+    async def generate(
+        self,
+        messages: list["ChatMessage[GenerationMetadataT]"],
+        tools: dict[str, Tool],
+    ) -> "AssistantMessage[GenerationMetadataT]": ...
 
     @property
     def model_slug(self) -> str: ...
 
     @property
     def max_tokens(self) -> int: ...
+
+    generation_metadata_type: type[BaseModel] | None
 
 
 class ToolCall(BaseModel):
@@ -613,16 +622,29 @@ class Reasoning(BaseModel):
     content: str
 
 
-class AssistantMessage(BaseModel):
-    """LLM response message with optional tool calls and token usage tracking."""
+class EmptyMetadata(BaseModel):
+    """Deprecated compatibility sentinel; prefer ``None`` for missing generation metadata."""
+
+
+class AssistantMessage[GenerationMetadataT: BaseModel | None](BaseModel):
+    """LLM response message with optional tool calls, metadata, and token usage tracking."""
 
     role: Literal["assistant"] = "assistant"
     reasoning: Reasoning | None = None
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    metadata: GenerationMetadataT | None = None
     request_start_time: float | None = None
     request_end_time: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_metadata(self) -> Self:
+        metadata_args = getattr(self.__class__, "__pydantic_generic_metadata__", {}).get("args", ())
+        metadata_type = metadata_args[0] if metadata_args else None
+        if metadata_type not in (None, Any, type(None)) and self.metadata is None:
+            raise ValueError("metadata is required when AssistantMessage is parameterized with a metadata model")
+        return self
 
     @property
     def e2e_otps(self) -> float | None:
@@ -667,7 +689,10 @@ class ToolMessage(BaseModel):
         return duration
 
 
-type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
+type ChatMessage[GenerationMetadataT: BaseModel | None] = Annotated[
+    SystemMessage | UserMessage | AssistantMessage[GenerationMetadataT] | ToolMessage,
+    Field(discriminator="role"),
+]
 """Discriminated union of all message types, automatically parsed based on role field."""
 
 
@@ -677,7 +702,7 @@ class SubAgentMetadata(BaseModel):
     Implements Addable protocol to support aggregation across multiple subagent calls.
     """
 
-    message_history: list[list[ChatMessage]]
+    message_history: list[list[ChatMessage[Any]]]
     run_metadata: Annotated[dict[str, Any], Field(default_factory=dict)]
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":

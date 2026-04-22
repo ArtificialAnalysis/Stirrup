@@ -21,6 +21,7 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 | `generate()` | `async method` | Generate next message with optional tool calls |
 | `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
 | `max_tokens` | `property` | Maximum context window size |
+| `generation_metadata_type` | `class attribute` | Concrete metadata model used for assistant messages at runtime |
 
 ## Basic Implementation
 
@@ -28,13 +29,16 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 from stirrup import (
     AssistantMessage,
     ChatMessage,
+    LLMClient,
     Tool,
     TokenUsage,
 )
 
 
-class MyCustomClient:
+class MyCustomClient(LLMClient[None]):
     """Custom LLM client implementation."""
+
+    generation_metadata_type = None
 
     def __init__(
         self,
@@ -56,9 +60,9 @@ class MyCustomClient:
 
     async def generate(
         self,
-        messages: list[ChatMessage],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage:
+    ) -> AssistantMessage[None]:
         # Convert messages to your API format
         api_messages = self._convert_messages(messages)
 
@@ -70,6 +74,38 @@ class MyCustomClient:
 
         # Convert response to AssistantMessage
         return self._parse_response(response)
+```
+
+## Typed Generation Metadata
+
+If your client needs provider-specific response fields, define a Pydantic
+metadata model and return `AssistantMessage[MyMetadata]`. Messages without
+metadata use `None` by default. If you use typed metadata, set
+`generation_metadata_type` to the same model:
+
+```python
+from pydantic import BaseModel
+
+from stirrup import AssistantMessage, ChatMessage, LLMClient, Tool, TokenUsage
+
+
+class GenerationMetadata(BaseModel):
+    request_id: str
+
+
+class MyTypedClient(LLMClient[GenerationMetadata]):
+    generation_metadata_type: type[GenerationMetadata] = GenerationMetadata
+
+    async def generate(
+        self,
+        messages: list[ChatMessage[GenerationMetadata]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[GenerationMetadata]:
+        return AssistantMessage(
+            content="Hello",
+            token_usage=TokenUsage(answer=1),
+            metadata=GenerationMetadata(request_id="resp_123"),
+        )
 ```
 
 ## Using with Agent
@@ -96,11 +132,21 @@ Stirrup message types use OpenAI-compatible field names (`role`, `content`, `too
 
 ```python
 import openai
-from stirrup import AssistantMessage, ChatMessage, Tool, ToolCall, ToolMessage, TokenUsage
+from stirrup import (
+    AssistantMessage,
+    ChatMessage,
+    LLMClient,
+    Tool,
+    ToolCall,
+    ToolMessage,
+    TokenUsage,
+)
 
 
-class OpenAIClient:
+class OpenAIClient(LLMClient[None]):
     """Direct OpenAI API client."""
+
+    generation_metadata_type = None
 
     def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000):
         self._model = model
@@ -115,7 +161,7 @@ class OpenAIClient:
     def max_tokens(self) -> int:
         return self._max_tokens
 
-    def _convert_message(self, msg: ChatMessage) -> dict:
+    def _convert_message(self, msg: ChatMessage[None]) -> dict:
         """Convert a message to OpenAI format."""
         # SystemMessage, UserMessage, ToolMessage have compatible structure
         if isinstance(msg, AssistantMessage):
@@ -132,7 +178,11 @@ class OpenAIClient:
             # SystemMessage and UserMessage: just use role and content
             return {"role": msg.role, "content": str(msg.content)}
 
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+    async def generate(
+        self,
+        messages: list[ChatMessage[None]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[None]:
         api_messages = [self._convert_message(m) for m in messages]
         api_tools = [
             {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters.model_json_schema()}}
@@ -142,7 +192,7 @@ class OpenAIClient:
         response = await self._client.chat.completions.create(model=self._model, messages=api_messages, tools=api_tools)
         message = response.choices[0].message
 
-        return AssistantMessage(
+        return AssistantMessage[None](
             content=message.content or "",
             tool_calls=[ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id) for tc in (message.tool_calls or [])],
             token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
@@ -158,7 +208,9 @@ to track generation speed. The derived `e2e_otps` property computes output token
 class MockClient:
     """Mock client for testing."""
 
-    def __init__(self, responses: list[AssistantMessage]):
+    generation_metadata_type = None
+
+    def __init__(self, responses: list[AssistantMessage[None]]):
         self._responses = responses
         self._call_count = 0
 
@@ -170,7 +222,7 @@ class MockClient:
     def max_tokens(self) -> int:
         return 10_000
 
-    async def generate(self, messages, tools) -> AssistantMessage:
+    async def generate(self, messages, tools) -> AssistantMessage[None]:
         response = self._responses[self._call_count]
         self._call_count += 1
         return response
@@ -178,7 +230,7 @@ class MockClient:
 
 # Use in tests
 mock = MockClient([
-    AssistantMessage(content="Hello!", tool_calls=[], token_usage=TokenUsage()),
+    AssistantMessage[None](content="Hello!", tool_calls=[], token_usage=TokenUsage()),
 ])
 
 agent = Agent(client=mock, name="test")

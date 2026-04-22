@@ -1,13 +1,19 @@
 """Tests for agent core functionality."""
 
+from pathlib import Path
+
+import pytest
 from pydantic import BaseModel
 
 from stirrup.constants import FINISH_TOOL_NAME
+from stirrup.core import cache as cache_module
 from stirrup.core.agent import Agent
+from stirrup.core.cache import CacheManager, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
     LLMClient,
+    SubAgentMetadata,
     SummaryMessage,
     SystemMessage,
     TokenUsage,
@@ -20,10 +26,12 @@ from stirrup.core.models import (
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
-class MockLLMClient(LLMClient):
+class MockLLMClient(LLMClient[None]):
     """Mock LLM client for testing."""
 
-    def __init__(self, responses: list[AssistantMessage], max_tokens: int = 100_000) -> None:
+    generation_metadata_type = None
+
+    def __init__(self, responses: list[AssistantMessage[None]], max_tokens: int = 100_000) -> None:
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
@@ -36,7 +44,45 @@ class MockLLMClient(LLMClient):
     def max_tokens(self) -> int:
         return self._max_tokens
 
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+    async def generate(
+        self,
+        messages: list[ChatMessage[None]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[None]:
+        del messages, tools
+        response = self.responses[self.call_count]
+        self.call_count += 1
+        return response
+
+
+class ChildGenerationMetadata(BaseModel):
+    request_id: str
+
+
+class TypedMockLLMClient(LLMClient[ChildGenerationMetadata]):
+    """Mock LLM client with typed generation metadata."""
+
+    generation_metadata_type: type[ChildGenerationMetadata] = ChildGenerationMetadata
+
+    def __init__(self, responses: list[AssistantMessage[ChildGenerationMetadata]], max_tokens: int = 100_000) -> None:
+        self.responses = responses
+        self.call_count = 0
+        self._max_tokens = max_tokens
+
+    @property
+    def model_slug(self) -> str:
+        return "typed-mock-model"
+
+    @property
+    def max_tokens(self) -> int:
+        return self._max_tokens
+
+    async def generate(
+        self,
+        messages: list[ChatMessage[ChildGenerationMetadata]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[ChildGenerationMetadata]:
+        del messages, tools
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
@@ -582,3 +628,173 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
 
     # The summary content should be different between history[1] and history[2]
     assert summaries_1[0].content != summaries_2[0].content
+
+
+async def test_agent_resume_loads_cached_state_and_clears_cache_on_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test cache save/load and resume flow for an interrupted run."""
+    # Use a temporary cache directory
+    monkeypatch.setattr(cache_module, "DEFAULT_CACHE_DIR", tmp_path)
+
+    init_msgs = [UserMessage(content="Test task")]
+    task_hash = compute_task_hash(init_msgs)
+    cache_manager = CacheManager(cache_base_dir=tmp_path)
+
+    # Create an unfinished run that should be cached on exit
+    first_client = MockLLMClient(
+        [
+            AssistantMessage(
+                content="Still working",
+                tool_calls=[],
+                token_usage=TokenUsage(input=100, answer=50),
+            )
+        ]
+    )
+    first_agent = Agent(
+        client=first_client,
+        name="test-agent",
+        max_turns=1,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    # Run once without finishing to create the cache
+    async with first_agent.session(cache_on_interrupt=False) as session:
+        finish_params, _, _ = await session.run(init_msgs)
+
+    # Verify cache was written with the pre-step state
+    assert finish_params is None
+    assert first_client.call_count == 1
+    assert (tmp_path / task_hash / "state.json").exists()
+
+    cached = cache_manager.load_state(task_hash)
+    assert cached is not None
+    assert cached.turn == 0
+    assert cached.full_msg_history == []
+    assert len(cached.msgs) == 2
+    assert isinstance(cached.msgs[0], SystemMessage)
+    assert isinstance(cached.msgs[1], UserMessage)
+    assert cached.msgs[1].content == "Test task"
+
+    # Resume the same task and finish successfully
+    second_client = MockLLMClient(
+        [
+            AssistantMessage(
+                content="Done",
+                tool_calls=[
+                    ToolCall(
+                        name=FINISH_TOOL_NAME,
+                        arguments='{"reason": "Resumed successfully", "paths": []}',
+                        tool_call_id="call_1",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            )
+        ]
+    )
+    second_agent = Agent(
+        client=second_client,
+        name="test-agent",
+        max_turns=1,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with second_agent.session(resume=True, cache_on_interrupt=False) as session:
+        finish_params, history, _ = await session.run(init_msgs)
+
+    # Verify the resumed run completed and cleared the cache
+    assert finish_params is not None
+    assert finish_params.reason == "Resumed successfully"
+    assert second_client.call_count == 1
+    assert len(history) == 1
+    assert cache_manager.load_state(task_hash) is None
+
+
+async def test_subagent_preserves_typed_assistant_metadata() -> None:
+    """Test sub-agents preserve typed generation metadata in returned history."""
+    # Create a typed child agent
+    child_client = TypedMockLLMClient(
+        [
+            AssistantMessage[ChildGenerationMetadata](
+                content="Subagent answer",
+                tool_calls=[
+                    ToolCall(
+                        name=FINISH_TOOL_NAME,
+                        arguments='{"reason": "Child task complete", "paths": []}',
+                        tool_call_id="child_finish",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+                metadata=ChildGenerationMetadata(request_id="resp_123"),
+            )
+        ]
+    )
+    child_agent = Agent(
+        client=child_client,
+        name="child-agent",
+        max_turns=3,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    # Create a parent agent that calls the child sub-agent
+    parent_client = MockLLMClient(
+        [
+            AssistantMessage(
+                content="I will delegate this",
+                tool_calls=[
+                    ToolCall(
+                        name="child-agent",
+                        arguments='{"task": "Handle the child task", "input_files": []}',
+                        tool_call_id="call_child",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            ),
+            AssistantMessage(
+                content="Done",
+                tool_calls=[
+                    ToolCall(
+                        name=FINISH_TOOL_NAME,
+                        arguments='{"reason": "Parent task complete", "paths": []}',
+                        tool_call_id="parent_finish",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            ),
+        ]
+    )
+    parent_agent = Agent(
+        client=parent_client,
+        name="parent-agent",
+        max_turns=3,
+        tools=[child_agent.to_tool()],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    # Run the parent agent with the child exposed as a tool
+    async with parent_agent.session(cache_on_interrupt=False) as session:
+        finish_params, _, run_metadata = await session.run([UserMessage(content="Parent task")])
+
+    # Verify the sub-agent completed through the parent
+    assert finish_params is not None
+    assert finish_params.reason == "Parent task complete"
+    assert parent_client.call_count == 2
+    assert child_client.call_count == 1
+
+    # Verify the child metadata remains typed in sub-agent history
+    subagent_metadata_items = run_metadata["child-agent"]
+    assert len(subagent_metadata_items) == 1
+    subagent_metadata = subagent_metadata_items[0]
+    assert isinstance(subagent_metadata, SubAgentMetadata)
+    assert "token_usage" in subagent_metadata.run_metadata
+
+    assistant_messages = [
+        msg for group in subagent_metadata.message_history for msg in group if isinstance(msg, AssistantMessage)
+    ]
+    assert len(assistant_messages) == 1
+    assert isinstance(assistant_messages[0].metadata, ChildGenerationMetadata)
+    assert assistant_messages[0].metadata.request_id == "resp_123"

@@ -79,7 +79,7 @@ The sub-agent returns metadata about its execution:
 
 ```python
 class SubAgentMetadata(BaseModel):
-    message_history: list[list[ChatMessage]]  # Sub-agent's conversation
+    message_history: list[list[ChatMessage[Any]]]  # Sub-agent's conversation
     run_metadata: dict[str, list[Any]]        # Tool metadata from sub-agent
 ```
 

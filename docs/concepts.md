@@ -126,6 +126,8 @@ print(f"Total tokens: {aggregated['token_usage'].total}")
 
 Speed metrics are available directly on each `AssistantMessage` via `request_start_time`, `request_end_time`, and the derived `e2e_otps` property. Similarly, `ToolMessage` has `tool_start_time`, `tool_end_time`, and a `tool_duration` property.
 
+`AssistantMessage` is generic over `metadata`, which should be a Pydantic `BaseModel`. Messages without metadata default to `None`. If a client uses typed metadata, set `generation_metadata_type` to the same model.
+
 ## Session
 
 The `session()` method returns the agent configured as an async context manager. Sessions handle:
@@ -240,10 +242,16 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 Implement the `LLMClient` protocol to create a custom client:
 
 ```python
-from stirrup.core.models import LLMClient, AssistantMessage, ChatMessage, Tool
+from stirrup.core.models import AssistantMessage, ChatMessage, LLMClient, Tool
 
-class MyCustomClient(LLMClient):
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+class MyCustomClient(LLMClient[None]):
+    generation_metadata_type = None
+
+    async def generate(
+        self,
+        messages: list[ChatMessage[None]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[None]:
         # Make API call and return AssistantMessage
         ...
 
@@ -254,6 +262,7 @@ class MyCustomClient(LLMClient):
     @property
     def max_tokens(self) -> int:
         return 128_000
+
 ```
 
 → See [Custom Clients](extending/clients.md) for full documentation.
@@ -382,7 +391,7 @@ agent = Agent(client=client, name="analyst", finish_tool=custom_finish)
 
 ### Tool Metadata
 
-Tools return `ToolResult[M]` where `M` is the metadata type:
+Tools return `ToolResult[M]` where `M` is a Pydantic metadata model or `None`:
 
 ```python
 from stirrup import ToolResult, ToolUseCountMetadata
@@ -394,7 +403,8 @@ def my_tool(params: MyParams) -> ToolResult[ToolUseCountMetadata]:
     )
 ```
 
-Metadata aggregates across tool calls during a run. Built-in metadata types:
+Tool metadata should implement `__add__` if you want it to aggregate across tool
+calls during a run. Built-in metadata types:
 
 | Type | Description |
 |------|-------------|
