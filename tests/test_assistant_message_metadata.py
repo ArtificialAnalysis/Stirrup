@@ -1,5 +1,5 @@
-from pydantic import BaseModel
 import pytest
+from pydantic import BaseModel
 
 from stirrup.core.cache import deserialize_message, serialize_message
 from stirrup.core.models import AssistantMessage, TokenUsage
