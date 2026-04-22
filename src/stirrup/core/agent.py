@@ -197,7 +197,7 @@ DEFAULT_SUB_AGENT_DESCRIPTION = "A sub agent that can be used to handle a contai
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
-class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
+class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel]:
     """Agent that executes tool-using loops with automatic context management.
 
     Runs up to max_turns iterations of: LLM generation → tool execution → message accumulation.
@@ -219,7 +219,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
 
     def __init__(
         self,
-        client: LLMClient[MetadataT],
+        client: LLMClient[GenerationMetadataT],
         name: str,
         *,
         max_turns: int = AGENT_MAX_TURNS,
@@ -272,7 +272,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
                 "(alphanumeric, underscores, hyphens only, 1-128 characters)."
             )
 
-        self._client: LLMClient[MetadataT] = client
+        self._client: LLMClient[GenerationMetadataT] = client
         self._name = name
         self._max_turns = max_turns
         self._system_prompt = system_prompt
@@ -309,7 +309,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
 
         # Cache state for resumption (set during run(), used in __aexit__ for caching on interrupt)
         self._current_task_hash: str | None = None
-        self._current_run_state: CacheState[MetadataT] | None = None
+        self._current_run_state: CacheState[GenerationMetadataT] | None = None
 
     @property
     def name(self) -> str:
@@ -317,7 +317,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
         return self._name
 
     @property
-    def client(self) -> LLMClient[MetadataT]:
+    def client(self) -> LLMClient[GenerationMetadataT]:
         """The LLM client used by this agent."""
         return self._client
 
@@ -607,7 +607,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
                                 raise
                             # cell_contents can raise ValueError if empty - ignore
 
-    async def __aenter__(self) -> "SessionAgent[FinishParams, FinishMeta, MetadataT]":
+    async def __aenter__(self) -> "SessionAgent[FinishParams, FinishMeta, GenerationMetadataT]":
         """Enter session context: set up tools, logging, and resources.
 
         Returns a SessionAgent wrapping this agent's state, providing access to
@@ -1009,11 +1009,11 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
 
     async def step(
         self,
-        messages: list[ChatMessage[MetadataT]],
+        messages: list[ChatMessage[GenerationMetadataT]],
         run_metadata: dict[str, list[Any]],
         turn: int = 0,
         max_turns: int = 0,
-    ) -> tuple[AssistantMessage[MetadataT], list[ToolMessage], FinishParams | None]:
+    ) -> tuple[AssistantMessage[GenerationMetadataT], list[ToolMessage], FinishParams | None]:
         """Execute one agent step: generate assistant message and run any requested tool calls.
 
         Args:
@@ -1047,9 +1047,12 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
 
         return assistant_message, tool_messages, finish_params
 
-    async def summarize_messages(self, messages: list[ChatMessage[MetadataT]]) -> list[ChatMessage[MetadataT]]:
+    async def summarize_messages(
+        self,
+        messages: list[ChatMessage[GenerationMetadataT]],
+    ) -> list[ChatMessage[GenerationMetadataT]]:
         """Condense message history using LLM to stay within context window."""
-        task_context: list[ChatMessage[MetadataT]] = list(
+        task_context: list[ChatMessage[GenerationMetadataT]] = list(
             takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages)
         )
 
@@ -1071,10 +1074,10 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
 
     async def run(
         self,
-        init_msgs: str | list[ChatMessage[MetadataT]],
+        init_msgs: str | list[ChatMessage[GenerationMetadataT]],
         *,
         depth: int | None = None,
-    ) -> tuple[FinishParams | None, list[list[ChatMessage[MetadataT]]], dict[str, Any]]:
+    ) -> tuple[FinishParams | None, list[list[ChatMessage[GenerationMetadataT]]], dict[str, Any]]:
         """Execute the agent loop until finish tool is called or max_turns reached.
 
         A base system prompt is automatically prepended to all runs, including:
@@ -1126,7 +1129,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
         # Try to resume from cache if requested
         if self._resume:
             state = _SESSION_STATE.get()
-            cached = cache_manager.load_state(task_hash, self._client.assistant_metadata_type)
+            cached = cache_manager.load_state(task_hash, self._client.generation_metadata_type)
             if cached:
                 # Restore files to exec env
                 if state.exec_env and state.exec_env.temp_dir:
@@ -1143,7 +1146,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
                 self._logger.info(f"No cache found for task {task_hash}, starting fresh")
 
         if not resumed:
-            msgs: list[ChatMessage[MetadataT]] = []
+            msgs: list[ChatMessage[GenerationMetadataT]] = []
 
             # Build the complete system prompt (base + input files + user instructions)
             full_system_prompt = self._build_system_prompt()
@@ -1157,7 +1160,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
             # Local metadata storage - isolated per run() invocation for thread safety
             run_metadata: dict[str, list[Any]] = {}
 
-            full_msg_history: list[list[ChatMessage[MetadataT]]] = []
+            full_msg_history: list[list[ChatMessage[GenerationMetadataT]]] = []
 
         # Set logger depth if provided (for sub-agent runs)
         if depth is not None:
@@ -1176,7 +1179,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
         # Use logger callback if available and not overridden
         step_callback = self._logger.on_step
 
-        full_msg_history: list[list[ChatMessage[MetadataT]]] = []
+        full_msg_history: list[list[ChatMessage[GenerationMetadataT]]] = []
 
         # Cumulative stats for spinner
         total_tool_calls = 0
@@ -1185,7 +1188,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
 
         for i in range(start_turn, self._max_turns):
             # Capture current state for potential caching (before any async work)
-            cache_state_model = CacheState[self._client.assistant_metadata_type]  # ty: ignore[invalid-type-form]
+            cache_state_model = CacheState[self._client.generation_metadata_type]  # ty: ignore[invalid-type-form]
             self._current_run_state = cache_state_model(
                 msgs=list(msgs),
                 full_msg_history=[list(group) for group in full_msg_history],
@@ -1318,7 +1321,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
             # so that __aenter__ reads the correct depth for SessionState.depth
             prev_depth = _PARENT_DEPTH.set(sub_agent_depth)
             try:
-                init_msgs: list[ChatMessage[MetadataT]] = []
+                init_msgs: list[ChatMessage[GenerationMetadataT]] = []
                 if system_prompt:
                     init_msgs.append(SystemMessage(content=system_prompt))
                 init_msgs.append(UserMessage(content=params.task))
@@ -1336,7 +1339,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
                     finish_params, msg_history, run_metadata = await agent_session.run(init_msgs)
 
                     # Extract the last assistant message with actual content (not just tool calls)
-                    last_assistant_msg: AssistantMessage[MetadataT] | None = None
+                    last_assistant_msg: AssistantMessage[GenerationMetadataT] | None = None
                     for msg_group in reversed(msg_history):
                         for msg in reversed(msg_group):
                             if isinstance(msg, AssistantMessage) and msg.content:
@@ -1424,8 +1427,8 @@ class Agent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel]:
         )
 
 
-class SessionAgent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel](
-    Agent[FinishParams, FinishMeta, MetadataT]
+class SessionAgent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel](
+    Agent[FinishParams, FinishMeta, GenerationMetadataT]
 ):
     """Agent running inside an active session with full tool access.
 
@@ -1443,9 +1446,9 @@ class SessionAgent[FinishParams: BaseModel, FinishMeta, MetadataT: BaseModel](
     @classmethod
     def from_agent(
         cls,
-        agent: Agent[FinishParams, FinishMeta, MetadataT],
-    ) -> "SessionAgent[FinishParams, FinishMeta, MetadataT]":
+        agent: Agent[FinishParams, FinishMeta, GenerationMetadataT],
+    ) -> "SessionAgent[FinishParams, FinishMeta, GenerationMetadataT]":
         """Create a SessionAgent sharing the given Agent's ``__dict__``."""
-        sa: SessionAgent[FinishParams, FinishMeta, MetadataT] = object.__new__(cls)
+        sa: SessionAgent[FinishParams, FinishMeta, GenerationMetadataT] = object.__new__(cls)
         sa.__dict__ = agent.__dict__
         return sa

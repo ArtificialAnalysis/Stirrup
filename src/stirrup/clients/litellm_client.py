@@ -50,7 +50,7 @@ class LiteLLMClient(LLMClient[EmptyMetadata]):
     Includes automatic retries for transient failures and token usage tracking.
     """
 
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     def __init__(
         self,

@@ -126,7 +126,7 @@ print(f"Total tokens: {aggregated['token_usage'].total}")
 
 Speed metrics are available directly on each `AssistantMessage` via `request_start_time`, `request_end_time`, and the derived `e2e_otps` property. Similarly, `ToolMessage` has `tool_start_time`, `tool_end_time`, and a `tool_duration` property.
 
-`AssistantMessage` is generic over `metadata`, which should be a Pydantic `BaseModel`. Messages without metadata default to `EmptyMetadata()`. If a client uses typed metadata, set `assistant_metadata_type` to the same model.
+`AssistantMessage` is generic over `metadata`, which should be a Pydantic `BaseModel`. Messages without metadata default to `EmptyMetadata()`. If a client uses typed metadata, set `generation_metadata_type` to the same model.
 
 ## Session
 
@@ -245,7 +245,7 @@ Implement the `LLMClient` protocol to create a custom client:
 from stirrup.core.models import AssistantMessage, ChatMessage, EmptyMetadata, LLMClient, Tool
 
 class MyCustomClient(LLMClient[EmptyMetadata]):
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     async def generate(
         self,

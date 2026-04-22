@@ -121,8 +121,8 @@ def _to_open_responses_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:
     return out
 
 
-def _to_open_responses_input[MetadataT: BaseModel](
-    msgs: list[ChatMessage[MetadataT]],
+def _to_open_responses_input[GenerationMetadataT: BaseModel](
+    msgs: list[ChatMessage[GenerationMetadataT]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert ChatMessage list to OpenResponses (instructions, input) tuple.
 
@@ -280,7 +280,7 @@ class OpenResponsesClient(LLMClient[EmptyMetadata]):
         ... )
     """
 
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     def __init__(
         self,

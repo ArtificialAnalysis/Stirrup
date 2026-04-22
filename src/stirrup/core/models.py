@@ -555,21 +555,21 @@ class ToolProvider(ABC):
 
 
 @runtime_checkable
-class LLMClient[MetadataT: BaseModel](Protocol):
+class LLMClient[GenerationMetadataT: BaseModel](Protocol):
     """Protocol defining the interface for LLM client implementations.
 
     Any LLM client must implement this protocol to work with the Agent class.
     Provides text generation with tool support and model capability inspection.
-    ``assistant_metadata_type`` is an explicit runtime hook for cache/message
+    ``generation_metadata_type`` is an explicit runtime hook for cache/message
     deserialization; the generic parameter alone is not dependable enough at runtime.
     """
 
     @abstractmethod
     async def generate(
         self,
-        messages: list["ChatMessage[MetadataT]"],
+        messages: list["ChatMessage[GenerationMetadataT]"],
         tools: dict[str, Tool],
-    ) -> "AssistantMessage[MetadataT]": ...
+    ) -> "AssistantMessage[GenerationMetadataT]": ...
 
     @property
     def model_slug(self) -> str: ...
@@ -577,7 +577,7 @@ class LLMClient[MetadataT: BaseModel](Protocol):
     @property
     def max_tokens(self) -> int: ...
 
-    assistant_metadata_type: type[MetadataT]
+    generation_metadata_type: type[GenerationMetadataT]
 
 
 class ToolCall(BaseModel):
@@ -626,7 +626,7 @@ class EmptyMetadata(BaseModel):
     """Sentinel metadata used when an assistant message has no metadata payload."""
 
 
-class AssistantMessage[MetadataT: BaseModel](BaseModel):
+class AssistantMessage[GenerationMetadataT: BaseModel](BaseModel):
     """LLM response message with optional tool calls, metadata, and token usage tracking."""
 
     role: Literal["assistant"] = "assistant"
@@ -634,7 +634,7 @@ class AssistantMessage[MetadataT: BaseModel](BaseModel):
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
-    metadata: MetadataT = Field(default_factory=EmptyMetadata)  # type: ignore[assignment]
+    metadata: GenerationMetadataT = Field(default_factory=EmptyMetadata)  # type: ignore[assignment]
     request_start_time: float | None = None
     request_end_time: float | None = None
 
@@ -689,8 +689,8 @@ class ToolMessage(BaseModel):
         return duration
 
 
-type ChatMessage[MetadataT: BaseModel] = Annotated[
-    SystemMessage | UserMessage | AssistantMessage[MetadataT] | ToolMessage,
+type ChatMessage[GenerationMetadataT: BaseModel] = Annotated[
+    SystemMessage | UserMessage | AssistantMessage[GenerationMetadataT] | ToolMessage,
     Field(discriminator="role"),
 ]
 """Discriminated union of all message types, automatically parsed based on role field."""

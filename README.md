@@ -124,7 +124,7 @@ See the [Full Customization guide](https://stirrup.artificialanalysis.ai/extendi
 
 ## Using Other LLM Providers
 
-For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, use the `LiteLLMClient` (requires installation of optional `stirrup[litellm]` dependencies), or create your own client. `AssistantMessage` defaults to `EmptyMetadata()`. If your client uses typed metadata, set `assistant_metadata_type` to the same model.
+For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, use the `LiteLLMClient` (requires installation of optional `stirrup[litellm]` dependencies), or create your own client. `AssistantMessage` defaults to `EmptyMetadata()`. If your client uses typed metadata, set `generation_metadata_type` to the same model.
 
 ### OpenAI-Compatible APIs
 

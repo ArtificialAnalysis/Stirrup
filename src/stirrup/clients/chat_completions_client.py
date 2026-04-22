@@ -62,7 +62,7 @@ class ChatCompletionsClient(LLMClient[EmptyMetadata]):
         ... )
     """
 
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     def __init__(
         self,

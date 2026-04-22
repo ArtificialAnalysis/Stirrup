@@ -21,7 +21,7 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 | `generate()` | `async method` | Generate next message with optional tool calls |
 | `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
 | `max_tokens` | `property` | Maximum context window size |
-| `assistant_metadata_type` | `class attribute` | Concrete metadata model used for assistant messages at runtime |
+| `generation_metadata_type` | `class attribute` | Concrete metadata model used for assistant messages at runtime |
 
 ## Basic Implementation
 
@@ -39,7 +39,7 @@ from stirrup import (
 class MyCustomClient(LLMClient[EmptyMetadata]):
     """Custom LLM client implementation."""
 
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     def __init__(
         self,
@@ -77,12 +77,12 @@ class MyCustomClient(LLMClient[EmptyMetadata]):
         return self._parse_response(response)
 ```
 
-## Typed Assistant Metadata
+## Typed Generation Metadata
 
 If your client needs provider-specific response fields, define a Pydantic
 metadata model and return `AssistantMessage[MyMetadata]`. Messages without
 metadata use `EmptyMetadata()` by default. If you use typed metadata, set
-`assistant_metadata_type` to the same model:
+`generation_metadata_type` to the same model:
 
 ```python
 from pydantic import BaseModel
@@ -90,22 +90,22 @@ from pydantic import BaseModel
 from stirrup import AssistantMessage, ChatMessage, LLMClient, Tool, TokenUsage
 
 
-class ResponseMetadata(BaseModel):
+class GenerationMetadata(BaseModel):
     request_id: str
 
 
-class MyTypedClient(LLMClient[ResponseMetadata]):
-    assistant_metadata_type: type[ResponseMetadata] = ResponseMetadata
+class MyTypedClient(LLMClient[GenerationMetadata]):
+    generation_metadata_type: type[GenerationMetadata] = GenerationMetadata
 
     async def generate(
         self,
-        messages: list[ChatMessage[ResponseMetadata]],
+        messages: list[ChatMessage[GenerationMetadata]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[ResponseMetadata]:
+    ) -> AssistantMessage[GenerationMetadata]:
         return AssistantMessage(
             content="Hello",
             token_usage=TokenUsage(answer=1),
-            metadata=ResponseMetadata(request_id="resp_123"),
+            metadata=GenerationMetadata(request_id="resp_123"),
         )
 ```
 
@@ -148,7 +148,7 @@ from stirrup import (
 class OpenAIClient(LLMClient[EmptyMetadata]):
     """Direct OpenAI API client."""
 
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000):
         self._model = model
@@ -210,7 +210,7 @@ to track generation speed. The derived `e2e_otps` property computes output token
 class MockClient:
     """Mock client for testing."""
 
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     def __init__(self, responses: list[AssistantMessage[EmptyMetadata]]):
         self._responses = responses

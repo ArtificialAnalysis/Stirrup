@@ -5,17 +5,17 @@ from stirrup.core.cache import deserialize_message, serialize_message
 from stirrup.core.models import AssistantMessage, EmptyMetadata, TokenUsage
 
 
-class ResponseMetadata(BaseModel):
+class GenerationMetadata(BaseModel):
     request_id: str
 
 
 def test_assistant_message_supports_typed_metadata() -> None:
     # Create a typed assistant message
-    msg: AssistantMessage[ResponseMetadata] = AssistantMessage[ResponseMetadata](
+    msg: AssistantMessage[GenerationMetadata] = AssistantMessage[GenerationMetadata](
         content="hi",
         tool_calls=[],
         token_usage=TokenUsage(answer=1),
-        metadata=ResponseMetadata(request_id="resp_123"),
+        metadata=GenerationMetadata(request_id="resp_123"),
     )
 
     # Assertions
@@ -37,8 +37,8 @@ def test_assistant_message_without_type_defaults_metadata_to_empty_metadata() ->
 
 def test_assistant_message_typed_metadata_cannot_be_none() -> None:
     # Verify typed metadata rejects None
-    with pytest.raises(ValueError, match="valid dictionary or instance of ResponseMetadata"):
-        AssistantMessage[ResponseMetadata](
+    with pytest.raises(ValueError, match="valid dictionary or instance of GenerationMetadata"):
+        AssistantMessage[GenerationMetadata](
             content="hi",
             tool_calls=[],
             token_usage=TokenUsage(answer=1),
@@ -49,7 +49,7 @@ def test_assistant_message_typed_metadata_cannot_be_none() -> None:
 def test_assistant_message_typed_metadata_cannot_be_omitted() -> None:
     # Verify typed metadata cannot be omitted
     with pytest.raises(ValueError, match="metadata is required"):
-        AssistantMessage[ResponseMetadata](
+        AssistantMessage[GenerationMetadata](
             content="hi",
             tool_calls=[],
             token_usage=TokenUsage(answer=1),
@@ -58,11 +58,11 @@ def test_assistant_message_typed_metadata_cannot_be_omitted() -> None:
 
 def test_assistant_message_pydantic_metadata_serializes() -> None:
     # Create a typed assistant message
-    msg = AssistantMessage[ResponseMetadata](
+    msg = AssistantMessage[GenerationMetadata](
         content="hi",
         tool_calls=[],
         token_usage=TokenUsage(answer=1),
-        metadata=ResponseMetadata(request_id="resp_123"),
+        metadata=GenerationMetadata(request_id="resp_123"),
     )
 
     # Serialize the message
@@ -74,19 +74,19 @@ def test_assistant_message_pydantic_metadata_serializes() -> None:
 
 def test_assistant_message_metadata_round_trips_through_cache() -> None:
     # Create a typed assistant message
-    msg = AssistantMessage[ResponseMetadata](
+    msg = AssistantMessage[GenerationMetadata](
         content="hi",
         tool_calls=[],
         token_usage=TokenUsage(answer=1),
-        metadata=ResponseMetadata(request_id="resp_123"),
+        metadata=GenerationMetadata(request_id="resp_123"),
     )
 
     # Round-trip through cache serialization
-    restored = deserialize_message(serialize_message(msg), ResponseMetadata)
+    restored = deserialize_message(serialize_message(msg), GenerationMetadata)
 
     # Assertions
     assert isinstance(restored, AssistantMessage)
-    assert isinstance(restored.metadata, ResponseMetadata)
+    assert isinstance(restored.metadata, GenerationMetadata)
     assert restored.metadata.request_id == "resp_123"
 
 

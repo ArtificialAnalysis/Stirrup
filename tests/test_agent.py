@@ -14,6 +14,7 @@ from stirrup.core.models import (
     ChatMessage,
     EmptyMetadata,
     LLMClient,
+    SubAgentMetadata,
     SummaryMessage,
     SystemMessage,
     TokenUsage,
@@ -29,7 +30,7 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 class MockLLMClient(LLMClient[EmptyMetadata]):
     """Mock LLM client for testing."""
 
-    assistant_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
 
     def __init__(self, responses: list[AssistantMessage[EmptyMetadata]], max_tokens: int = 100_000) -> None:
         self.responses = responses
@@ -49,6 +50,38 @@ class MockLLMClient(LLMClient[EmptyMetadata]):
         messages: list[ChatMessage[EmptyMetadata]],
         tools: dict[str, Tool],
     ) -> AssistantMessage[EmptyMetadata]:  # noqa: ARG002
+        response = self.responses[self.call_count]
+        self.call_count += 1
+        return response
+
+
+class ChildGenerationMetadata(BaseModel):
+    request_id: str
+
+
+class TypedMockLLMClient(LLMClient[ChildGenerationMetadata]):
+    """Mock LLM client with typed generation metadata."""
+
+    generation_metadata_type: type[ChildGenerationMetadata] = ChildGenerationMetadata
+
+    def __init__(self, responses: list[AssistantMessage[ChildGenerationMetadata]], max_tokens: int = 100_000) -> None:
+        self.responses = responses
+        self.call_count = 0
+        self._max_tokens = max_tokens
+
+    @property
+    def model_slug(self) -> str:
+        return "typed-mock-model"
+
+    @property
+    def max_tokens(self) -> int:
+        return self._max_tokens
+
+    async def generate(
+        self,
+        messages: list[ChatMessage[ChildGenerationMetadata]],
+        tools: dict[str, Tool],
+    ) -> AssistantMessage[ChildGenerationMetadata]:  # noqa: ARG002
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
@@ -677,3 +710,93 @@ async def test_agent_resume_loads_cached_state_and_clears_cache_on_success(
     assert second_client.call_count == 1
     assert len(history) == 1
     assert cache_manager.load_state(task_hash, EmptyMetadata) is None
+
+
+async def test_subagent_preserves_typed_assistant_metadata() -> None:
+    """Test sub-agents preserve typed generation metadata in returned history."""
+    # Create a typed child agent
+    child_client = TypedMockLLMClient(
+        [
+            AssistantMessage[ChildGenerationMetadata](
+                content="Subagent answer",
+                tool_calls=[
+                    ToolCall(
+                        name=FINISH_TOOL_NAME,
+                        arguments='{"reason": "Child task complete", "paths": []}',
+                        tool_call_id="child_finish",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+                metadata=ChildGenerationMetadata(request_id="resp_123"),
+            )
+        ]
+    )
+    child_agent = Agent(
+        client=child_client,
+        name="child-agent",
+        max_turns=3,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    # Create a parent agent that calls the child sub-agent
+    parent_client = MockLLMClient(
+        [
+            AssistantMessage(
+                content="I will delegate this",
+                tool_calls=[
+                    ToolCall(
+                        name="child-agent",
+                        arguments='{"task": "Handle the child task", "input_files": []}',
+                        tool_call_id="call_child",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            ),
+            AssistantMessage(
+                content="Done",
+                tool_calls=[
+                    ToolCall(
+                        name=FINISH_TOOL_NAME,
+                        arguments='{"reason": "Parent task complete", "paths": []}',
+                        tool_call_id="parent_finish",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            ),
+        ]
+    )
+    parent_agent = Agent(
+        client=parent_client,
+        name="parent-agent",
+        max_turns=3,
+        tools=[child_agent.to_tool()],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    # Run the parent agent with the child exposed as a tool
+    async with parent_agent.session(cache_on_interrupt=False) as session:
+        finish_params, _, run_metadata = await session.run([UserMessage(content="Parent task")])
+
+    # Verify the sub-agent completed through the parent
+    assert finish_params is not None
+    assert finish_params.reason == "Parent task complete"
+    assert parent_client.call_count == 2
+    assert child_client.call_count == 1
+
+    # Verify the child metadata remains typed in sub-agent history
+    subagent_metadata_items = run_metadata["child-agent"]
+    assert len(subagent_metadata_items) == 1
+    subagent_metadata = subagent_metadata_items[0]
+    assert isinstance(subagent_metadata, SubAgentMetadata)
+    assert "token_usage" in subagent_metadata.run_metadata
+
+    assistant_messages = [
+        msg
+        for group in subagent_metadata.message_history
+        for msg in group
+        if isinstance(msg, AssistantMessage)
+    ]
+    assert len(assistant_messages) == 1
+    assert isinstance(assistant_messages[0].metadata, ChildGenerationMetadata)
+    assert assistant_messages[0].metadata.request_id == "resp_123"
