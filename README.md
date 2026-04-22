@@ -238,6 +238,8 @@ agent = Agent(
 )
 ```
 
+Tool metadata should be a Pydantic model, or `None` if unused.
+
 ## Next Steps
 
 - [Getting Started](https://stirrup.artificialanalysis.ai/getting-started/) - Installation and first agent tutorial

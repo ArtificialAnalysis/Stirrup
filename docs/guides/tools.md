@@ -131,7 +131,7 @@ By default, synchronous executors run in a separate thread (`run_sync_in_thread=
 
 ## Tool Results
 
-Tools return `ToolResult[M]` where `M` is the metadata type:
+Tools return `ToolResult[M]` where `M` is a Pydantic metadata model or `None`:
 
 ```python
 from stirrup import ToolResult, ToolUseCountMetadata
@@ -148,6 +148,8 @@ return ToolResult(
     metadata=ToolUseCountMetadata(),
 )
 ```
+
+If you want metadata to aggregate across calls, implement `__add__` on the model.
 
 ### Returning Images
 

@@ -451,33 +451,34 @@ class ToolUseCountMetadata(BaseModel):
         return self.__class__(num_uses=self.num_uses + other.num_uses)
 
 
-class ToolResult[M](BaseModel):
+class ToolResult[ToolMetadataT: BaseModel | None](BaseModel):
     """Result from a tool executor with optional metadata.
 
-    Generic over metadata type M. M should implement Addable protocol for aggregation support,
-    but this is not enforced at the class level due to Pydantic schema generation limitations.
+    Generic over metadata type ``ToolMetadataT``. Tool metadata should be a
+    Pydantic model when present, and should implement ``__add__`` if it needs
+    to aggregate cleanly across tool calls.
 
     Attributes:
         content: The result content (string, list of content blocks, or images)
         success: Whether the tool call was successful. For finish tools, controls if agent terminates.
-        metadata: Optional metadata (e.g., usage stats) that implements Addable for aggregation
+        metadata: Optional Pydantic metadata for the tool call
     """
 
     content: Content
     success: bool = True
-    metadata: M | None = None
+    metadata: ToolMetadataT = None
 
 
 class EmptyParams(BaseModel):
     """Empty parameter model for tools that don't require parameters."""
 
 
-class Tool[P: BaseModel, M](BaseModel):
+class Tool[P: BaseModel, ToolMetadataT: BaseModel | None](BaseModel):
     """Tool definition with name, description, parameter schema, and executor function.
 
     Generic over:
         P: Parameter model type (Pydantic BaseModel subclass, or EmptyParams for parameterless tools)
-        M: Metadata type (should implement Addable for aggregation; use None for tools without metadata)
+        ToolMetadataT: Tool metadata model type, or None for tools without metadata
 
     Tools are simple, stateless callables. For tools requiring lifecycle management
     (setup/teardown, resource pooling), use a ToolProvider instead.
@@ -508,7 +509,7 @@ class Tool[P: BaseModel, M](BaseModel):
     name: str
     description: str
     parameters: type[P] = EmptyParams  # type: ignore[assignment]
-    executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
+    executor: Callable[[P], ToolResult[ToolMetadataT] | Awaitable[ToolResult[ToolMetadataT]]]
 
 
 class ToolProvider(ABC):

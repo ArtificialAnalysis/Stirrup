@@ -4,7 +4,6 @@ Provides functionality to cache agent state (messages, run metadata, execution e
 on non-success exits and restore that state for resumption in new runs.
 """
 
-import base64
 import hashlib
 import json
 import logging
@@ -12,9 +11,9 @@ import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, overload
+from typing import Any
 
-from pydantic import BaseModel, Field, TypeAdapter, field_serializer
+from pydantic import BaseModel, Field, TypeAdapter
 
 from stirrup.core.models import ChatMessage
 
@@ -24,18 +23,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_CACHE_DIR = Path("~/.cache/stirrup/").expanduser()
 
 
-def _get_chat_message_adapter(generation_metadata_type: type[BaseModel] | None) -> TypeAdapter[Any]:
-    """Build a TypeAdapter for the concrete generation metadata type."""
-    if generation_metadata_type is None:
-        return TypeAdapter(ChatMessage[None])
-    return TypeAdapter(ChatMessage[generation_metadata_type])  # ty: ignore[invalid-type-form]
-
-
-def _get_cache_state_model(generation_metadata_type: type[BaseModel] | None) -> type[BaseModel]:
-    """Build the concrete CacheState model for the generation metadata type."""
-    if generation_metadata_type is None:
-        return CacheState[None]
-    return CacheState[generation_metadata_type]  # ty: ignore[invalid-type-form]
 def compute_task_hash[GenerationMetadataT: BaseModel | None](
     init_msgs: str | list[ChatMessage[GenerationMetadataT]],
 ) -> str:
@@ -50,9 +37,8 @@ def compute_task_hash[GenerationMetadataT: BaseModel | None](
     if isinstance(init_msgs, str):
         content = init_msgs
     else:
-        # Serialize messages to JSON for hashing
         content = json.dumps(
-            [serialize_message(msg) for msg in init_msgs],
+            [msg.model_dump(mode="json") for msg in init_msgs],
             sort_keys=True,
             ensure_ascii=True,
         )
@@ -65,17 +51,6 @@ def serialize_message[GenerationMetadataT: BaseModel | None](msg: ChatMessage[Ge
     """Serialize a ChatMessage to JSON-compatible format."""
     return msg.model_dump(mode="json")
 
-@overload
-def deserialize_message(data: dict) -> ChatMessage[None]: ...
-
-
-@overload
-def deserialize_message[GenerationMetadataT: BaseModel](
-    data: dict,
-    generation_metadata_type: type[GenerationMetadataT],
-) -> ChatMessage[GenerationMetadataT]: ...
-
-
 def deserialize_message(
     data: dict,
     generation_metadata_type: type[BaseModel] | None = None,
@@ -84,81 +59,11 @@ def deserialize_message(
     if generation_metadata_type is None and data.get("metadata") in (None, {}):
         data["metadata"] = None
 
-    # Use TypeAdapter for discriminated union deserialization
-    adapter = _get_chat_message_adapter(generation_metadata_type)
-    return adapter.validate_python(data)
-
-
-def serialize_messages[GenerationMetadataT: BaseModel | None](msgs: list[ChatMessage[GenerationMetadataT]]) -> list[dict]:
-    """Serialize a list of ChatMessages to JSON-compatible format.
-
-    Args:
-        msgs: List of ChatMessage objects.
-
-    Returns:
-        List of JSON-serializable dictionaries.
-    """
-    return [serialize_message(msg) for msg in msgs]
-
-
-def _serialize_metadata_item(item: Any) -> Any:  # noqa: ANN401
-    """Serialize a single metadata item to JSON-compatible format.
-
-    Handles Pydantic models by calling model_dump(mode='json').
-    Handles bytes by base64 encoding them.
-    """
-    if isinstance(item, BaseModel):
-        return item.model_dump(mode="json")
-    elif isinstance(item, bytes):
-        # Base64 encode raw bytes to make them JSON-serializable
-        return base64.b64encode(item).decode("ascii")
-    elif isinstance(item, dict):
-        return {k: _serialize_metadata_item(v) for k, v in item.items()}
-    elif isinstance(item, list):
-        return [_serialize_metadata_item(i) for i in item]
+    if generation_metadata_type is None:
+        adapter: TypeAdapter[Any] = TypeAdapter(ChatMessage[None])
     else:
-        return item
-
-
-def _serialize_run_metadata(run_metadata: dict[str, list[Any]]) -> dict[str, list[Any]]:
-    """Serialize run_metadata dict containing Pydantic models to JSON-compatible format.
-
-    Args:
-        run_metadata: Dict mapping tool names to lists of metadata (may contain Pydantic models).
-
-    Returns:
-        JSON-serializable dictionary.
-    """
-    return {
-        tool_name: [_serialize_metadata_item(item) for item in metadata_list]
-        for tool_name, metadata_list in run_metadata.items()
-    }
-
-
-@overload
-def deserialize_messages(data: list[dict]) -> list[ChatMessage[None]]: ...
-
-
-@overload
-def deserialize_messages[GenerationMetadataT: BaseModel](
-    data: list[dict],
-    generation_metadata_type: type[GenerationMetadataT],
-) -> list[ChatMessage[GenerationMetadataT]]: ...
-
-
-def deserialize_messages(
-    data: list[dict],
-    generation_metadata_type: type[BaseModel] | None = None,
-) -> list[ChatMessage[BaseModel | None]]:
-    """Deserialize a list of ChatMessages from JSON format.
-
-    Args:
-        data: List of JSON dictionaries representing ChatMessages.
-
-    Returns:
-        List of restored ChatMessage objects.
-    """
-    return [deserialize_message(msg_data, generation_metadata_type) for msg_data in data]
+        adapter = TypeAdapter(ChatMessage[generation_metadata_type])  # ty: ignore[invalid-type-form]
+    return adapter.validate_python(data)
 
 class CacheState[GenerationMetadataT: BaseModel | None](BaseModel):
     """Serializable state for resuming an agent run.
@@ -186,12 +91,6 @@ class CacheState[GenerationMetadataT: BaseModel | None](BaseModel):
 
     agent_name: str = ""
     """Name of the agent that created this cache."""
-
-    @field_serializer("run_metadata", when_used="json")
-    def _serialize_run_metadata_field(self, run_metadata: dict[str, list[Any]]) -> dict[str, list[Any]]:
-        """Serialize heterogeneous tool metadata to JSON-compatible data."""
-        return _serialize_run_metadata(run_metadata)
-
 
 class CacheManager:
     """Manages cache operations for agent sessions.
@@ -289,16 +188,6 @@ class CacheManager:
             shutil.copytree(exec_env_dir, files_dir, dirs_exist_ok=True)
             logger.info("Saved execution environment files to %s", files_dir)
 
-    @overload
-    def load_state(self, task_hash: str) -> CacheState[None] | None: ...
-
-    @overload
-    def load_state[GenerationMetadataT: BaseModel](
-        self,
-        task_hash: str,
-        generation_metadata_type: type[GenerationMetadataT],
-    ) -> CacheState[GenerationMetadataT] | None: ...
-
     def load_state(
         self,
         task_hash: str,
@@ -320,7 +209,10 @@ class CacheManager:
         try:
             with open(state_file, encoding="utf-8") as f:
                 raw_json = f.read()
-            state_model = _get_cache_state_model(generation_metadata_type)
+            if generation_metadata_type is None:
+                state_model: type[BaseModel] = CacheState[None]
+            else:
+                state_model = CacheState[generation_metadata_type]  # ty: ignore[invalid-type-form]
             state = state_model.model_validate_json(raw_json)
             logger.info("Loaded cache state from %s (turn %d)", state_file, state.turn)
             return state

@@ -391,7 +391,7 @@ agent = Agent(client=client, name="analyst", finish_tool=custom_finish)
 
 ### Tool Metadata
 
-Tools return `ToolResult[M]` where `M` is the metadata type:
+Tools return `ToolResult[M]` where `M` is a Pydantic metadata model or `None`:
 
 ```python
 from stirrup import ToolResult, ToolUseCountMetadata
@@ -403,7 +403,8 @@ def my_tool(params: MyParams) -> ToolResult[ToolUseCountMetadata]:
     )
 ```
 
-Metadata aggregates across tool calls during a run. Built-in metadata types:
+Tool metadata should implement `__add__` if you want it to aggregate across tool
+calls during a run. Built-in metadata types:
 
 | Type | Description |
 |------|-------------|
