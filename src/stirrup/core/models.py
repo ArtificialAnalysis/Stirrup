@@ -28,7 +28,6 @@ __all__ = [
     "ChatMessage",
     "Content",
     "ContentBlock",
-    "EmptyMetadata",
     "EmptyParams",
     "ImageContentBlock",
     "LLMClient",
@@ -555,7 +554,7 @@ class ToolProvider(ABC):
 
 
 @runtime_checkable
-class LLMClient[GenerationMetadataT: BaseModel](Protocol):
+class LLMClient[GenerationMetadataT: BaseModel | None](Protocol):
     """Protocol defining the interface for LLM client implementations.
 
     Any LLM client must implement this protocol to work with the Agent class.
@@ -577,7 +576,7 @@ class LLMClient[GenerationMetadataT: BaseModel](Protocol):
     @property
     def max_tokens(self) -> int: ...
 
-    generation_metadata_type: type[GenerationMetadataT]
+    generation_metadata_type: type[GenerationMetadataT] | None
 
 
 class ToolCall(BaseModel):
@@ -623,10 +622,10 @@ class Reasoning(BaseModel):
 
 
 class EmptyMetadata(BaseModel):
-    """Sentinel metadata used when an assistant message has no metadata payload."""
+    """Deprecated compatibility sentinel; prefer ``None`` for missing generation metadata."""
 
 
-class AssistantMessage[GenerationMetadataT: BaseModel](BaseModel):
+class AssistantMessage[GenerationMetadataT: BaseModel | None](BaseModel):
     """LLM response message with optional tool calls, metadata, and token usage tracking."""
 
     role: Literal["assistant"] = "assistant"
@@ -634,7 +633,7 @@ class AssistantMessage[GenerationMetadataT: BaseModel](BaseModel):
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
-    metadata: GenerationMetadataT = Field(default_factory=EmptyMetadata)  # type: ignore[assignment]
+    metadata: GenerationMetadataT | None = None
     request_start_time: float | None = None
     request_end_time: float | None = None
 
@@ -642,7 +641,7 @@ class AssistantMessage[GenerationMetadataT: BaseModel](BaseModel):
     def _validate_metadata(self) -> Self:
         metadata_args = getattr(self.__class__, "__pydantic_generic_metadata__", {}).get("args", ())
         metadata_type = metadata_args[0] if metadata_args else None
-        if metadata_type not in (None, Any, EmptyMetadata) and isinstance(self.metadata, EmptyMetadata):
+        if metadata_type not in (None, Any, type(None)) and self.metadata is None:
             raise ValueError("metadata is required when AssistantMessage is parameterized with a metadata model")
         return self
 
@@ -689,7 +688,7 @@ class ToolMessage(BaseModel):
         return duration
 
 
-type ChatMessage[GenerationMetadataT: BaseModel] = Annotated[
+type ChatMessage[GenerationMetadataT: BaseModel | None] = Annotated[
     SystemMessage | UserMessage | AssistantMessage[GenerationMetadataT] | ToolMessage,
     Field(discriminator="role"),
 ]

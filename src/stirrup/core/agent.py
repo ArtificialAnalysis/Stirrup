@@ -197,7 +197,7 @@ DEFAULT_SUB_AGENT_DESCRIPTION = "A sub agent that can be used to handle a contai
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
-class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel]:
+class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel | None]:
     """Agent that executes tool-using loops with automatic context management.
 
     Runs up to max_turns iterations of: LLM generation → tool execution → message accumulation.
@@ -1427,7 +1427,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel]
         )
 
 
-class SessionAgent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel](
+class SessionAgent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel | None](
     Agent[FinishParams, FinishMeta, GenerationMetadataT]
 ):
     """Agent running inside an active session with full tool access.

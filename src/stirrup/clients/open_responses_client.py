@@ -27,7 +27,6 @@ from stirrup.core.models import (
     AudioContentBlock,
     ChatMessage,
     Content,
-    EmptyMetadata,
     EmptyParams,
     ImageContentBlock,
     LLMClient,
@@ -121,7 +120,7 @@ def _to_open_responses_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:
     return out
 
 
-def _to_open_responses_input[GenerationMetadataT: BaseModel](
+def _to_open_responses_input[GenerationMetadataT: BaseModel | None](
     msgs: list[ChatMessage[GenerationMetadataT]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert ChatMessage list to OpenResponses (instructions, input) tuple.
@@ -259,7 +258,7 @@ def _parse_response_output(
     return "\n".join(content_parts), tool_calls, reasoning
 
 
-class OpenResponsesClient(LLMClient[EmptyMetadata]):
+class OpenResponsesClient(LLMClient[None]):
     """OpenAI SDK-based client using the Responses API.
 
     Uses the official OpenAI Python SDK's responses.create() method.
@@ -280,7 +279,7 @@ class OpenResponsesClient(LLMClient[EmptyMetadata]):
         ... )
     """
 
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type = None
 
     def __init__(
         self,
@@ -357,9 +356,9 @@ class OpenResponsesClient(LLMClient[EmptyMetadata]):
     )
     async def generate(
         self,
-        messages: list[ChatMessage[EmptyMetadata]],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[EmptyMetadata]:
+    ) -> AssistantMessage[None]:
         """Generate assistant response with optional tool calls using Responses API.
 
         Retries up to 3 times on transient errors (connection, timeout, rate limit,
@@ -431,7 +430,7 @@ class OpenResponsesClient(LLMClient[EmptyMetadata]):
 
         answer_tokens = output_tokens - reasoning_tokens
 
-        return AssistantMessage[EmptyMetadata](
+        return AssistantMessage[None](
             reasoning=reasoning,
             content=content,
             tool_calls=tool_calls,

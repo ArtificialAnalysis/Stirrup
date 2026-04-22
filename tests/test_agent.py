@@ -12,7 +12,6 @@ from stirrup.core.cache import CacheManager, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    EmptyMetadata,
     LLMClient,
     SubAgentMetadata,
     SummaryMessage,
@@ -27,12 +26,12 @@ from stirrup.core.models import (
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
-class MockLLMClient(LLMClient[EmptyMetadata]):
+class MockLLMClient(LLMClient[None]):
     """Mock LLM client for testing."""
 
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type = None
 
-    def __init__(self, responses: list[AssistantMessage[EmptyMetadata]], max_tokens: int = 100_000) -> None:
+    def __init__(self, responses: list[AssistantMessage[None]], max_tokens: int = 100_000) -> None:
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
@@ -47,9 +46,9 @@ class MockLLMClient(LLMClient[EmptyMetadata]):
 
     async def generate(
         self,
-        messages: list[ChatMessage[EmptyMetadata]],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[EmptyMetadata]:  # noqa: ARG002
+    ) -> AssistantMessage[None]:  # noqa: ARG002
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
@@ -668,7 +667,7 @@ async def test_agent_resume_loads_cached_state_and_clears_cache_on_success(
     assert first_client.call_count == 1
     assert (tmp_path / task_hash / "state.json").exists()
 
-    cached = cache_manager.load_state(task_hash, EmptyMetadata)
+    cached = cache_manager.load_state(task_hash)
     assert cached is not None
     assert cached.turn == 0
     assert cached.full_msg_history == []
@@ -709,7 +708,7 @@ async def test_agent_resume_loads_cached_state_and_clears_cache_on_success(
     assert finish_params.reason == "Resumed successfully"
     assert second_client.call_count == 1
     assert len(history) == 1
-    assert cache_manager.load_state(task_hash, EmptyMetadata) is None
+    assert cache_manager.load_state(task_hash) is None
 
 
 async def test_subagent_preserves_typed_assistant_metadata() -> None:

@@ -29,17 +29,16 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 from stirrup import (
     AssistantMessage,
     ChatMessage,
-    EmptyMetadata,
     LLMClient,
     Tool,
     TokenUsage,
 )
 
 
-class MyCustomClient(LLMClient[EmptyMetadata]):
+class MyCustomClient(LLMClient[None]):
     """Custom LLM client implementation."""
 
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type = None
 
     def __init__(
         self,
@@ -61,9 +60,9 @@ class MyCustomClient(LLMClient[EmptyMetadata]):
 
     async def generate(
         self,
-        messages: list[ChatMessage[EmptyMetadata]],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[EmptyMetadata]:
+    ) -> AssistantMessage[None]:
         # Convert messages to your API format
         api_messages = self._convert_messages(messages)
 
@@ -81,7 +80,7 @@ class MyCustomClient(LLMClient[EmptyMetadata]):
 
 If your client needs provider-specific response fields, define a Pydantic
 metadata model and return `AssistantMessage[MyMetadata]`. Messages without
-metadata use `EmptyMetadata()` by default. If you use typed metadata, set
+metadata use `None` by default. If you use typed metadata, set
 `generation_metadata_type` to the same model:
 
 ```python
@@ -136,7 +135,6 @@ import openai
 from stirrup import (
     AssistantMessage,
     ChatMessage,
-    EmptyMetadata,
     LLMClient,
     Tool,
     ToolCall,
@@ -145,10 +143,10 @@ from stirrup import (
 )
 
 
-class OpenAIClient(LLMClient[EmptyMetadata]):
+class OpenAIClient(LLMClient[None]):
     """Direct OpenAI API client."""
 
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type = None
 
     def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000):
         self._model = model
@@ -163,7 +161,7 @@ class OpenAIClient(LLMClient[EmptyMetadata]):
     def max_tokens(self) -> int:
         return self._max_tokens
 
-    def _convert_message(self, msg: ChatMessage[EmptyMetadata]) -> dict:
+    def _convert_message(self, msg: ChatMessage[None]) -> dict:
         """Convert a message to OpenAI format."""
         # SystemMessage, UserMessage, ToolMessage have compatible structure
         if isinstance(msg, AssistantMessage):
@@ -182,9 +180,9 @@ class OpenAIClient(LLMClient[EmptyMetadata]):
 
     async def generate(
         self,
-        messages: list[ChatMessage[EmptyMetadata]],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[EmptyMetadata]:
+    ) -> AssistantMessage[None]:
         api_messages = [self._convert_message(m) for m in messages]
         api_tools = [
             {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters.model_json_schema()}}
@@ -194,7 +192,7 @@ class OpenAIClient(LLMClient[EmptyMetadata]):
         response = await self._client.chat.completions.create(model=self._model, messages=api_messages, tools=api_tools)
         message = response.choices[0].message
 
-        return AssistantMessage[EmptyMetadata](
+        return AssistantMessage[None](
             content=message.content or "",
             tool_calls=[ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id) for tc in (message.tool_calls or [])],
             token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
@@ -210,9 +208,9 @@ to track generation speed. The derived `e2e_otps` property computes output token
 class MockClient:
     """Mock client for testing."""
 
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type = None
 
-    def __init__(self, responses: list[AssistantMessage[EmptyMetadata]]):
+    def __init__(self, responses: list[AssistantMessage[None]]):
         self._responses = responses
         self._call_count = 0
 
@@ -224,7 +222,7 @@ class MockClient:
     def max_tokens(self) -> int:
         return 10_000
 
-    async def generate(self, messages, tools) -> AssistantMessage[EmptyMetadata]:
+    async def generate(self, messages, tools) -> AssistantMessage[None]:
         response = self._responses[self._call_count]
         self._call_count += 1
         return response
@@ -232,7 +230,7 @@ class MockClient:
 
 # Use in tests
 mock = MockClient([
-    AssistantMessage[EmptyMetadata](content="Hello!", tool_calls=[], token_usage=TokenUsage()),
+    AssistantMessage[None](content="Hello!", tool_calls=[], token_usage=TokenUsage()),
 ])
 
 agent = Agent(client=mock, name="test")

@@ -102,7 +102,7 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
     return out
 
 
-def to_openai_messages[GenerationMetadataT: BaseModel](
+def to_openai_messages[GenerationMetadataT: BaseModel | None](
     msgs: list[ChatMessage[GenerationMetadataT]],
 ) -> list[dict[str, Any]]:
     """Convert ChatMessage list to OpenAI-compatible message dictionaries.

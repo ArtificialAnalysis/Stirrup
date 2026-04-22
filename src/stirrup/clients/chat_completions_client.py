@@ -26,7 +26,6 @@ from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    EmptyMetadata,
     LLMClient,
     Reasoning,
     TokenUsage,
@@ -41,7 +40,7 @@ __all__ = [
 LOGGER = logging.getLogger(__name__)
 
 
-class ChatCompletionsClient(LLMClient[EmptyMetadata]):
+class ChatCompletionsClient(LLMClient[None]):
     """OpenAI SDK-based client supporting OpenAI and OpenAI-compatible APIs.
 
     Uses the official OpenAI Python SDK directly for chat completions.
@@ -62,7 +61,7 @@ class ChatCompletionsClient(LLMClient[EmptyMetadata]):
         ... )
     """
 
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type = None
 
     def __init__(
         self,
@@ -131,9 +130,9 @@ class ChatCompletionsClient(LLMClient[EmptyMetadata]):
     )
     async def generate(
         self,
-        messages: list[ChatMessage[EmptyMetadata]],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[EmptyMetadata]:
+    ) -> AssistantMessage[None]:
         """Generate assistant response with optional tool calls.
 
         Retries up to 3 times on transient errors (connection, timeout, rate limit,
@@ -211,7 +210,7 @@ class ChatCompletionsClient(LLMClient[EmptyMetadata]):
 
         answer_tokens = output_tokens - reasoning_tokens
 
-        return AssistantMessage[EmptyMetadata](
+        return AssistantMessage[None](
             reasoning=reasoning,
             content=msg.content or "",
             tool_calls=tool_calls,

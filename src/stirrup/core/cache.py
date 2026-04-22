@@ -16,10 +16,7 @@ from typing import Any, overload
 
 from pydantic import BaseModel, Field, TypeAdapter, field_serializer
 
-from stirrup.core.models import (
-    ChatMessage,
-    EmptyMetadata,
-)
+from stirrup.core.models import ChatMessage
 
 logger = logging.getLogger(__name__)
 
@@ -27,17 +24,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_CACHE_DIR = Path("~/.cache/stirrup/").expanduser()
 
 
-def _get_chat_message_adapter(metadata_type: type[BaseModel]) -> TypeAdapter[Any]:
-    """Build a TypeAdapter for the concrete assistant metadata type."""
-    return TypeAdapter(ChatMessage[metadata_type])  # ty: ignore[invalid-type-form]
+def _get_chat_message_adapter(generation_metadata_type: type[BaseModel] | None) -> TypeAdapter[Any]:
+    """Build a TypeAdapter for the concrete generation metadata type."""
+    if generation_metadata_type is None:
+        return TypeAdapter(ChatMessage[None])
+    return TypeAdapter(ChatMessage[generation_metadata_type])  # ty: ignore[invalid-type-form]
 
 
-def _get_cache_state_model(metadata_type: type[BaseModel]) -> type[BaseModel]:
-    """Build the concrete CacheState model for the assistant metadata type."""
-    return CacheState[metadata_type]  # ty: ignore[invalid-type-form]
-
-
-def compute_task_hash[MetadataT: BaseModel](init_msgs: str | list[ChatMessage[MetadataT]]) -> str:
+def _get_cache_state_model(generation_metadata_type: type[BaseModel] | None) -> type[BaseModel]:
+    """Build the concrete CacheState model for the generation metadata type."""
+    if generation_metadata_type is None:
+        return CacheState[None]
+    return CacheState[generation_metadata_type]  # ty: ignore[invalid-type-form]
+def compute_task_hash[GenerationMetadataT: BaseModel | None](
+    init_msgs: str | list[ChatMessage[GenerationMetadataT]],
+) -> str:
     """Compute deterministic hash from initial messages for cache identification.
 
     Args:
@@ -60,33 +61,35 @@ def compute_task_hash[MetadataT: BaseModel](init_msgs: str | list[ChatMessage[Me
     return hash_bytes[:12]
 
 
-def serialize_message[MetadataT: BaseModel](msg: ChatMessage[MetadataT]) -> dict:
+def serialize_message[GenerationMetadataT: BaseModel | None](msg: ChatMessage[GenerationMetadataT]) -> dict:
     """Serialize a ChatMessage to JSON-compatible format."""
     return msg.model_dump(mode="json")
 
+@overload
+def deserialize_message(data: dict) -> ChatMessage[None]: ...
+
 
 @overload
-def deserialize_message(data: dict) -> ChatMessage[EmptyMetadata]: ...
-
-
-@overload
-def deserialize_message[MetadataT: BaseModel](data: dict, metadata_type: type[MetadataT]) -> ChatMessage[MetadataT]: ...
+def deserialize_message[GenerationMetadataT: BaseModel](
+    data: dict,
+    generation_metadata_type: type[GenerationMetadataT],
+) -> ChatMessage[GenerationMetadataT]: ...
 
 
 def deserialize_message(
     data: dict,
-    metadata_type: type[BaseModel] = EmptyMetadata,
-) -> ChatMessage[BaseModel]:
+    generation_metadata_type: type[BaseModel] | None = None,
+) -> ChatMessage[BaseModel | None]:
     """Deserialize a ChatMessage from JSON format."""
-    if metadata_type is EmptyMetadata and data.get("metadata") is None:
-        data["metadata"] = {}
+    if generation_metadata_type is None and data.get("metadata") in (None, {}):
+        data["metadata"] = None
 
     # Use TypeAdapter for discriminated union deserialization
-    adapter = _get_chat_message_adapter(metadata_type)
+    adapter = _get_chat_message_adapter(generation_metadata_type)
     return adapter.validate_python(data)
 
 
-def serialize_messages[MetadataT: BaseModel](msgs: list[ChatMessage[MetadataT]]) -> list[dict]:
+def serialize_messages[GenerationMetadataT: BaseModel | None](msgs: list[ChatMessage[GenerationMetadataT]]) -> list[dict]:
     """Serialize a list of ChatMessages to JSON-compatible format.
 
     Args:
@@ -133,20 +136,20 @@ def _serialize_run_metadata(run_metadata: dict[str, list[Any]]) -> dict[str, lis
 
 
 @overload
-def deserialize_messages(data: list[dict]) -> list[ChatMessage[EmptyMetadata]]: ...
+def deserialize_messages(data: list[dict]) -> list[ChatMessage[None]]: ...
 
 
 @overload
-def deserialize_messages[MetadataT: BaseModel](
+def deserialize_messages[GenerationMetadataT: BaseModel](
     data: list[dict],
-    metadata_type: type[MetadataT],
-) -> list[ChatMessage[MetadataT]]: ...
+    generation_metadata_type: type[GenerationMetadataT],
+) -> list[ChatMessage[GenerationMetadataT]]: ...
 
 
 def deserialize_messages(
     data: list[dict],
-    metadata_type: type[BaseModel] = EmptyMetadata,
-) -> list[ChatMessage[BaseModel]]:
+    generation_metadata_type: type[BaseModel] | None = None,
+) -> list[ChatMessage[BaseModel | None]]:
     """Deserialize a list of ChatMessages from JSON format.
 
     Args:
@@ -155,19 +158,18 @@ def deserialize_messages(
     Returns:
         List of restored ChatMessage objects.
     """
-    return [deserialize_message(msg_data, metadata_type) for msg_data in data]
+    return [deserialize_message(msg_data, generation_metadata_type) for msg_data in data]
 
-
-class CacheState[MetadataT: BaseModel](BaseModel):
+class CacheState[GenerationMetadataT: BaseModel | None](BaseModel):
     """Serializable state for resuming an agent run.
 
     Captures all necessary state to resume execution from a specific turn.
     """
 
-    msgs: list[ChatMessage[MetadataT]]
+    msgs: list[ChatMessage[GenerationMetadataT]]
     """Current conversation messages in the active run loop."""
 
-    full_msg_history: list[list[ChatMessage[MetadataT]]]
+    full_msg_history: list[list[ChatMessage[GenerationMetadataT]]]
     """Groups of messages (separated when context summarization occurs)."""
 
     turn: int
@@ -226,10 +228,10 @@ class CacheManager:
         """Get files directory path for a task hash."""
         return self._get_cache_dir(task_hash) / "files"
 
-    def save_state[MetadataT: BaseModel](
+    def save_state[GenerationMetadataT: BaseModel | None](
         self,
         task_hash: str,
-        state: CacheState[MetadataT],
+        state: CacheState[GenerationMetadataT],
         exec_env_dir: Path | None = None,
     ) -> None:
         """Save cache state and optionally archive execution environment files.
@@ -288,20 +290,20 @@ class CacheManager:
             logger.info("Saved execution environment files to %s", files_dir)
 
     @overload
-    def load_state(self, task_hash: str) -> CacheState[EmptyMetadata] | None: ...
+    def load_state(self, task_hash: str) -> CacheState[None] | None: ...
 
     @overload
-    def load_state[MetadataT: BaseModel](
+    def load_state[GenerationMetadataT: BaseModel](
         self,
         task_hash: str,
-        metadata_type: type[MetadataT],
-    ) -> CacheState[MetadataT] | None: ...
+        generation_metadata_type: type[GenerationMetadataT],
+    ) -> CacheState[GenerationMetadataT] | None: ...
 
     def load_state(
         self,
         task_hash: str,
-        metadata_type: type[BaseModel] = EmptyMetadata,
-    ) -> CacheState[BaseModel] | None:
+        generation_metadata_type: type[BaseModel] | None = None,
+    ) -> CacheState[BaseModel | None] | None:
         """Load cached state for a task hash.
 
         Args:
@@ -318,7 +320,7 @@ class CacheManager:
         try:
             with open(state_file, encoding="utf-8") as f:
                 raw_json = f.read()
-            state_model = _get_cache_state_model(metadata_type)
+            state_model = _get_cache_state_model(generation_metadata_type)
             state = state_model.model_validate_json(raw_json)
             logger.info("Loaded cache state from %s (turn %d)", state_file, state.turn)
             return state

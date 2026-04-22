@@ -27,7 +27,6 @@ from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    EmptyMetadata,
     LLMClient,
     Reasoning,
     TokenUsage,
@@ -44,13 +43,13 @@ LOGGER = logging.getLogger(__name__)
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "default"]
 
 
-class LiteLLMClient(LLMClient[EmptyMetadata]):
+class LiteLLMClient(LLMClient[None]):
     """LiteLLM-based client supporting multiple LLM providers with unified interface.
 
     Includes automatic retries for transient failures and token usage tracking.
     """
 
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+    generation_metadata_type = None
 
     def __init__(
         self,
@@ -104,9 +103,9 @@ class LiteLLMClient(LLMClient[EmptyMetadata]):
     )
     async def generate(
         self,
-        messages: list[ChatMessage[EmptyMetadata]],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[EmptyMetadata]:
+    ) -> AssistantMessage[None]:
         """Generate assistant response with optional tool calls. Retries up to 3 times on timeout/connection errors."""
         request_start_time = perf_counter()
         r = await acompletion(
@@ -163,7 +162,7 @@ class LiteLLMClient(LLMClient[EmptyMetadata]):
         output_tokens = usage.completion_tokens
         answer_tokens = output_tokens - reasoning_tokens
 
-        return AssistantMessage[EmptyMetadata](
+        return AssistantMessage[None](
             reasoning=reasoning,
             content=msg.get("content") or "",
             tool_calls=calls,

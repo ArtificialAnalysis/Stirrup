@@ -2,7 +2,7 @@ from pydantic import BaseModel
 import pytest
 
 from stirrup.core.cache import deserialize_message, serialize_message
-from stirrup.core.models import AssistantMessage, EmptyMetadata, TokenUsage
+from stirrup.core.models import AssistantMessage, TokenUsage
 
 
 class GenerationMetadata(BaseModel):
@@ -23,7 +23,7 @@ def test_assistant_message_supports_typed_metadata() -> None:
     assert msg.metadata.request_id == "resp_123"
 
 
-def test_assistant_message_without_type_defaults_metadata_to_empty_metadata() -> None:
+def test_assistant_message_without_type_defaults_metadata_to_none() -> None:
     # Create an untyped assistant message
     msg = AssistantMessage(
         content="hi",
@@ -32,12 +32,12 @@ def test_assistant_message_without_type_defaults_metadata_to_empty_metadata() ->
     )
 
     # Assertions
-    assert isinstance(msg.metadata, EmptyMetadata)
+    assert msg.metadata is None
 
 
 def test_assistant_message_typed_metadata_cannot_be_none() -> None:
     # Verify typed metadata rejects None
-    with pytest.raises(ValueError, match="valid dictionary or instance of GenerationMetadata"):
+    with pytest.raises(ValueError, match="metadata is required"):
         AssistantMessage[GenerationMetadata](
             content="hi",
             tool_calls=[],
@@ -90,7 +90,7 @@ def test_assistant_message_metadata_round_trips_through_cache() -> None:
     assert restored.metadata.request_id == "resp_123"
 
 
-def test_assistant_message_deserialize_none_metadata_as_empty_metadata() -> None:
+def test_assistant_message_deserialize_none_metadata_as_none() -> None:
     # Deserialize a message with null metadata
     restored = deserialize_message(
         {
@@ -104,10 +104,10 @@ def test_assistant_message_deserialize_none_metadata_as_empty_metadata() -> None
 
     # Assertions
     assert isinstance(restored, AssistantMessage)
-    assert isinstance(restored.metadata, EmptyMetadata)
+    assert restored.metadata is None
 
 
-def test_assistant_message_deserialize_empty_dict_metadata_as_empty_metadata() -> None:
+def test_assistant_message_deserialize_empty_dict_metadata_as_none() -> None:
     # Deserialize a message with empty metadata
     restored = deserialize_message(
         {
@@ -121,4 +121,4 @@ def test_assistant_message_deserialize_empty_dict_metadata_as_empty_metadata() -
 
     # Assertions
     assert isinstance(restored, AssistantMessage)
-    assert isinstance(restored.metadata, EmptyMetadata)
+    assert restored.metadata is None

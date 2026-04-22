@@ -126,7 +126,7 @@ print(f"Total tokens: {aggregated['token_usage'].total}")
 
 Speed metrics are available directly on each `AssistantMessage` via `request_start_time`, `request_end_time`, and the derived `e2e_otps` property. Similarly, `ToolMessage` has `tool_start_time`, `tool_end_time`, and a `tool_duration` property.
 
-`AssistantMessage` is generic over `metadata`, which should be a Pydantic `BaseModel`. Messages without metadata default to `EmptyMetadata()`. If a client uses typed metadata, set `generation_metadata_type` to the same model.
+`AssistantMessage` is generic over `metadata`, which should be a Pydantic `BaseModel`. Messages without metadata default to `None`. If a client uses typed metadata, set `generation_metadata_type` to the same model.
 
 ## Session
 
@@ -242,16 +242,16 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 Implement the `LLMClient` protocol to create a custom client:
 
 ```python
-from stirrup.core.models import AssistantMessage, ChatMessage, EmptyMetadata, LLMClient, Tool
+from stirrup.core.models import AssistantMessage, ChatMessage, LLMClient, Tool
 
-class MyCustomClient(LLMClient[EmptyMetadata]):
-    generation_metadata_type: type[EmptyMetadata] = EmptyMetadata
+class MyCustomClient(LLMClient[None]):
+    generation_metadata_type = None
 
     async def generate(
         self,
-        messages: list[ChatMessage[EmptyMetadata]],
+        messages: list[ChatMessage[None]],
         tools: dict[str, Tool],
-    ) -> AssistantMessage[EmptyMetadata]:
+    ) -> AssistantMessage[None]:
         # Make API call and return AssistantMessage
         ...
 
