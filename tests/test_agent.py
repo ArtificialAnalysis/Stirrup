@@ -46,9 +46,10 @@ class MockLLMClient(LLMClient[None]):
 
     async def generate(
         self,
-        _messages: list[ChatMessage[None]],
-        _tools: dict[str, Tool],
+        messages: list[ChatMessage[None]],
+        tools: dict[str, Tool],
     ) -> AssistantMessage[None]:
+        del messages, tools
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
@@ -78,9 +79,10 @@ class TypedMockLLMClient(LLMClient[ChildGenerationMetadata]):
 
     async def generate(
         self,
-        _messages: list[ChatMessage[ChildGenerationMetadata]],
-        _tools: dict[str, Tool],
+        messages: list[ChatMessage[ChildGenerationMetadata]],
+        tools: dict[str, Tool],
     ) -> AssistantMessage[ChildGenerationMetadata]:
+        del messages, tools
         response = self.responses[self.call_count]
         self.call_count += 1
         return response

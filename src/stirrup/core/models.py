@@ -466,7 +466,7 @@ class ToolResult[ToolMetadataT: BaseModel | None](BaseModel):
 
     content: Content
     success: bool = True
-    metadata: ToolMetadataT = None
+    metadata: ToolMetadataT | None = None
 
 
 class EmptyParams(BaseModel):
@@ -577,7 +577,7 @@ class LLMClient[GenerationMetadataT: BaseModel | None](Protocol):
     @property
     def max_tokens(self) -> int: ...
 
-    generation_metadata_type: type[GenerationMetadataT] | None
+    generation_metadata_type: type[BaseModel] | None
 
 
 class ToolCall(BaseModel):

@@ -197,7 +197,7 @@ DEFAULT_SUB_AGENT_DESCRIPTION = "A sub agent that can be used to handle a contai
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
-class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel | None]:
+class Agent[FinishParams: BaseModel, FinishMeta: BaseModel | None, GenerationMetadataT: BaseModel | None]:
     """Agent that executes tool-using loops with automatic context management.
 
     Runs up to max_turns iterations of: LLM generation → tool execution → message accumulation.
@@ -1129,7 +1129,10 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel 
         # Try to resume from cache if requested
         if self._resume:
             state = _SESSION_STATE.get()
-            cached = cache_manager.load_state(task_hash, self._client.generation_metadata_type)
+            cached = cast(
+                CacheState[GenerationMetadataT] | None,
+                cache_manager.load_state(task_hash, self._client.generation_metadata_type),
+            )
             if cached:
                 # Restore files to exec env
                 if state.exec_env and state.exec_env.temp_dir:
@@ -1179,8 +1182,6 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel 
         # Use logger callback if available and not overridden
         step_callback = self._logger.on_step
 
-        full_msg_history: list[list[ChatMessage[GenerationMetadataT]]] = []
-
         # Cumulative stats for spinner
         total_tool_calls = 0
         total_input_tokens = 0
@@ -1188,7 +1189,11 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel 
 
         for i in range(start_turn, self._max_turns):
             # Capture current state for potential caching (before any async work)
-            cache_state_model = CacheState[self._client.generation_metadata_type]  # ty: ignore[invalid-type-form]
+            if self._client.generation_metadata_type is None:
+                cache_state_model = CacheState[None]
+            else:
+                cache_state_model = CacheState[self._client.generation_metadata_type]  # ty: ignore[invalid-type-form]
+
             self._current_run_state = cache_state_model(
                 msgs=list(msgs),
                 full_msg_history=[list(group) for group in full_msg_history],
@@ -1227,7 +1232,9 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel 
             for user_msg in user_messages:
                 self._logger.user_message(user_msg)
 
-            msgs.extend([assistant_message, *tool_messages, *user_messages])
+            msgs.append(assistant_message)
+            msgs.extend(tool_messages)
+            msgs.extend(user_messages)
 
             if finish_params:
                 break
@@ -1235,7 +1242,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel 
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
             if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
-                full_msg_history.append(msgs)
+                full_msg_history.append(list(msgs))
                 msgs = await self.summarize_messages(msgs)
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
@@ -1246,13 +1253,13 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel 
                 and not user_messages
                 and not next_turn_will_show_warning
             ):
-                msgs.extend([UserMessage(content="Please continue the task")])
+                msgs.append(UserMessage(content="Please continue the task"))
         else:
             LOGGER.error(
                 f"Maximum number of turns reached: {self._max_turns}. The agent was not able to finish the task. Consider increasing the max_turns parameter.",
             )
 
-        full_msg_history.append(msgs)
+        full_msg_history.append(list(msgs))
 
         # Add agent's own token usage, tool durations, and model speed to run_metadata
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
@@ -1427,7 +1434,7 @@ class Agent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel 
         )
 
 
-class SessionAgent[FinishParams: BaseModel, FinishMeta, GenerationMetadataT: BaseModel | None](
+class SessionAgent[FinishParams: BaseModel, FinishMeta: BaseModel | None, GenerationMetadataT: BaseModel | None](
     Agent[FinishParams, FinishMeta, GenerationMetadataT]
 ):
     """Agent running inside an active session with full tool access.
