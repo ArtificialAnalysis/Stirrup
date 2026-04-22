@@ -7,6 +7,8 @@ formats, these utilities are shared between both client implementations.
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from stirrup.core.models import (
     AssistantMessage,
     AudioContentBlock,
@@ -100,7 +102,7 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
     return out
 
 
-def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
+def to_openai_messages[MetadataT: BaseModel](msgs: list[ChatMessage[MetadataT]]) -> list[dict[str, Any]]:
     """Convert ChatMessage list to OpenAI-compatible message dictionaries.
 
     Handles all message types: SystemMessage, UserMessage, AssistantMessage,

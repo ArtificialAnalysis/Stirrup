@@ -28,6 +28,7 @@ __all__ = [
     "ChatMessage",
     "Content",
     "ContentBlock",
+    "EmptyMetadata",
     "EmptyParams",
     "ImageContentBlock",
     "LLMClient",
@@ -554,21 +555,29 @@ class ToolProvider(ABC):
 
 
 @runtime_checkable
-class LLMClient(Protocol):
+class LLMClient[MetadataT: BaseModel](Protocol):
     """Protocol defining the interface for LLM client implementations.
 
     Any LLM client must implement this protocol to work with the Agent class.
     Provides text generation with tool support and model capability inspection.
+    ``assistant_metadata_type`` is an explicit runtime hook for cache/message
+    deserialization; the generic parameter alone is not dependable enough at runtime.
     """
 
     @abstractmethod
-    async def generate(self, messages: list["ChatMessage"], tools: dict[str, Tool]) -> "AssistantMessage": ...
+    async def generate(
+        self,
+        messages: list["ChatMessage[MetadataT]"],
+        tools: dict[str, Tool],
+    ) -> "AssistantMessage[MetadataT]": ...
 
     @property
     def model_slug(self) -> str: ...
 
     @property
     def max_tokens(self) -> int: ...
+
+    assistant_metadata_type: type[MetadataT]
 
 
 class ToolCall(BaseModel):
@@ -613,16 +622,29 @@ class Reasoning(BaseModel):
     content: str
 
 
-class AssistantMessage(BaseModel):
-    """LLM response message with optional tool calls and token usage tracking."""
+class EmptyMetadata(BaseModel):
+    """Sentinel metadata used when an assistant message has no metadata payload."""
+
+
+class AssistantMessage[MetadataT: BaseModel](BaseModel):
+    """LLM response message with optional tool calls, metadata, and token usage tracking."""
 
     role: Literal["assistant"] = "assistant"
     reasoning: Reasoning | None = None
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    metadata: MetadataT = Field(default_factory=EmptyMetadata)  # type: ignore[assignment]
     request_start_time: float | None = None
     request_end_time: float | None = None
+
+    @model_validator(mode="after")
+    def _validate_metadata(self) -> Self:
+        metadata_args = getattr(self.__class__, "__pydantic_generic_metadata__", {}).get("args", ())
+        metadata_type = metadata_args[0] if metadata_args else None
+        if metadata_type not in (None, Any, EmptyMetadata) and isinstance(self.metadata, EmptyMetadata):
+            raise ValueError("metadata is required when AssistantMessage is parameterized with a metadata model")
+        return self
 
     @property
     def e2e_otps(self) -> float | None:
@@ -667,7 +689,10 @@ class ToolMessage(BaseModel):
         return duration
 
 
-type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
+type ChatMessage[MetadataT: BaseModel] = Annotated[
+    SystemMessage | UserMessage | AssistantMessage[MetadataT] | ToolMessage,
+    Field(discriminator="role"),
+]
 """Discriminated union of all message types, automatically parsed based on role field."""
 
 
@@ -677,7 +702,7 @@ class SubAgentMetadata(BaseModel):
     Implements Addable protocol to support aggregation across multiple subagent calls.
     """
 
-    message_history: list[list[ChatMessage]]
+    message_history: list[list[ChatMessage[Any]]]
     run_metadata: Annotated[dict[str, Any], Field(default_factory=dict)]
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":
