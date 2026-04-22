@@ -791,10 +791,7 @@ async def test_subagent_preserves_typed_assistant_metadata() -> None:
     assert "token_usage" in subagent_metadata.run_metadata
 
     assistant_messages = [
-        msg
-        for group in subagent_metadata.message_history
-        for msg in group
-        if isinstance(msg, AssistantMessage)
+        msg for group in subagent_metadata.message_history for msg in group if isinstance(msg, AssistantMessage)
     ]
     assert len(assistant_messages) == 1
     assert isinstance(assistant_messages[0].metadata, ChildGenerationMetadata)

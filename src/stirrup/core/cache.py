@@ -51,6 +51,7 @@ def serialize_message[GenerationMetadataT: BaseModel | None](msg: ChatMessage[Ge
     """Serialize a ChatMessage to JSON-compatible format."""
     return msg.model_dump(mode="json")
 
+
 def deserialize_message(
     data: dict,
     generation_metadata_type: type[BaseModel] | None = None,
@@ -64,6 +65,7 @@ def deserialize_message(
     else:
         adapter = TypeAdapter(ChatMessage[generation_metadata_type])  # ty: ignore[invalid-type-form]
     return adapter.validate_python(data)
+
 
 class CacheState[GenerationMetadataT: BaseModel | None](BaseModel):
     """Serializable state for resuming an agent run.
@@ -91,6 +93,7 @@ class CacheState[GenerationMetadataT: BaseModel | None](BaseModel):
 
     agent_name: str = ""
     """Name of the agent that created this cache."""
+
 
 class CacheManager:
     """Manages cache operations for agent sessions.
