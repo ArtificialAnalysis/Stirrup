@@ -55,6 +55,39 @@ class TestLocalCodeExecToolProvider:
             assert result.error_kind == "timeout"
             assert "timed out" in result.stderr.lower()
 
+    async def test_run_command_timeout_kills_descendants(self) -> None:
+        """Regression: a timed-out command must not leave orphaned grandchildren.
+
+        Without start_new_session + killpg, bash's backgrounded descendants
+        reparent to init and leak indefinitely. Uses a unique sleep duration
+        as a marker so the check is robust to concurrent processes on the host.
+        """
+        import subprocess
+        import time
+
+        marker = "919293"
+        provider = LocalCodeExecToolProvider()
+        async with provider as _:
+            result = await provider.run_command(
+                f"sleep {marker} & sleep {marker} & wait",
+                timeout=1,
+            )
+            assert result.error_kind == "timeout"
+
+        # Poll briefly for kernel to reap signalled descendants.
+        survivors: list[str] = []
+        for _ in range(10):
+            time.sleep(0.2)
+            ps = subprocess.run(
+                ["ps", "-eo", "command"], capture_output=True, text=True, check=True
+            )
+            survivors = [
+                line for line in ps.stdout.splitlines() if f"sleep {marker}" in line
+            ]
+            if not survivors:
+                break
+        assert not survivors, f"orphaned descendants after timeout: {survivors}"
+
     async def test_run_command_allowlist(self) -> None:
         """Test command allowlist enforcement."""
         provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo", r"^ls"])

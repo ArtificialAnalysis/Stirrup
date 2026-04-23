@@ -1,8 +1,10 @@
 """Local execution environment backend for code execution in an isolated temp directory."""
 
 import logging
+import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -299,12 +301,17 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         process = None
         try:
             with anyio.fail_after(timeout):
-                # Use shell=True by wrapping in a shell command
+                # start_new_session=True puts bash at the head of its own session,
+                # so pgid == child pid and we can killpg the whole tree on timeout.
+                # Without it, process.kill() only terminates root bash, leaving
+                # grandchildren reparented to init (same bug shape as the docker
+                # orphan leak that motivated this PR).
                 process = await anyio.open_process(
                     ["bash", "-c", cmd],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=self._temp_dir,
+                    start_new_session=True,
                 )
 
                 # Read all output from streams concurrently
@@ -333,7 +340,12 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
 
         except TimeoutError:
             if process:
-                process.kill()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                with anyio.move_on_after(5):
+                    await process.wait()
             return CommandResult(
                 exit_code=1,
                 stdout="",
