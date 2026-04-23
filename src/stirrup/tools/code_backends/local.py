@@ -1,5 +1,6 @@
 """Local execution environment backend for code execution in an isolated temp directory."""
 
+import contextlib
 import logging
 import os
 import re
@@ -340,10 +341,8 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
 
         except TimeoutError:
             if process:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 with anyio.move_on_after(5):
                     await process.wait()
             return CommandResult(

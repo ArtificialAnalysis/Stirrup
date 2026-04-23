@@ -63,7 +63,8 @@ class TestLocalCodeExecToolProvider:
         as a marker so the check is robust to concurrent processes on the host.
         """
         import subprocess
-        import time
+
+        import anyio
 
         marker = "919293"
         provider = LocalCodeExecToolProvider()
@@ -74,12 +75,15 @@ class TestLocalCodeExecToolProvider:
             )
             assert result.error_kind == "timeout"
 
+        def list_survivors() -> list[str]:
+            ps = subprocess.run(["ps", "-eo", "command"], capture_output=True, text=True, check=True)
+            return [line for line in ps.stdout.splitlines() if f"sleep {marker}" in line]
+
         # Poll briefly for kernel to reap signalled descendants.
         survivors: list[str] = []
         for _ in range(10):
-            time.sleep(0.2)
-            ps = subprocess.run(["ps", "-eo", "command"], capture_output=True, text=True, check=True)
-            survivors = [line for line in ps.stdout.splitlines() if f"sleep {marker}" in line]
+            await anyio.sleep(0.2)
+            survivors = await anyio.to_thread.run_sync(list_survivors)
             if not survivors:
                 break
         assert not survivors, f"orphaned descendants after timeout: {survivors}"
