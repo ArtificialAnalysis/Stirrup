@@ -78,12 +78,8 @@ class TestLocalCodeExecToolProvider:
         survivors: list[str] = []
         for _ in range(10):
             time.sleep(0.2)
-            ps = subprocess.run(
-                ["ps", "-eo", "command"], capture_output=True, text=True, check=True
-            )
-            survivors = [
-                line for line in ps.stdout.splitlines() if f"sleep {marker}" in line
-            ]
+            ps = subprocess.run(["ps", "-eo", "command"], capture_output=True, text=True, check=True)
+            survivors = [line for line in ps.stdout.splitlines() if f"sleep {marker}" in line]
             if not survivors:
                 break
         assert not survivors, f"orphaned descendants after timeout: {survivors}"
