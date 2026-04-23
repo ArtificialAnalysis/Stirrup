@@ -583,7 +583,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             if exit_code in (124, 137):
                 logger.warning("Command timed out after %d seconds: %s", timeout, cmd[:100])
                 return CommandResult(
-                    exit_code=1,
+                    exit_code=exit_code,
                     stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
                     stderr=f"Command timed out after {timeout} seconds",
                     error_kind="timeout",
