@@ -7,8 +7,9 @@ import shlex
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Self
+from typing import ClassVar, Self
 
+import anyio
 from anyio import fail_after, to_thread
 from dotenv import load_dotenv
 
@@ -72,6 +73,21 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         async with agent.session() as session:
             await session.run("Run Python code")
     """
+
+    # Serialize image prepare per image name across the whole process. The
+    # Docker daemon can return transient ImageNotFound on `GET /images/<tag>`
+    # while another concurrent task is creating a container from the same
+    # image; without serialization the second task would fall into the pull
+    # branch and surface a 404 for images without a registry (e.g. `:local`).
+    _image_prep_locks: ClassVar[dict[str, anyio.Lock]] = {}
+
+    @classmethod
+    def _get_image_lock(cls, image_name: str) -> anyio.Lock:
+        lock = cls._image_prep_locks.get(image_name)
+        if lock is None:
+            lock = anyio.Lock()
+            cls._image_prep_locks[image_name] = lock
+        return lock
 
     def __init__(
         self,
@@ -315,16 +331,27 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             # Pull pre-built image
             image_name = str(self._source)
 
-            try:
-                # Check if image exists locally
-                await to_thread.run_sync(client.images.get, image_name)
-                logger.debug("Image %s found locally", image_name)
-            except ImageNotFound:
-                logger.info("Pulling image: %s", image_name)
+            async with self._get_image_lock(image_name):
                 try:
-                    await to_thread.run_sync(client.images.pull, image_name)
-                except APIError as exc:
-                    raise RuntimeError(f"Failed to pull Docker image '{image_name}': {exc}") from exc
+                    # Check if image exists locally
+                    await to_thread.run_sync(client.images.get, image_name)
+                    logger.debug("Image %s found locally", image_name)
+                except ImageNotFound:
+                    logger.info("Pulling image: %s", image_name)
+                    try:
+                        await to_thread.run_sync(client.images.pull, image_name)
+                    except APIError as exc:
+                        # If a sibling task finished preparing the image
+                        # between our get() and pull(), a retry will succeed
+                        # and we can continue rather than surface the 404.
+                        try:
+                            await to_thread.run_sync(client.images.get, image_name)
+                        except ImageNotFound:
+                            raise RuntimeError(f"Failed to pull Docker image '{image_name}': {exc}") from exc
+                        logger.debug(
+                            "Pull of %s failed but image is present locally; continuing",
+                            image_name,
+                        )
 
             return image_name
 
