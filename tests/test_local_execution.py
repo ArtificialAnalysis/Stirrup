@@ -65,6 +65,7 @@ class TestLocalCodeExecToolProvider:
         import subprocess
 
         import anyio
+        from anyio.to_thread import run_sync
 
         marker = "919293"
         provider = LocalCodeExecToolProvider()
@@ -83,7 +84,7 @@ class TestLocalCodeExecToolProvider:
         survivors: list[str] = []
         for _ in range(10):
             await anyio.sleep(0.2)
-            survivors = await anyio.to_thread.run_sync(list_survivors)
+            survivors = await run_sync(list_survivors)
             if not survivors:
                 break
         assert not survivors, f"orphaned descendants after timeout: {survivors}"
