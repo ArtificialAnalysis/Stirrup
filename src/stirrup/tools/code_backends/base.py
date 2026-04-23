@@ -146,16 +146,27 @@ class CodeExecToolProvider(ToolProvider, ABC):
         )
     """
 
-    def __init__(self, *, allowed_commands: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        allowed_commands: list[str] | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
+    ) -> None:
         """Initialize execution environment with optional command allowlist.
 
         Args:
             allowed_commands: Optional list of regex patterns. If provided, only
                              commands matching at least one pattern are allowed.
                              If None, all commands are allowed.
+            shell_timeout: Per-command wall-clock timeout (seconds) applied to
+                           every ``code_exec`` invocation from the LLM. Defaults
+                           to ``SHELL_TIMEOUT``. Callers should set this to match
+                           their application's expected long-running-command
+                           budget rather than rely on the stirrup default.
 
         """
         self._allowed_commands = allowed_commands
+        self._shell_timeout = shell_timeout
         self._compiled_allowed: list[re.Pattern[str]] | None = None
         if allowed_commands is not None:
             self._compiled_allowed = [re.compile(p) for p in allowed_commands]
@@ -459,9 +470,10 @@ class CodeExecToolProvider(ToolProvider, ABC):
 
         """
         env = self
+        shell_timeout = self._shell_timeout
 
         async def executor(params: CodeExecutionParams) -> ToolResult[ToolUseCountMetadata]:
-            result = await env.run_command(params.cmd)
+            result = await env.run_command(params.cmd, timeout=shell_timeout)
             return format_result(result)
 
         return Tool[CodeExecutionParams, ToolUseCountMetadata](
