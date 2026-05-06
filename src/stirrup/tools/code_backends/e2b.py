@@ -1,5 +1,6 @@
 """E2B cloud execution environment backend for code execution."""
 
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -57,6 +58,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         request_timeout: int = SANDBOX_REQUEST_TIMEOUT,
         template: str | None = None,
         allowed_commands: list[str] | None = None,
+        create_gate: AbstractAsyncContextManager[object] | None = None,
     ) -> None:
         """Initialize E2B execution environment configuration.
 
@@ -66,6 +68,12 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             allowed_commands: Optional list of regex patterns. If provided, only
                              commands matching at least one pattern are allowed.
                              If None, all commands are allowed.
+            create_gate: Optional async context manager entered immediately before
+                         each AsyncSandbox.create() call. Use to throttle/serialize
+                         sandbox creation when many providers start concurrently —
+                         e.g., pass a shared
+                         ``stirrup.utils.AsyncTokenBucket(rate_per_sec=5.0)`` to
+                         stay within E2B's per-account /sandboxes rate limit.
 
         """
         super().__init__(allowed_commands=allowed_commands)
@@ -73,14 +81,21 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         self._request_timeout = request_timeout
         self._template = template
         self._sbx: AsyncSandbox | None = None
+        self._create_gate = create_gate
 
     async def __aenter__(self) -> Tool[CodeExecutionParams, ToolUseCountMetadata]:
         """Initialize the E2B sandbox environment and return the code_exec tool."""
-        if self._template:
-            self._sbx = await AsyncSandbox.create(timeout=self._timeout, template=self._template)
+        if self._create_gate is not None:
+            async with self._create_gate:
+                self._sbx = await self._create_sandbox()
         else:
-            self._sbx = await AsyncSandbox.create(timeout=self._timeout)
+            self._sbx = await self._create_sandbox()
         return self.get_code_exec_tool()
+
+    async def _create_sandbox(self) -> AsyncSandbox:
+        if self._template:
+            return await AsyncSandbox.create(timeout=self._timeout, template=self._template)
+        return await AsyncSandbox.create(timeout=self._timeout)
 
     async def __aexit__(
         self,
