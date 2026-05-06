@@ -27,6 +27,7 @@ class MockLLMClient(LLMClient):
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
+        self.tools_seen: list[dict[str, Tool]] = []
 
     @property
     def model_slug(self) -> str:
@@ -37,6 +38,7 @@ class MockLLMClient(LLMClient):
         return self._max_tokens
 
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+        self.tools_seen.append(tools)
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
@@ -347,6 +349,183 @@ async def test_agent_finish_tool_validation() -> None:
     assert finish_params is not None
     assert finish_params.reason == "Task done"
     assert finish_params.status == "complete"
+
+
+async def test_agent_accepts_multiple_finish_tools() -> None:
+    """Test agent terminates when any configured finish tool succeeds."""
+
+    class SubmitFilesParams(BaseModel):
+        reason: str
+        paths: list[str]
+
+    class FinishWithoutFilesParams(BaseModel):
+        reason: str
+
+    def submit_files_executor(params: SubmitFilesParams) -> ToolResult:
+        return ToolResult(content=params.reason, success=bool(params.paths))
+
+    def finish_without_files_executor(params: FinishWithoutFilesParams) -> ToolResult:
+        return ToolResult(content=params.reason, success=True)
+
+    submit_files_tool = Tool[SubmitFilesParams, None](
+        name="submit_files",
+        description="Finish the task and submit created files",
+        parameters=SubmitFilesParams,
+        executor=submit_files_executor,  # ty: ignore[invalid-argument-type]
+    )
+    finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
+        name="finish_without_files",
+        description="Finish the task without submitting files",
+        parameters=FinishWithoutFilesParams,
+        executor=finish_without_files_executor,  # ty: ignore[invalid-argument-type]
+    )
+
+    responses = [
+        AssistantMessage(
+            content="No files to submit",
+            tool_calls=[
+                ToolCall(
+                    name="finish_without_files",
+                    arguments='{"reason": "Task completed without files"}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        )
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=[submit_files_tool, finish_without_files_tool],
+    )
+
+    async with agent.session() as session:
+        finish_params, _, run_metadata = await session.run([UserMessage(content="Test task")])
+
+    assert finish_params is not None
+    assert isinstance(finish_params, FinishWithoutFilesParams)
+    assert finish_params.reason == "Task completed without files"
+    assert client.call_count == 1
+    assert set(agent.finish_tools) == {"submit_files", "finish_without_files"}
+    assert set(client.tools_seen[0]) == {"submit_files", "finish_without_files"}
+    assert "finish_without_files" in run_metadata
+
+
+async def test_finish_tool_property_requires_single_finish_tool() -> None:
+    """Test finish_tool property is only valid when one finish tool is configured."""
+
+    class SubmitFilesParams(BaseModel):
+        reason: str
+        paths: list[str]
+
+    class FinishWithoutFilesParams(BaseModel):
+        reason: str
+
+    submit_files_tool = Tool[SubmitFilesParams, None](
+        name="submit_files",
+        description="Finish the task and submit created files",
+        parameters=SubmitFilesParams,
+        executor=lambda params: ToolResult(content=params.reason),  # ty: ignore[invalid-argument-type]
+    )
+    finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
+        name="finish_without_files",
+        description="Finish the task without submitting files",
+        parameters=FinishWithoutFilesParams,
+        executor=lambda params: ToolResult(content=params.reason),  # ty: ignore[invalid-argument-type]
+    )
+
+    agent = Agent(
+        client=MockLLMClient([]),
+        name="test-agent",
+        tools=[],
+        finish_tool=[submit_files_tool, finish_without_files_tool],
+    )
+
+    try:
+        _ = agent.finish_tool
+    except ValueError as exc:
+        assert "multiple finish tools" in str(exc)
+    else:
+        raise AssertionError("finish_tool should fail when multiple finish tools are configured")
+
+
+async def test_agent_continues_after_failed_finish_tool_from_multiple_finish_tools() -> None:
+    """Test a failed finish tool call does not terminate when multiple finish tools are configured."""
+
+    class SubmitFilesParams(BaseModel):
+        reason: str
+        paths: list[str]
+
+    class FinishWithoutFilesParams(BaseModel):
+        reason: str
+
+    def submit_files_executor(params: SubmitFilesParams) -> ToolResult:
+        return ToolResult(content=params.reason, success=bool(params.paths))
+
+    def finish_without_files_executor(params: FinishWithoutFilesParams) -> ToolResult:
+        return ToolResult(content=params.reason, success=True)
+
+    submit_files_tool = Tool[SubmitFilesParams, None](
+        name="submit_files",
+        description="Finish the task and submit created files",
+        parameters=SubmitFilesParams,
+        executor=submit_files_executor,  # ty: ignore[invalid-argument-type]
+    )
+    finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
+        name="finish_without_files",
+        description="Finish the task without submitting files",
+        parameters=FinishWithoutFilesParams,
+        executor=finish_without_files_executor,  # ty: ignore[invalid-argument-type]
+    )
+
+    responses = [
+        AssistantMessage(
+            content="Trying to submit without files",
+            tool_calls=[
+                ToolCall(
+                    name="submit_files",
+                    arguments='{"reason": "No files yet", "paths": []}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Finishing without files",
+            tool_calls=[
+                ToolCall(
+                    name="finish_without_files",
+                    arguments='{"reason": "No files needed"}',
+                    tool_call_id="call_2",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=[submit_files_tool, finish_without_files_tool],
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    assert client.call_count == 2
+    assert finish_params is not None
+    assert isinstance(finish_params, FinishWithoutFilesParams)
+    assert finish_params.reason == "No files needed"
+
+    tool_messages = [msg for group in history for msg in group if isinstance(msg, ToolMessage)]
+    assert len([msg for msg in tool_messages if msg.name == "submit_files" and not msg.success]) == 1
 
 
 async def test_finish_tool_validates_file_paths() -> None:

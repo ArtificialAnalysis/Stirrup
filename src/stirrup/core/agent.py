@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field, ValidationError
 from stirrup.constants import (
     AGENT_MAX_TURNS,
     CONTEXT_SUMMARIZATION_CUTOFF,
-    FINISH_TOOL_NAME,
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
@@ -97,9 +96,9 @@ LOGGER = logging.getLogger(__name__)
 def _num_turns_remaining_msg(number_of_turns_remaining: int) -> UserMessage:
     """Create a user message warning the agent about remaining turns before max_turns is reached."""
     if number_of_turns_remaining == 1:
-        return UserMessage(content="This is the last turn. Please finish the task by calling the finish tool.")
+        return UserMessage(content="This is the last turn. Please finish the task by calling a finish tool.")
     return UserMessage(
-        content=f"You have {number_of_turns_remaining} turns remaining to complete the task. Please continue. Remember you will need a separate turn to finish the task.",
+        content=f"You have {number_of_turns_remaining} turns remaining to complete the task. Please continue. Remember you will need a separate turn to call a finish tool.",
     )
 
 
@@ -120,6 +119,32 @@ def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[
                     raise NotImplementedError(f"Unsupported content block: {type(block)}")
 
     return tool_messages, user_messages
+
+
+def _normalize_finish_tools[FinishParams: BaseModel, FinishMeta](
+    finish_tool: Tool[FinishParams, FinishMeta] | list[Tool] | None,
+) -> dict[str, Tool[Any, Any]]:
+    """Normalize a single finish tool or list of finish tools into a name-keyed mapping."""
+    finish_tools: list[Tool]
+    if finish_tool is None:
+        finish_tools = [SIMPLE_FINISH_TOOL]
+    elif isinstance(finish_tool, list):
+        if not finish_tool:
+            raise ValueError("finish_tool list cannot be empty")
+        finish_tools = finish_tool
+    else:
+        finish_tools = [finish_tool]
+
+    seen_names: set[str] = set()
+    duplicate_names: set[str] = set()
+    for tool in finish_tools:
+        if tool.name in seen_names:
+            duplicate_names.add(tool.name)
+        seen_names.add(tool.name)
+    if duplicate_names:
+        raise ValueError(f"Finish tools must have unique names, found duplicates: {sorted(duplicate_names)}")
+
+    return {tool.name: tool for tool in finish_tools}
 
 
 def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage]:
@@ -225,7 +250,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         max_turns: int = AGENT_MAX_TURNS,
         system_prompt: str | None = None,
         tools: list[Tool | ToolProvider] | None = None,
-        finish_tool: Tool[FinishParams, FinishMeta] | None = None,
+        finish_tool: Tool[FinishParams, FinishMeta] | list[Tool] | None = None,
         # Agent options
         context_summarization_cutoff: float = CONTEXT_SUMMARIZATION_CUTOFF,
         turns_remaining_warning_threshold: int = TURNS_REMAINING_WARNING_THRESHOLD,
@@ -249,7 +274,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                    If None, uses DEFAULT_TOOLS. ToolProviders are automatically
                    set up and torn down by Agent.session().
                    Use [*DEFAULT_TOOLS, extra_tool] to extend defaults.
-            finish_tool: Tool used to signal task completion. Defaults to SIMPLE_FINISH_TOOL.
+            finish_tool: Tool or list of Tools used to signal task completion.
+                         Defaults to SIMPLE_FINISH_TOOL. If a list is provided,
+                         a successful call to any listed tool ends the run.
             context_summarization_cutoff: Fraction of context window (0-1) at which to trigger summarization
             run_sync_in_thread: Execute synchronous tool executors in a separate thread
             text_only_tool_responses: Extract images from tool responses as separate user messages
@@ -277,7 +304,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._max_turns = max_turns
         self._system_prompt = system_prompt
         self._tools = tools if tools is not None else DEFAULT_TOOLS
-        self._finish_tool: Tool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
+        self._finish_tools: dict[str, Tool[Any, Any]] = _normalize_finish_tools(finish_tool)
         self._context_summarization_cutoff = context_summarization_cutoff
         self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
         self._run_sync_in_thread = run_sync_in_thread
@@ -296,11 +323,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._clear_cache_on_success: bool = True
         self._cache_on_interrupt: bool = True
 
-        # Eagerly register static tools + finish tool (available without a session)
-        self._active_tools: dict[str, Tool] = {FINISH_TOOL_NAME: self._finish_tool}
+        # Eagerly register static tools + finish tools (available without a session)
+        self._active_tools: dict[str, Tool] = {}
         for tool in self._tools:
             if isinstance(tool, Tool):
                 self._active_tools[tool.name] = tool
+        self._active_tools.update(self._finish_tools)
         self._has_tool_providers = any(isinstance(t, ToolProvider) for t in self._tools)
 
         self._last_finish_params: Any = None  # FinishParams type parameter
@@ -328,8 +356,17 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
     @property
     def finish_tool(self) -> Tool:
-        """The finish tool used to signal task completion."""
-        return self._finish_tool
+        """The single finish tool used to signal task completion."""
+        if len(self._finish_tools) != 1:
+            raise ValueError(
+                "Agent has multiple finish tools configured. Use finish_tools to access all finish tools by name."
+            )
+        return next(iter(self._finish_tools.values()))
+
+    @property
+    def finish_tools(self) -> dict[str, Tool]:
+        """All finish tools keyed by name."""
+        return self._finish_tools
 
     @property
     def logger(self) -> AgentLoggerBase:
@@ -699,8 +736,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     # Static Tool, use directly
                     active_tools.append(tool)
 
-            # Merge session-initialized tools into _active_tools (static tools already registered at init)
+            # Merge session-initialized tools into _active_tools and ensure finish tools take precedence.
             self._active_tools.update({t.name: t for t in active_tools})
+            self._active_tools.update(self._finish_tools)
 
             # Validate subagent code exec requirements (only at root level)
             if current_depth == 0:
@@ -936,10 +974,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             self._logger.__exit__(exc_type, exc_val, exc_tb)
 
             # Reset active tools to static-only (remove session-initialized tools)
-            self._active_tools = {FINISH_TOOL_NAME: self._finish_tool}
+            self._active_tools = {}
             for tool in self._tools:
                 if isinstance(tool, Tool):
                     self._active_tools[tool.name] = tool
+            self._active_tools.update(self._finish_tools)
 
             # Cleanup all async resources
             await state.exit_stack.__aexit__(exc_type, exc_val, exc_tb)
@@ -1039,8 +1078,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
 
-                if tool_message.success and tool_message.name == FINISH_TOOL_NAME:
-                    finish_params = self._finish_tool.parameters.model_validate_json(tool_call.arguments)
+                if tool_message.success and tool_message.name in self._finish_tools:
+                    finish_tool = self._finish_tools[tool_message.name]
+                    finish_params = finish_tool.parameters.model_validate_json(tool_call.arguments)
 
                 # Log tool result immediately
                 self._logger.tool_result(tool_message)
