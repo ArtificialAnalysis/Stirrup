@@ -72,8 +72,10 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                          each AsyncSandbox.create() call. Use to throttle/serialize
                          sandbox creation when many providers start concurrently —
                          e.g., pass a shared
-                         ``stirrup.utils.AsyncTokenBucket(rate_per_sec=5.0)`` to
-                         stay within E2B's per-account /sandboxes rate limit.
+                         ``aiolimiter.AsyncLimiter(max_rate=5, time_period=1)`` to
+                         stay within E2B's per-account /sandboxes rate limit. Note
+                         that AsyncLimiter's default ``time_period`` is 60s, so
+                         pass ``time_period=1`` for a per-second cap.
 
         """
         super().__init__(allowed_commands=allowed_commands)
