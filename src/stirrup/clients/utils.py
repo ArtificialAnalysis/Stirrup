@@ -68,18 +68,22 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
         content: Either a string or list of content blocks.
 
     Returns:
-        List of content dictionaries in OpenAI format, or the original string
-        wrapped in a text content block.
+        List of content dictionaries in OpenAI format; a non-empty string is wrapped
+        as a single text part. Empty string/list with no parts becomes ``""``
 
     Raises:
         NotImplementedError: If an unsupported content block type is encountered.
     """
     if isinstance(content, str):
+        if content == "":
+            return ""
         return [{"type": "text", "text": content}]
 
     out: list[dict[str, Any]] = []
     for block in content:
         if isinstance(block, str):
+            if block == "":
+                continue
             out.append({"type": "text", "text": block})
         elif isinstance(block, ImageContentBlock):
             out.append({"type": "image_url", "image_url": {"url": block.to_base64_url()}})
@@ -97,6 +101,8 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
             out.append({"type": "file", "file": {"file_data": block.to_base64_url()}})
         else:
             raise NotImplementedError(f"Unsupported content block: {type(block)}")
+    if not out:
+        return ""
     return out
 
 
