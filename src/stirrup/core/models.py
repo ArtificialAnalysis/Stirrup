@@ -250,13 +250,35 @@ class Addable(Protocol):
     def __add__(self, other: Self) -> Self: ...
 
 
+def _merge_dicts(a: dict, b: dict) -> dict:
+    """Deep merge two dicts, recursively merging nested dicts and summing numbers."""
+    merged = dict(a)
+    for key, value in b.items():
+        if key in merged:
+            existing = merged[key]
+            if isinstance(existing, dict) and isinstance(value, dict):
+                merged[key] = _merge_dicts(existing, value)
+            elif (isinstance(existing, int | float) and isinstance(value, int | float)) or (
+                isinstance(existing, list) and isinstance(value, list)
+            ):
+                merged[key] = existing + value
+            else:
+                merged[key] = value
+        else:
+            merged[key] = value
+    return merged
+
+
 def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
-    """Aggregate a list of metadata using __add__."""
+    """Aggregate a list of metadata using __add__, with fallback for dicts."""
     if not metadata_list:
         return None
-    aggregated = metadata_list[0]
+    aggregated: T = metadata_list[0]
     for m in metadata_list[1:]:
-        aggregated = aggregated + m
+        if isinstance(aggregated, dict) and isinstance(m, dict):
+            aggregated = _merge_dicts(aggregated, m)  # type: ignore[assignment]
+        else:
+            aggregated = aggregated + m  # type: ignore[assignment]
     return aggregated
 
 

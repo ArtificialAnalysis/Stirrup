@@ -88,6 +88,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         template: str | None = None,
         allowed_commands: list[str] | None = None,
         create_gate: AbstractAsyncContextManager[object] | None = None,
+        sandbox_kwargs: dict | None = None,
     ) -> None:
         """Initialize E2B execution environment configuration.
 
@@ -97,6 +98,10 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             allowed_commands: Optional list of regex patterns. If provided, only
                              commands matching at least one pattern are allowed.
                              If None, all commands are allowed.
+            sandbox_kwargs: Additional keyword arguments forwarded to
+                            ``AsyncSandbox.create`` (e.g. ``allow_internet_access=False``,
+                            ``metadata={...}``, ``envs={...}``). ``timeout`` and
+                            ``template`` take precedence over matching keys here.
             create_gate: Optional async context manager entered immediately before
                          each AsyncSandbox.create() call. Use to throttle/serialize
                          sandbox creation when many providers start concurrently —
@@ -112,22 +117,23 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         self._timeout = timeout
         self._request_timeout = request_timeout
         self._template = template
+        self._sandbox_kwargs = sandbox_kwargs or {}
         self._sbx: AsyncSandbox | None = None
         self._create_gate = create_gate
 
     async def __aenter__(self) -> Tool[CodeExecutionParams, ToolUseCountMetadata]:
         """Initialize the E2B sandbox environment and return the code_exec tool."""
+        kwargs: dict = {**self._sandbox_kwargs, "timeout": self._timeout}
+        if self._template:
+            kwargs["template"] = self._template
+
         if self._create_gate is not None:
             async with self._create_gate:
-                self._sbx = await self._create_sandbox()
+                self._sbx = await AsyncSandbox.create(**kwargs)
         else:
-            self._sbx = await self._create_sandbox()
-        return self.get_code_exec_tool()
+            self._sbx = await AsyncSandbox.create(**kwargs)
 
-    async def _create_sandbox(self) -> AsyncSandbox:
-        if self._template:
-            return await AsyncSandbox.create(timeout=self._timeout, template=self._template)
-        return await AsyncSandbox.create(timeout=self._timeout)
+        return self.get_code_exec_tool()
 
     async def __aexit__(
         self,
