@@ -11,6 +11,7 @@ from math import isinf, isnan, sqrt
 from tempfile import NamedTemporaryFile
 from types import TracebackType
 from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, overload, runtime_checkable
+from uuid import uuid4
 
 import filetype
 from moviepy import AudioFileClip, VideoFileClip
@@ -102,7 +103,7 @@ class BinaryContentBlock(BaseModel, ABC):
     def _check_mime(self) -> Self:
         """Validate MIME type against allowed list and verify content is readable."""
         if self.allowed_mime_types and self.mime_type not in self.allowed_mime_types:
-            raise ValueError("Unsupported mime_type {self.mime_type!r}; allowed: {allowed}")
+            raise ValueError(f"Unsupported mime_type {self.mime_type!r}; allowed: {self.allowed_mime_types}")
         self._probe()  # light corruption check; no heavy work
         return self
 
@@ -118,6 +119,7 @@ class ImageContentBlock(BinaryContentBlock):
     allowed_mime_types: ClassVar[set[str]] = {
         "image/jpeg",  # JPEG
         "image/png",  # PNG
+        "image/webp",  # WebP
         "image/gif",  # GIF
         "image/bmp",  # BMP
         "image/tiff",  # TIFF
@@ -250,13 +252,35 @@ class Addable(Protocol):
     def __add__(self, other: Self) -> Self: ...
 
 
+def _merge_dicts(a: dict, b: dict) -> dict:
+    """Deep merge two dicts, recursively merging nested dicts and summing numbers."""
+    merged = dict(a)
+    for key, value in b.items():
+        if key in merged:
+            existing = merged[key]
+            if isinstance(existing, dict) and isinstance(value, dict):
+                merged[key] = _merge_dicts(existing, value)
+            elif (isinstance(existing, int | float) and isinstance(value, int | float)) or (
+                isinstance(existing, list) and isinstance(value, list)
+            ):
+                merged[key] = existing + value
+            else:
+                merged[key] = value
+        else:
+            merged[key] = value
+    return merged
+
+
 def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
-    """Aggregate a list of metadata using __add__."""
+    """Aggregate a list of metadata using __add__, with fallback for dicts."""
     if not metadata_list:
         return None
-    aggregated = metadata_list[0]
+    aggregated: T = metadata_list[0]
     for m in metadata_list[1:]:
-        aggregated = aggregated + m
+        if isinstance(aggregated, dict) and isinstance(m, dict):
+            aggregated = _merge_dicts(aggregated, m)  # type: ignore[assignment]
+        else:
+            aggregated = aggregated + m  # type: ignore[assignment]
     return aggregated
 
 
@@ -616,11 +640,13 @@ class Reasoning(BaseModel):
 class AssistantMessage(BaseModel):
     """LLM response message with optional tool calls and token usage tracking."""
 
+    id: str = Field(default_factory=lambda: uuid4().hex)
     role: Literal["assistant"] = "assistant"
     reasoning: Reasoning | None = None
     content: Content
     tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
     token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    metadata: dict[str, Any] = Field(default_factory=dict)
     request_start_time: float | None = None
     request_end_time: float | None = None
 

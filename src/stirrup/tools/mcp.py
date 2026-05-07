@@ -37,7 +37,16 @@ from typing import Any, Self
 from json_schema_to_pydantic import create_model
 from pydantic import BaseModel, Field, model_validator
 
-from stirrup.core.models import Tool, ToolProvider, ToolResult, ToolUseCountMetadata
+from stirrup.core.models import (
+    AudioContentBlock,
+    Content,
+    ContentBlock,
+    ImageContentBlock,
+    Tool,
+    ToolProvider,
+    ToolResult,
+    ToolUseCountMetadata,
+)
 
 # MCP imports (optional dependency)
 try:
@@ -45,6 +54,15 @@ try:
     from mcp.client.sse import sse_client
     from mcp.client.stdio import stdio_client
     from mcp.client.streamable_http import streamablehttp_client
+    from mcp.types import (
+        AudioContent as MCPAudioContent,
+    )
+    from mcp.types import (
+        ImageContent as MCPImageContent,
+    )
+    from mcp.types import (
+        TextContent as MCPTextContent,
+    )
 except ImportError as e:
     raise ImportError(
         "Requires installation of the mcp extra. Install with (for example): `uv pip install stirrup[mcp]` or `uv add stirrup[mcp]`",
@@ -345,7 +363,29 @@ class MCPToolProvider(ToolProvider):
         """
         return {server: [t["name"] for t in tools] for server, tools in self._tools.items()}
 
-    async def call_tool(self, server: str, tool_name: str, arguments: dict[str, Any]) -> str:
+    def _convert_mcp_content(self, content_blocks: list[Any]) -> Content:
+        """Convert MCP content blocks into Stirrup content blocks."""
+        content: list[ContentBlock] = []
+
+        for block in content_blocks:
+            if isinstance(block, MCPTextContent):
+                content.append(block.text)
+                continue
+            if isinstance(block, MCPImageContent):
+                content.append(ImageContentBlock(data=block.data))
+                continue
+            if isinstance(block, MCPAudioContent):
+                content.append(AudioContentBlock(data=block.data))
+                continue
+            raise TypeError(f"Unsupported MCP content block: {type(block).__name__}")
+
+        if not content:
+            return ""
+        if len(content) == 1 and isinstance(content[0], str):
+            return content[0]
+        return content
+
+    async def call_tool(self, server: str, tool_name: str, arguments: dict[str, Any]) -> Content:
         """Call a tool on a specific MCP server.
 
         Args:
@@ -354,7 +394,7 @@ class MCPToolProvider(ToolProvider):
             arguments: Arguments to pass to the tool.
 
         Returns:
-            Tool result as a string (text content extracted from response).
+            Tool result converted into Stirrup content blocks.
 
         Raises:
             ValueError: If server is not connected.
@@ -364,10 +404,7 @@ class MCPToolProvider(ToolProvider):
             raise ValueError(f"Server '{server}' not connected. Available: {self.servers}")
 
         result = await session.call_tool(tool_name, arguments)
-
-        # Extract text content from result
-        text_parts = [str(content.text) for content in result.content if hasattr(content, "text")]
-        return "\n".join(text_parts)
+        return self._convert_mcp_content(result.content)
 
     def get_all_tools(self) -> list[Tool[Any, ToolUseCountMetadata]]:
         """Get individual Tool objects for each tool from all connected MCP servers.
@@ -403,15 +440,14 @@ class MCPToolProvider(ToolProvider):
                     _tool: str = mcp_tool_name,
                 ) -> ToolResult[ToolUseCountMetadata]:
                     content = await self.call_tool(_server, _tool, params.model_dump())
-                    xml_content = f"<mcp_result>\n{content}\n</mcp_result>"
-                    return ToolResult(content=xml_content, metadata=ToolUseCountMetadata())
+                    return ToolResult(content=content, metadata=ToolUseCountMetadata())
 
                 tools.append(
                     Tool(
                         name=unique_name,
                         description=tool_info.get("description") or f"Tool '{mcp_tool_name}' from {server_name}",
                         parameters=params_model,
-                        executor=executor,  # ty: ignore[invalid-argument-type]
+                        executor=executor,
                     )
                 )
 

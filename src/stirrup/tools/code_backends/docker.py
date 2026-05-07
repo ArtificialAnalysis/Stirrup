@@ -7,8 +7,9 @@ import shlex
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Self
+from typing import ClassVar, Self
 
+import anyio
 from anyio import fail_after, to_thread
 from dotenv import load_dotenv
 
@@ -72,6 +73,31 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         async with agent.session() as session:
             await session.run("Run Python code")
     """
+
+    # Serialize image prepare per image name across the whole process. The
+    # Docker daemon can return transient ImageNotFound on `GET /images/<tag>`
+    # while another concurrent task is creating a container from the same
+    # image; without serialization the second task would fall into the pull
+    # branch and surface a 404 for images without a registry (e.g. `:local`).
+    # Note: this is intra-process only — multiple processes sharing a Docker
+    # daemon will still race, but the retry fallback in `_prepare_image`
+    # keeps behavior correct in that case. The dict grows unboundedly (one
+    # entry per distinct image name) for the lifetime of the process; for
+    # services that prepare many short-lived `:local` tags this is a slow
+    # leak, but the per-entry cost is a single lock object so a refcounted
+    # cleanup isn't worth the complexity.
+    _image_prep_locks: ClassVar[dict[str, anyio.Lock]] = {}
+
+    @classmethod
+    def _get_image_lock(cls, image_name: str) -> anyio.Lock:
+        # Invariant: no `await` between the .get() and __setitem__ below —
+        # asyncio's cooperative scheduling makes this check-then-set safe
+        # only as long as nothing yields the event loop in between.
+        lock = cls._image_prep_locks.get(image_name)
+        if lock is None:
+            lock = anyio.Lock()
+            cls._image_prep_locks[image_name] = lock
+        return lock
 
     def __init__(
         self,
@@ -326,16 +352,32 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             # Pull pre-built image
             image_name = str(self._source)
 
-            try:
-                # Check if image exists locally
-                await to_thread.run_sync(client.images.get, image_name)
-                logger.debug("Image %s found locally", image_name)
-            except ImageNotFound:
-                logger.info("Pulling image: %s", image_name)
+            async with self._get_image_lock(image_name):
                 try:
-                    await to_thread.run_sync(client.images.pull, image_name)
-                except APIError as exc:
-                    raise RuntimeError(f"Failed to pull Docker image '{image_name}': {exc}") from exc
+                    # Check if image exists locally
+                    await to_thread.run_sync(client.images.get, image_name)
+                    logger.debug("Image %s found locally", image_name)
+                except ImageNotFound:
+                    logger.info("Pulling image: %s", image_name)
+                    try:
+                        await to_thread.run_sync(client.images.pull, image_name)
+                    except APIError as exc:
+                        # If a sibling task finished preparing the image
+                        # between our get() and pull(), a retry will succeed
+                        # and we can continue rather than surface the 404.
+                        # Any failure from the retry itself (ImageNotFound or
+                        # otherwise — e.g. a transient daemon hiccup) means
+                        # the image truly isn't ready, so surface the
+                        # original pull failure rather than masking it with
+                        # the retry's error.
+                        try:
+                            await to_thread.run_sync(client.images.get, image_name)
+                        except Exception:
+                            raise RuntimeError(f"Failed to pull Docker image '{image_name}': {exc}") from exc
+                        logger.debug(
+                            "Pull of %s failed but image is present locally; continuing",
+                            image_name,
+                        )
 
             return image_name
 
