@@ -530,12 +530,15 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                 files.append(str(rel_path))
         return files
 
-    async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
+    async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
         """Execute a shell command in the Docker container.
 
         Args:
             cmd: Shell command to execute (bash syntax).
             timeout: Maximum time in seconds to wait for command completion.
+                If None, falls back to ``self._shell_timeout`` (set in
+                ``__init__``), so direct callers share the same budget as the
+                LLM ``code_exec`` tool.
 
         Returns:
             CommandResult with exit_code, stdout, stderr, and optional error info.
@@ -545,6 +548,8 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             raise RuntimeError(
                 "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
             )
+        if timeout is None:
+            timeout = self._shell_timeout
         container = self._container  # Capture for lambda type narrowing
 
         # Check allowlist
@@ -592,10 +597,31 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                     error_kind="timeout",
                 )
 
+            stderr_text = (stderr_bytes or b"").decode("utf-8", errors="replace")
+
+            # Heuristic: exit 127 + a "timeout: ... not found" message from the
+            # shell means coreutils timeout(1) is absent from the base image, so
+            # the wrapper command never ran. Surface a clear pointer instead of
+            # letting the caller debug a generic "command not found".
+            if exit_code == 127 and "timeout" in stderr_text and "not found" in stderr_text:
+                return CommandResult(
+                    exit_code=exit_code,
+                    stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
+                    stderr=stderr_text,
+                    error_kind="image_missing_timeout",
+                    advice=(
+                        "DockerCodeExecToolProvider wraps every command with coreutils "
+                        "`timeout(1)` to enforce the per-command shell_timeout. The active "
+                        "image does not provide it. Use a base image that includes coreutils "
+                        "(most Debian/Ubuntu/Alpine images do) or install it (e.g. "
+                        "`apt-get install -y coreutils` / `apk add coreutils`)."
+                    ),
+                )
+
             return CommandResult(
                 exit_code=exit_code,
                 stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
-                stderr=(stderr_bytes or b"").decode("utf-8", errors="replace"),
+                stderr=stderr_text,
             )
 
         except TimeoutError:

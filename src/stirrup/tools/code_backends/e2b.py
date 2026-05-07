@@ -57,6 +57,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         request_timeout: int = SANDBOX_REQUEST_TIMEOUT,
         template: str | None = None,
         allowed_commands: list[str] | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
     ) -> None:
         """Initialize E2B execution environment configuration.
 
@@ -66,9 +67,14 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             allowed_commands: Optional list of regex patterns. If provided, only
                              commands matching at least one pattern are allowed.
                              If None, all commands are allowed.
+            shell_timeout: Per-command wall-clock timeout (seconds) for every
+                ``code_exec`` invocation, and the default for direct
+                ``run_command`` calls that pass ``timeout=None``. Defaults to
+                ``SHELL_TIMEOUT``. Distinct from ``timeout`` above, which is the
+                sandbox lifetime.
 
         """
-        super().__init__(allowed_commands=allowed_commands)
+        super().__init__(allowed_commands=allowed_commands, shell_timeout=shell_timeout)
         self._timeout = timeout
         self._request_timeout = request_timeout
         self._template = template
@@ -212,12 +218,20 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                     files.append(rel_path)
         return files
 
-    async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
-        """Execute command in E2B execution environment, returning raw CommandResult."""
+    async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
+        """Execute command in E2B execution environment, returning raw CommandResult.
+
+        Args:
+            cmd: Shell command to execute.
+            timeout: Per-call wall-clock timeout (seconds). If None, falls back
+                to ``self._shell_timeout`` set in ``__init__``.
+        """
         if self._sbx is None:
             raise RuntimeError(
                 "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
             )
+        if timeout is None:
+            timeout = self._shell_timeout
 
         # Check allowlist
         if not self._check_allowed(cmd):

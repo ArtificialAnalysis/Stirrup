@@ -1,6 +1,10 @@
 """Tests for LocalCodeExecToolProvider backend."""
 
+import subprocess
 from pathlib import Path
+
+import anyio
+from anyio.to_thread import run_sync
 
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 
@@ -62,11 +66,6 @@ class TestLocalCodeExecToolProvider:
         reparent to init and leak indefinitely. Uses a unique sleep duration
         as a marker so the check is robust to concurrent processes on the host.
         """
-        import subprocess
-
-        import anyio
-        from anyio.to_thread import run_sync
-
         marker = "919293"
         provider = LocalCodeExecToolProvider()
         async with provider as _:

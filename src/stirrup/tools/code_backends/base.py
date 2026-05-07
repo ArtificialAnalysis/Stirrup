@@ -203,8 +203,15 @@ class CodeExecToolProvider(ToolProvider, ABC):
         ...
 
     @abstractmethod
-    async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
-        """Execute a shell command and return raw CommandResult."""
+    async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
+        """Execute a shell command and return raw CommandResult.
+
+        Args:
+            cmd: Shell command to execute (bash syntax).
+            timeout: Per-call wall-clock timeout (seconds). If None, falls back
+                to ``self._shell_timeout`` configured on the provider, so direct
+                callers and the LLM ``code_exec`` tool share the same default.
+        """
         ...
 
     @abstractmethod
@@ -470,10 +477,10 @@ class CodeExecToolProvider(ToolProvider, ABC):
 
         """
         env = self
-        shell_timeout = self._shell_timeout
 
         async def executor(params: CodeExecutionParams) -> ToolResult[ToolUseCountMetadata]:
-            result = await env.run_command(params.cmd, timeout=shell_timeout)
+            # timeout=None defers to env._shell_timeout, set in CodeExecToolProvider.__init__.
+            result = await env.run_command(params.cmd)
             return format_result(result)
 
         return Tool[CodeExecutionParams, ToolUseCountMetadata](
