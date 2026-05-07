@@ -5678,8 +5678,10 @@ docker = [
     { name = "python-dotenv" },
 ]
 e2b = [
-    { name = "aiolimiter" },
     { name = "e2b-code-interpreter" },
+]
+e2b-throttle = [
+    { name = "aiolimiter" },
 ]
 litellm = [
     { name = "litellm" },
@@ -5705,7 +5707,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiolimiter", marker = "extra == 'e2b'", specifier = ">=1.1.0" },
+    { name = "aiolimiter", marker = "extra == 'e2b-throttle'", specifier = ">=1.1.0" },
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "browser-use", marker = "extra == 'browser'", specifier = ">=0.11.3" },
     { name = "docker", marker = "extra == 'docker'", specifier = ">=7.0.0" },
@@ -5722,11 +5724,11 @@ requires-dist = [
     { name = "python-dotenv", marker = "extra == 'docker'", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
-    { name = "stirrup", extras = ["litellm", "e2b", "docker", "mcp", "browser", "slack"], marker = "extra == 'all'" },
+    { name = "stirrup", extras = ["litellm", "e2b", "e2b-throttle", "docker", "mcp", "browser", "slack"], marker = "extra == 'all'" },
     { name = "tenacity", specifier = ">=5.0.0" },
     { name = "trafilatura", specifier = ">=1.9.0" },
 ]
-provides-extras = ["litellm", "e2b", "docker", "mcp", "browser", "slack", "all"]
+provides-extras = ["litellm", "e2b", "e2b-throttle", "docker", "mcp", "browser", "slack", "all"]
 
 [package.metadata.requires-dev]
 dev = [
