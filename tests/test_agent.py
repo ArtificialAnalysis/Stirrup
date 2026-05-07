@@ -1,5 +1,6 @@
 """Tests for agent core functionality."""
 
+import pytest
 from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
@@ -445,12 +446,8 @@ async def test_finish_tool_property_requires_single_finish_tool() -> None:
         finish_tool=[submit_files_tool, finish_without_files_tool],
     )
 
-    try:
+    with pytest.raises(ValueError, match="multiple finish tools"):
         _ = agent.finish_tool
-    except ValueError as exc:
-        assert "multiple finish tools" in str(exc)
-    else:
-        raise AssertionError("finish_tool should fail when multiple finish tools are configured")
 
 
 async def test_agent_continues_after_failed_finish_tool_from_multiple_finish_tools() -> None:
@@ -623,17 +620,13 @@ async def test_tools_finish_tool_name_collision_raises_at_init() -> None:
         executor=lambda params: ToolResult(content=params.x, success=True),  # ty: ignore[invalid-argument-type]
     )
 
-    try:
+    with pytest.raises(ValueError, match="collides with a finish tool"):
         Agent(
             client=MockLLMClient([]),
             name="test-agent",
             tools=[colliding_tool],
             finish_tool=finish_a,
         )
-    except ValueError as exc:
-        assert "collides with a finish tool" in str(exc)
-    else:
-        raise AssertionError("Agent init should fail when a tool name collides with a finish tool")
 
 
 async def test_finish_tool_validates_file_paths() -> None:
