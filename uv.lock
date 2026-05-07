@@ -5682,6 +5682,7 @@ e2b = [
 ]
 e2b-throttle = [
     { name = "aiolimiter" },
+    { name = "e2b-code-interpreter" },
 ]
 litellm = [
     { name = "litellm" },
@@ -5724,6 +5725,7 @@ requires-dist = [
     { name = "python-dotenv", marker = "extra == 'docker'", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
+    { name = "stirrup", extras = ["e2b"], marker = "extra == 'e2b-throttle'" },
     { name = "stirrup", extras = ["litellm", "e2b", "e2b-throttle", "docker", "mcp", "browser", "slack"], marker = "extra == 'all'" },
     { name = "tenacity", specifier = ">=5.0.0" },
     { name = "trafilatura", specifier = ">=1.9.0" },
