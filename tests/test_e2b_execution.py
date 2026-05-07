@@ -164,3 +164,43 @@ class TestE2BCodeExecToolProvider:
                 result = await provider.upload_files(sample_dir)
                 assert len(result.uploaded) == 3  # 3 files in sample_dir
                 assert mock_sandbox.files.write.call_count == 3
+
+    async def test_create_gate_is_entered_before_create(self, mock_sandbox: MagicMock) -> None:
+        """A supplied create_gate is entered immediately before AsyncSandbox.create()."""
+        events: list[str] = []
+
+        class RecordingGate:
+            async def __aenter__(self) -> RecordingGate:
+                events.append("gate_enter")
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                events.append("gate_exit")
+
+        async def fake_create(*_args: object, **_kwargs: object) -> MagicMock:
+            events.append("create")
+            return mock_sandbox
+
+        provider = E2BCodeExecToolProvider(create_gate=RecordingGate())
+
+        with patch(
+            "stirrup.tools.code_backends.e2b.AsyncSandbox.create",
+            new=AsyncMock(side_effect=fake_create),
+        ):
+            async with provider as _:
+                pass
+
+        assert events == ["gate_enter", "create", "gate_exit"]
+
+    async def test_no_create_gate_skips_gate_machinery(self, mock_sandbox: MagicMock) -> None:
+        """With no gate, __aenter__ calls AsyncSandbox.create() directly."""
+        provider = E2BCodeExecToolProvider()
+        assert provider._create_gate is None  # noqa: SLF001
+
+        with patch(
+            "stirrup.tools.code_backends.e2b.AsyncSandbox.create",
+            new=AsyncMock(return_value=mock_sandbox),
+        ) as mock_create:
+            async with provider as _:
+                pass
+            mock_create.assert_called_once()

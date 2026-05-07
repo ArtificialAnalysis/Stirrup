@@ -20,7 +20,7 @@ agent = Agent(
     max_turns=30,                                         # (default: 30) Max iterations before stopping
     system_prompt="You are an agent specializing in ...", # (default: None) Instructions prepended to runs
     tools=None,                                           # (default: DEFAULT_TOOLS) Available tools
-    finish_tool=None,                                     # (default: SIMPLE_FINISH_TOOL) Completion signal
+    finish_tool=None,                                     # (default: SIMPLE_FINISH_TOOL) Completion signal(s)
     context_summarization_cutoff=0.7,                     # (default: 0.7) Context % before summarization
     run_sync_in_thread=True,                              # (default: True) Run sync tools in thread
     text_only_tool_responses=True,                        # (default: True) Extract images from responses
@@ -38,7 +38,7 @@ agent = Agent(
     | `max_turns` | `int` | `30` | Maximum turns before stopping |
     | `system_prompt` | `str \| None` | `None` | System prompt prepended to runs |
     | `tools` | `list[Tool \| ToolProvider] \| None` | `DEFAULT_TOOLS` | Available tools |
-    | `finish_tool` | `Tool` | `SIMPLE_FINISH_TOOL` | Tool to signal completion |
+    | `finish_tool` | `Tool \| list[Tool]` | `SIMPLE_FINISH_TOOL` | Tool(s) to signal completion |
     | `context_summarization_cutoff` | `float` | `0.7` | Context % before summarization |
     | `run_sync_in_thread` | `bool` | `True` | Run sync tools in separate thread |
     | `text_only_tool_responses` | `bool` | `True` | Extract images to user messages |
@@ -346,7 +346,7 @@ The agent's `session()` automatically calls `__aenter__` and `__aexit__` for all
 
 ### Finish Tools
 
-The finish tool signals task completion. By default, agents use `SIMPLE_FINISH_TOOL`:
+A finish tool signals task completion. By default, agents use `SIMPLE_FINISH_TOOL`:
 
 ```python
 from stirrup.tools.finish import FinishParams, SIMPLE_FINISH_TOOL
@@ -378,6 +378,16 @@ custom_finish = Tool(
 )
 
 agent = Agent(client=client, name="analyst", finish_tool=custom_finish)
+```
+
+You can also provide multiple finish tools. A successful call to any of them ends the agent loop:
+
+```python
+agent = Agent(
+    client=client,
+    name="analyst",
+    finish_tool=[submit_files_tool, finish_without_files_tool],
+)
 ```
 
 ### Tool Metadata
