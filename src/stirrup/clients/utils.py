@@ -130,6 +130,8 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
             out.append({"role": "user", "content": content_to_openai(m.content)})
         elif isinstance(m, AssistantMessage):
             msg: dict[str, Any] = {"role": "assistant", "content": content_to_openai(m.content)}
+            if m.metadata:
+                msg["metadata"] = m.metadata
 
             if m.reasoning:
                 if m.reasoning.content:

@@ -936,6 +936,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             # Cache state on non-success exit (only at root level)
             should_cache = (
                 state.depth == 0
+                and self._cache_on_interrupt
                 and (exc_type is not None or self._last_finish_params is None)
                 and self._current_task_hash is not None
                 and self._current_run_state is not None

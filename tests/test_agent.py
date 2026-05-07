@@ -1,6 +1,9 @@
 """Tests for agent core functionality."""
 
+from io import BytesIO
+
 import pytest
+from PIL import Image
 from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
@@ -8,6 +11,7 @@ from stirrup.core.agent import Agent
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
+    ImageContentBlock,
     LLMClient,
     SummaryMessage,
     SystemMessage,
@@ -43,6 +47,13 @@ class MockLLMClient(LLMClient):
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
+
+
+def _sample_png_block() -> ImageContentBlock:
+    img = Image.new("RGB", (1, 1), color=(255, 0, 0))
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return ImageContentBlock(data=buffer.getvalue())
 
 
 async def test_agent_basic_finish() -> None:
@@ -213,6 +224,45 @@ async def test_agent_tool_execution() -> None:
     echo_messages = [m for m in tool_messages if m.name == "echo"]
     assert len(echo_messages) == 1
     assert "Echo: Hello" in echo_messages[0].content
+
+
+async def test_run_tool_preserves_image_content() -> None:
+    """Test run_tool preserves image blocks returned by tools."""
+
+    class EmptyParams(BaseModel):
+        pass
+
+    image_block = _sample_png_block()
+
+    def image_executor(_params: EmptyParams) -> ToolResult:
+        return ToolResult(content=[image_block])
+
+    image_tool = Tool[EmptyParams, None](
+        name="image_tool",
+        description="Return an image",
+        parameters=EmptyParams,
+        executor=image_executor,  # ty: ignore[invalid-argument-type]
+    )
+
+    client = MockLLMClient([])
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=1,
+        tools=[image_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        tool_message = await session.run_tool(
+            ToolCall(name="image_tool", arguments="{}", tool_call_id="call_1"),
+            run_metadata={},
+        )
+
+    assert isinstance(tool_message.content, list)
+    assert len(tool_message.content) == 1
+    assert isinstance(tool_message.content[0], ImageContentBlock)
+    assert tool_message.content[0].mime_type == "image/png"
 
 
 async def test_agent_invalid_tool_call() -> None:
