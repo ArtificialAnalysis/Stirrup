@@ -6,7 +6,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field
 
-from stirrup.constants import FINISH_TOOL_NAME
+from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.models import Tool, ToolResult, ToolUseCountMetadata
 
 
@@ -42,7 +42,7 @@ async def _validating_finish_executor(params: FinishParams) -> ToolResult[ToolUs
 
 
 SIMPLE_FINISH_TOOL: Tool[FinishParams, ToolUseCountMetadata] = Tool[FinishParams, ToolUseCountMetadata](
-    name=FINISH_TOOL_NAME,
+    name=DEFAULT_FINISH_TOOL_NAME,
     description="Signal task completion with a reason. Use when the task is finished or cannot proceed further. Note that you will need a separate turn to finish.",
     parameters=FinishParams,
     executor=_validating_finish_executor,
