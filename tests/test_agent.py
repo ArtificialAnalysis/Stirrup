@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 
-from stirrup.constants import FINISH_TOOL_NAME
+from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
 from stirrup.core.models import (
     AssistantMessage,
@@ -52,7 +52,7 @@ async def test_agent_basic_finish() -> None:
             content="I'll finish now",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task completed successfully", "paths": []}',
                     tool_call_id="call_1",
                 )
@@ -167,7 +167,7 @@ async def test_agent_tool_execution() -> None:
             content="Done",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Echoed successfully", "paths": []}',
                     tool_call_id="call_2",
                 )
@@ -235,7 +235,7 @@ async def test_agent_invalid_tool_call() -> None:
             content="Done",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Handled error", "paths": []}',
                     tool_call_id="call_2",
                 )
@@ -298,7 +298,7 @@ async def test_agent_finish_tool_validation() -> None:
         )
 
     custom_finish_tool = Tool[CustomFinishParams, ToolUseCountMetadata](
-        name=FINISH_TOOL_NAME,
+        name=DEFAULT_FINISH_TOOL_NAME,
         description="Finish with status validation",
         parameters=CustomFinishParams,
         executor=custom_finish_executor,
@@ -311,7 +311,7 @@ async def test_agent_finish_tool_validation() -> None:
             content="Trying to finish",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Not ready", "status": "pending"}',
                     tool_call_id="call_1",
                 )
@@ -323,7 +323,7 @@ async def test_agent_finish_tool_validation() -> None:
             content="Now finishing",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task done", "status": "complete"}',
                     tool_call_id="call_2",
                 )
@@ -528,6 +528,114 @@ async def test_agent_continues_after_failed_finish_tool_from_multiple_finish_too
     assert len([msg for msg in tool_messages if msg.name == "submit_files" and not msg.success]) == 1
 
 
+async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
+    """When multiple finish tools are called in one turn, all are rejected without executing.
+
+    The agent must not terminate; the model gets another chance to finish with a single call.
+    """
+    executions: list[str] = []
+
+    class FinishAParams(BaseModel):
+        reason: str
+
+    class FinishBParams(BaseModel):
+        reason: str
+
+    def finish_a_executor(params: FinishAParams) -> ToolResult:
+        executions.append("finish_a")
+        return ToolResult(content=params.reason, success=True)
+
+    def finish_b_executor(params: FinishBParams) -> ToolResult:
+        executions.append("finish_b")
+        return ToolResult(content=params.reason, success=True)
+
+    finish_a = Tool[FinishAParams, None](
+        name="finish_a",
+        description="Finish variant A",
+        parameters=FinishAParams,
+        executor=finish_a_executor,  # ty: ignore[invalid-argument-type]
+    )
+    finish_b = Tool[FinishBParams, None](
+        name="finish_b",
+        description="Finish variant B",
+        parameters=FinishBParams,
+        executor=finish_b_executor,  # ty: ignore[invalid-argument-type]
+    )
+
+    responses = [
+        AssistantMessage(
+            content="Calling both finish tools at once",
+            tool_calls=[
+                ToolCall(name="finish_a", arguments='{"reason": "first"}', tool_call_id="call_1"),
+                ToolCall(name="finish_b", arguments='{"reason": "second"}', tool_call_id="call_2"),
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Retrying with a single finish call",
+            tool_calls=[
+                ToolCall(name="finish_a", arguments='{"reason": "settled"}', tool_call_id="call_3"),
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=[finish_a, finish_b],
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    # Neither finish tool was executed in turn 1 — agent recovered on turn 2.
+    assert executions == ["finish_a"]
+    assert client.call_count == 2
+    assert finish_params is not None
+    assert isinstance(finish_params, FinishAParams)
+    assert finish_params.reason == "settled"
+
+    tool_messages = [msg for group in history for msg in group if isinstance(msg, ToolMessage)]
+    rejected = [msg for msg in tool_messages if not msg.success and "multiple finish tools" in str(msg.content)]
+    assert {msg.name for msg in rejected} == {"finish_a", "finish_b"}
+
+
+async def test_tools_finish_tool_name_collision_raises_at_init() -> None:
+    """Agent init raises if a tool in `tools` shares a name with a finish tool."""
+
+    class DummyParams(BaseModel):
+        x: str
+
+    colliding_tool = Tool[DummyParams, None](
+        name="finish_a",
+        description="Not actually a finish tool",
+        parameters=DummyParams,
+        executor=lambda params: ToolResult(content=params.x),  # ty: ignore[invalid-argument-type]
+    )
+    finish_a = Tool[DummyParams, None](
+        name="finish_a",
+        description="Real finish tool",
+        parameters=DummyParams,
+        executor=lambda params: ToolResult(content=params.x, success=True),  # ty: ignore[invalid-argument-type]
+    )
+
+    try:
+        Agent(
+            client=MockLLMClient([]),
+            name="test-agent",
+            tools=[colliding_tool],
+            finish_tool=finish_a,
+        )
+    except ValueError as exc:
+        assert "collides with a finish tool" in str(exc)
+    else:
+        raise AssertionError("Agent init should fail when a tool name collides with a finish tool")
+
+
 async def test_finish_tool_validates_file_paths() -> None:
     """Test that SIMPLE_FINISH_TOOL rejects non-existent file paths."""
     from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
@@ -539,7 +647,7 @@ async def test_finish_tool_validates_file_paths() -> None:
             content="Finishing with fake file",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Done", "paths": ["nonexistent.txt"]}',
                     tool_call_id="call_1",
                 )
@@ -551,7 +659,7 @@ async def test_finish_tool_validates_file_paths() -> None:
             content="Finishing properly",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Actually done", "paths": []}',
                     tool_call_id="call_2",
                 )
@@ -595,7 +703,7 @@ async def test_no_successive_assistant_messages() -> None:
             content="Now I'll finish",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task completed", "paths": []}',
                     tool_call_id="call_1",
                 )
@@ -642,7 +750,7 @@ async def test_allow_successive_assistant_messages() -> None:
             content="Now I'll finish",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task completed", "paths": []}',
                     tool_call_id="call_1",
                 )
@@ -718,7 +826,7 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
             content="Done",
             tool_calls=[
                 ToolCall(
-                    name=FINISH_TOOL_NAME,
+                    name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Completed", "paths": []}',
                     tool_call_id="call_finish",
                 )

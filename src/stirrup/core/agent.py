@@ -11,7 +11,7 @@ from itertools import chain, takewhile
 from pathlib import Path
 from time import perf_counter
 from types import TracebackType
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Self, overload
 
 import anyio
 from pydantic import BaseModel, Field, ValidationError
@@ -36,6 +36,7 @@ from stirrup.core.models import (
     ToolMessage,
     ToolProvider,
     ToolResult,
+    ToolUseCountMetadata,
     UserMessage,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
@@ -44,6 +45,7 @@ from stirrup.tools import DEFAULT_TOOLS
 from stirrup.tools.code_backends.base import CodeExecToolProvider
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL
+from stirrup.tools.finish import FinishParams as SimpleFinishParams
 from stirrup.utils.logging import AgentLogger, AgentLoggerBase
 
 _PARENT_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar("parent_depth", default=0)
@@ -242,6 +244,63 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             finish_params, history, metadata = await session.run("Your task here")
     """
 
+    @overload
+    def __init__(
+        self: "Agent[SimpleFinishParams, ToolUseCountMetadata]",
+        client: LLMClient,
+        name: str,
+        *,
+        max_turns: int = ...,
+        system_prompt: str | None = ...,
+        tools: list[Tool | ToolProvider] | None = ...,
+        finish_tool: None = None,
+        context_summarization_cutoff: float = ...,
+        turns_remaining_warning_threshold: int = ...,
+        run_sync_in_thread: bool = ...,
+        text_only_tool_responses: bool = ...,
+        block_successive_assistant_messages: bool = ...,
+        share_parent_exec_env: bool = ...,
+        logger: AgentLoggerBase | None = ...,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self: "Agent[FinishParams, FinishMeta]",
+        client: LLMClient,
+        name: str,
+        *,
+        max_turns: int = ...,
+        system_prompt: str | None = ...,
+        tools: list[Tool | ToolProvider] | None = ...,
+        finish_tool: Tool[FinishParams, FinishMeta],
+        context_summarization_cutoff: float = ...,
+        turns_remaining_warning_threshold: int = ...,
+        run_sync_in_thread: bool = ...,
+        text_only_tool_responses: bool = ...,
+        block_successive_assistant_messages: bool = ...,
+        share_parent_exec_env: bool = ...,
+        logger: AgentLoggerBase | None = ...,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self: "Agent[BaseModel, Any]",
+        client: LLMClient,
+        name: str,
+        *,
+        max_turns: int = ...,
+        system_prompt: str | None = ...,
+        tools: list[Tool | ToolProvider] | None = ...,
+        finish_tool: list[Tool],
+        context_summarization_cutoff: float = ...,
+        turns_remaining_warning_threshold: int = ...,
+        run_sync_in_thread: bool = ...,
+        text_only_tool_responses: bool = ...,
+        block_successive_assistant_messages: bool = ...,
+        share_parent_exec_env: bool = ...,
+        logger: AgentLoggerBase | None = ...,
+    ) -> None: ...
+
     def __init__(
         self,
         client: LLMClient,
@@ -327,6 +386,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._active_tools: dict[str, Tool] = {}
         for tool in self._tools:
             if isinstance(tool, Tool):
+                if tool.name in self._finish_tools:
+                    raise ValueError(
+                        f"Tool name '{tool.name}' in `tools` collides with a finish tool. "
+                        "Tool names must be unique across `tools` and `finish_tool`."
+                    )
                 self._active_tools[tool.name] = tool
         self._active_tools.update(self._finish_tools)
         self._has_tool_providers = any(isinstance(t, ToolProvider) for t in self._tools)
@@ -355,8 +419,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         return self._active_tools
 
     @property
-    def finish_tool(self) -> Tool:
-        """The single finish tool used to signal task completion."""
+    def finish_tool(self) -> Tool[FinishParams, FinishMeta]:
+        """The single finish tool used to signal task completion.
+
+        Raises ValueError if multiple finish tools are configured; use ``finish_tools`` instead.
+        """
         if len(self._finish_tools) != 1:
             raise ValueError(
                 "Agent has multiple finish tools configured. Use finish_tools to access all finish tools by name."
@@ -736,6 +803,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     # Static Tool, use directly
                     active_tools.append(tool)
 
+            # Detect collisions between session-resolved tool names and finish tool names.
+            # Static-Tool collisions are caught earlier in __init__; ToolProvider-derived tools
+            # only have known names at this point.
+            colliding = sorted({t.name for t in active_tools} & self._finish_tools.keys())
+            if colliding:
+                raise ValueError(
+                    f"Session-resolved tool name(s) {colliding} collide with finish tool name(s). "
+                    "Tool names must be unique across `tools` and `finish_tool`."
+                )
+
             # Merge session-initialized tools into _active_tools and ensure finish tools take precedence.
             self._active_tools.update({t.name: t for t in active_tools})
             self._active_tools.update(self._finish_tools)
@@ -1073,8 +1150,34 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         finish_params: FinishParams | None = None
         tool_messages: list[ToolMessage] = []
         if assistant_message.tool_calls:
+            # If multiple finish tools were called in one turn, refuse all of them without
+            # executing — silently picking one would discard the model's other intent and
+            # may swap in contradictory params. Force the model to retry with a single call.
+            finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
+            reject_all_finish_calls = len(finish_call_names) > 1
+
             tool_messages = []
             for tool_call in assistant_message.tool_calls:
+                if reject_all_finish_calls and tool_call.name in self._finish_tools:
+                    now = perf_counter()
+                    tool_message = ToolMessage(
+                        content=(
+                            f"Cannot call finish tool '{tool_call.name}': multiple finish tools "
+                            f"({sorted(set(finish_call_names))}) were called in the same turn. "
+                            "Only one finish tool may be called per turn — retry with a single "
+                            "finish tool call."
+                        ),
+                        tool_call_id=tool_call.tool_call_id,
+                        name=tool_call.name,
+                        args_was_valid=True,
+                        success=False,
+                        tool_start_time=now,
+                        tool_end_time=now,
+                    )
+                    tool_messages.append(tool_message)
+                    self._logger.tool_result(tool_message)
+                    continue
+
                 tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
 

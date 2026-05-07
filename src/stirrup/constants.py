@@ -1,7 +1,8 @@
 from typing import Literal
 
-# Tool naming
-FINISH_TOOL_NAME: Literal["finish"] = "finish"
+# Tool naming — the conventional name for the default finish tool (SIMPLE_FINISH_TOOL).
+# Custom finish tools may use any name; only the default is bound to this constant.
+DEFAULT_FINISH_TOOL_NAME: Literal["finish"] = "finish"
 
 # Agent execution limits
 AGENT_MAX_TURNS = 30  # Maximum agent turns before forced termination
