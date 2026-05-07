@@ -41,6 +41,11 @@ def mock_docker_client() -> MagicMock:
 class TestDockerCodeExecToolProvider:
     """Tests for DockerCodeExecToolProvider."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_image_prep_locks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reset the class-level lock dict so tests don't inherit each other's state."""
+        monkeypatch.setattr(DockerCodeExecToolProvider, "_image_prep_locks", {})
+
     async def test_from_image_and_lifecycle(self, mock_docker_client: MagicMock, tmp_path: Path) -> None:
         """Test factory method and container lifecycle."""
         provider = DockerCodeExecToolProvider.from_image(
@@ -195,13 +200,9 @@ class TestDockerCodeExecToolProvider:
             side_effect=APIError("404 Client Error: pull access denied"),
         )
 
-        with (
-            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
-            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-        ):
+        provider._client = mock_docker_client  # noqa: SLF001 — short-circuits docker.from_env
+        with patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread:
             mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args))
-
-            provider._client = mock_docker_client  # noqa: SLF001
             image_name = await provider._prepare_image()  # noqa: SLF001
 
         assert image_name == "concurrent-race-test:local"
@@ -223,13 +224,36 @@ class TestDockerCodeExecToolProvider:
             side_effect=APIError("404 Client Error: pull access denied"),
         )
 
-        with (
-            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
-            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-        ):
+        provider._client = mock_docker_client  # noqa: SLF001 — short-circuits docker.from_env
+        with patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread:
             mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args))
+            with pytest.raises(RuntimeError, match="Failed to pull Docker image"):
+                await provider._prepare_image()  # noqa: SLF001
 
-            provider._client = mock_docker_client  # noqa: SLF001
+    async def test_prepare_image_surfaces_original_pull_error_when_retry_get_also_fails(
+        self, mock_docker_client: MagicMock, tmp_path: Path
+    ) -> None:
+        """If the retry images.get() raises a non-ImageNotFound error (e.g. a
+        transient daemon hiccup), the original pull failure must still
+        surface as RuntimeError rather than being masked by the retry error."""
+        provider = DockerCodeExecToolProvider.from_image(
+            "retry-hiccup:local",
+            temp_base_dir=tmp_path,
+        )
+
+        mock_docker_client.images.get = MagicMock(
+            side_effect=[
+                ImageNotFound("not found"),
+                APIError("500 daemon hiccup on retry"),
+            ],
+        )
+        mock_docker_client.images.pull = MagicMock(
+            side_effect=APIError("404 Client Error: pull access denied"),
+        )
+
+        provider._client = mock_docker_client  # noqa: SLF001 — short-circuits docker.from_env
+        with patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread:
+            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args))
             with pytest.raises(RuntimeError, match="Failed to pull Docker image"):
                 await provider._prepare_image()  # noqa: SLF001
 
