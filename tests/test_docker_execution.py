@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -96,6 +97,94 @@ class TestDockerCodeExecToolProvider:
                 assert result.stdout == "hello world\n"
                 assert result.stderr == ""
                 assert result.error_kind is None
+
+    async def test_run_command_wraps_with_timeout(self, mock_docker_client: MagicMock, tmp_path: Path) -> None:
+        """Regression: every command must be wrapped with coreutils timeout(1).
+
+        The wrapper is what prevents orphan descendants in the container when
+        the client gives up — without it, backgrounded grandchildren reparent
+        to PID 1 and leak (see moby/moby#9098). This test pins the exact form
+        so the protection can't silently regress.
+        """
+        provider = DockerCodeExecToolProvider.from_image(
+            "python:3.12-slim",
+            temp_base_dir=tmp_path,
+            shell_timeout=42,
+        )
+
+        mock_exec_result = MagicMock()
+        mock_exec_result.exit_code = 0
+        mock_exec_result.output = (b"", b"")
+        exec_run = MagicMock(return_value=mock_exec_result)
+        mock_docker_client.containers.run.return_value.exec_run = exec_run
+
+        with (
+            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+        ):
+            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+            async with provider as _:
+                user_cmd = "echo 'hi' && sleep 0"
+                await provider.run_command(user_cmd)
+                # Capture inside the context — __aexit__ issues a chown via
+                # exec_run which would otherwise overwrite call_args.
+                cmd_kwarg = exec_run.call_args.kwargs["cmd"]
+
+        expected_inner = f"timeout --kill-after=5s 42s bash -c {shlex.quote(user_cmd)}"
+        assert cmd_kwarg == ["bash", "-c", expected_inner], (
+            f"docker exec must wrap user commands with timeout(1); got {cmd_kwarg!r}"
+        )
+
+    async def test_run_command_timeout_exit_codes_map_to_timeout(
+        self, mock_docker_client: MagicMock, tmp_path: Path
+    ) -> None:
+        """Exit 124 (SIGTERM expiry) and 137 (--kill-after SIGKILL) both surface as timeouts."""
+        provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
+
+        for exit_code in (124, 137):
+            mock_exec_result = MagicMock()
+            mock_exec_result.exit_code = exit_code
+            mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
+            mock_docker_client.containers.run.return_value.exec_run = MagicMock(return_value=mock_exec_result)
+
+            with (
+                patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+                patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+            ):
+                mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+                async with provider as _:
+                    result = await provider.run_command("sleep 999", timeout=1)
+
+            assert result.error_kind == "timeout", f"exit {exit_code} should map to timeout"
+            assert result.exit_code == exit_code
+            assert "partial-stdout" in result.stdout
+            assert "partial-stderr" in result.stderr
+            assert "timed out" in result.stderr.lower()
+
+    async def test_run_command_missing_timeout_binary_advice(
+        self, mock_docker_client: MagicMock, tmp_path: Path
+    ) -> None:
+        """If the image lacks coreutils timeout(1), exit 127 should surface a clear pointer."""
+        provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
+
+        mock_exec_result = MagicMock()
+        mock_exec_result.exit_code = 127
+        mock_exec_result.output = (b"", b"bash: line 1: timeout: command not found\n")
+        mock_docker_client.containers.run.return_value.exec_run = MagicMock(return_value=mock_exec_result)
+
+        with (
+            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+        ):
+            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+            async with provider as _:
+                result = await provider.run_command("echo hi")
+
+        assert result.error_kind == "image_missing_timeout"
+        assert result.advice is not None and "coreutils" in result.advice
 
     async def test_run_command_allowlist(self, mock_docker_client: MagicMock, tmp_path: Path) -> None:
         """Test command allowlist enforcement."""

@@ -109,6 +109,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         allowed_commands: list[str] | None = None,
         temp_base_dir: Path | None = None,
         env_vars: list[str] | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
     ) -> None:
         """Initialize DockerCodeExecToolProvider configuration.
 
@@ -122,13 +123,17 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             env_vars: Optional list of environment variable names to inject into the
                 container. Values are loaded from the current environment (os.environ)
                 after calling load_dotenv() to load any .env file.
+            shell_timeout: Per-command wall-clock timeout (seconds) for every
+                ``code_exec`` invocation. Enforced in-container via coreutils
+                ``timeout(1)``; see ``run_command`` for the mechanism. Defaults
+                to ``SHELL_TIMEOUT``.
 
         Prefer using the factory methods for clarity:
         - DockerCodeExecToolProvider.from_image() for pre-built images
         - DockerCodeExecToolProvider.from_dockerfile() for building from Dockerfile
 
         """
-        super().__init__(allowed_commands=allowed_commands)
+        super().__init__(allowed_commands=allowed_commands, shell_timeout=shell_timeout)
 
         self._source = source
         self._is_dockerfile = is_dockerfile
@@ -161,6 +166,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         allowed_commands: list[str] | None = None,
         temp_base_dir: Path | str | None = None,
         env_vars: list[str] | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
     ) -> Self:
         """Create tool provider from a pre-built Docker image.
 
@@ -171,6 +177,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             temp_base_dir: Optional host base directory for temp files.
             env_vars: Optional list of environment variable names to inject into the
                 container. Values are loaded from os.environ (after load_dotenv()).
+            shell_timeout: See ``__init__``. Default ``SHELL_TIMEOUT``.
 
         Returns:
             Configured DockerCodeExecToolProvider instance.
@@ -191,6 +198,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             allowed_commands=allowed_commands,
             temp_base_dir=Path(temp_base_dir) if temp_base_dir else None,
             env_vars=env_vars,
+            shell_timeout=shell_timeout,
         )
 
     @classmethod
@@ -203,6 +211,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         allowed_commands: list[str] | None = None,
         temp_base_dir: Path | str | None = None,
         env_vars: list[str] | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
     ) -> Self:
         """Create tool provider by building from a Dockerfile.
 
@@ -214,6 +223,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             temp_base_dir: Optional host base directory for temp files.
             env_vars: Optional list of environment variable names to inject into the
                 container. Values are loaded from os.environ (after load_dotenv()).
+            shell_timeout: See ``__init__``. Default ``SHELL_TIMEOUT``.
 
         Returns:
             Configured DockerCodeExecToolProvider instance.
@@ -235,6 +245,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             allowed_commands=allowed_commands,
             temp_base_dir=Path(temp_base_dir) if temp_base_dir else None,
             env_vars=env_vars,
+            shell_timeout=shell_timeout,
         )
 
     async def __aenter__(self) -> Tool[CodeExecutionParams, ToolUseCountMetadata]:
@@ -561,12 +572,15 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                 files.append(str(rel_path))
         return files
 
-    async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
+    async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
         """Execute a shell command in the Docker container.
 
         Args:
             cmd: Shell command to execute (bash syntax).
             timeout: Maximum time in seconds to wait for command completion.
+                If None, falls back to ``self._shell_timeout`` (set in
+                ``__init__``), so direct callers share the same budget as the
+                LLM ``code_exec`` tool.
 
         Returns:
             CommandResult with exit_code, stdout, stderr, and optional error info.
@@ -576,6 +590,8 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             raise RuntimeError(
                 "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
             )
+        if timeout is None:
+            timeout = self._shell_timeout
         container = self._container  # Capture for lambda type narrowing
 
         # Check allowlist
@@ -588,12 +604,21 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                 advice="Only commands matching the allowlist patterns are permitted.",
             )
 
+        # Enforce the timeout inside the container via coreutils `timeout(1)`.
+        # It runs the command in its own process group and sends SIGKILL to the
+        # whole group after --kill-after, so descendants can't leak as orphans
+        # parented to container PID 1 when the client gives up (moby/moby#9098).
+        # Exit 124 == SIGTERM expiry, 137 == --kill-after SIGKILL; both map to
+        # error_kind="timeout" for the caller.
+        wrapped = f"timeout --kill-after=5s {timeout}s bash -c {shlex.quote(cmd)}"
+
         try:
-            # Execute command with timeout
-            with fail_after(timeout):
+            # Outer fail_after is a safety net for a stalled docker socket; the
+            # in-container timeout(1) should fire first in the normal case.
+            with fail_after(timeout + 10):
                 exec_result = await to_thread.run_sync(
                     lambda: container.exec_run(
-                        cmd=["bash", "-c", cmd],
+                        cmd=["bash", "-c", wrapped],
                         workdir=self._working_dir,
                         demux=True,  # Separate stdout/stderr
                     )
@@ -602,10 +627,43 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             exit_code = exec_result.exit_code
             stdout_bytes, stderr_bytes = exec_result.output
 
+            if exit_code in (124, 137):
+                logger.warning("Command timed out after %d seconds: %s", timeout, cmd[:100])
+                partial_stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
+                timeout_msg = f"Command timed out after {timeout} seconds"
+                combined_stderr = f"{partial_stderr}\n{timeout_msg}" if partial_stderr else timeout_msg
+                return CommandResult(
+                    exit_code=exit_code,
+                    stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
+                    stderr=combined_stderr,
+                    error_kind="timeout",
+                )
+
+            stderr_text = (stderr_bytes or b"").decode("utf-8", errors="replace")
+
+            # Heuristic: exit 127 + a "timeout: ... not found" message from the
+            # shell means coreutils timeout(1) is absent from the base image, so
+            # the wrapper command never ran. Surface a clear pointer instead of
+            # letting the caller debug a generic "command not found".
+            if exit_code == 127 and "timeout" in stderr_text and "not found" in stderr_text:
+                return CommandResult(
+                    exit_code=exit_code,
+                    stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
+                    stderr=stderr_text,
+                    error_kind="image_missing_timeout",
+                    advice=(
+                        "DockerCodeExecToolProvider wraps every command with coreutils "
+                        "`timeout(1)` to enforce the per-command shell_timeout. The active "
+                        "image does not provide it. Use a base image that includes coreutils "
+                        "(most Debian/Ubuntu/Alpine images do) or install it (e.g. "
+                        "`apt-get install -y coreutils` / `apk add coreutils`)."
+                    ),
+                )
+
             return CommandResult(
                 exit_code=exit_code,
                 stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
-                stderr=(stderr_bytes or b"").decode("utf-8", errors="replace"),
+                stderr=stderr_text,
             )
 
         except TimeoutError:

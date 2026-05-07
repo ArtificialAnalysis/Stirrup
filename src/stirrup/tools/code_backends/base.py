@@ -146,16 +146,27 @@ class CodeExecToolProvider(ToolProvider, ABC):
         )
     """
 
-    def __init__(self, *, allowed_commands: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        allowed_commands: list[str] | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
+    ) -> None:
         """Initialize execution environment with optional command allowlist.
 
         Args:
             allowed_commands: Optional list of regex patterns. If provided, only
                              commands matching at least one pattern are allowed.
                              If None, all commands are allowed.
+            shell_timeout: Per-command wall-clock timeout (seconds) applied to
+                           every ``code_exec`` invocation from the LLM. Defaults
+                           to ``SHELL_TIMEOUT``. Callers should set this to match
+                           their application's expected long-running-command
+                           budget rather than rely on the stirrup default.
 
         """
         self._allowed_commands = allowed_commands
+        self._shell_timeout = shell_timeout
         self._compiled_allowed: list[re.Pattern[str]] | None = None
         if allowed_commands is not None:
             self._compiled_allowed = [re.compile(p) for p in allowed_commands]
@@ -192,8 +203,15 @@ class CodeExecToolProvider(ToolProvider, ABC):
         ...
 
     @abstractmethod
-    async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
-        """Execute a shell command and return raw CommandResult."""
+    async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
+        """Execute a shell command and return raw CommandResult.
+
+        Args:
+            cmd: Shell command to execute (bash syntax).
+            timeout: Per-call wall-clock timeout (seconds). If None, falls back
+                to ``self._shell_timeout`` configured on the provider, so direct
+                callers and the LLM ``code_exec`` tool share the same default.
+        """
         ...
 
     @abstractmethod
@@ -461,6 +479,7 @@ class CodeExecToolProvider(ToolProvider, ABC):
         env = self
 
         async def executor(params: CodeExecutionParams) -> ToolResult[ToolUseCountMetadata]:
+            # timeout=None defers to env._shell_timeout, set in CodeExecToolProvider.__init__.
             result = await env.run_command(params.cmd)
             return format_result(result)
 

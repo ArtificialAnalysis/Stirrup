@@ -1,8 +1,11 @@
 """Local execution environment backend for code execution in an isolated temp directory."""
 
+import contextlib
 import logging
+import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -59,6 +62,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         allowed_commands: list[str] | None = None,
         temp_base_dir: Path | str | None = None,
         description: str | None = None,
+        shell_timeout: int = SHELL_TIMEOUT,
     ) -> None:
         """Initialize LocalCodeExecToolProvider configuration.
 
@@ -69,9 +73,13 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
             temp_base_dir: Optional base directory for creating the execution environment
                           temp directory. If None, uses the system default temp directory.
             description: Optional description of the tool. If None, uses the default description.
+            shell_timeout: Per-command wall-clock timeout (seconds) for every
+                ``code_exec`` invocation, and the default for direct
+                ``run_command`` calls that pass ``timeout=None``. Defaults to
+                ``SHELL_TIMEOUT``.
 
         """
-        super().__init__(allowed_commands=allowed_commands)
+        super().__init__(allowed_commands=allowed_commands, shell_timeout=shell_timeout)
         self._temp_dir: Path | None = None
         self._temp_base_dir: Path | None = Path(temp_base_dir) if temp_base_dir else None
         self._description = (
@@ -265,12 +273,15 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
                 files.append(str(rel_path))
         return files
 
-    async def run_command(self, cmd: str, *, timeout: int = SHELL_TIMEOUT) -> CommandResult:
+    async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
         """Execute command in the temp directory.
 
         Args:
             cmd: Shell command to execute (bash syntax).
             timeout: Maximum time in seconds to wait for command completion.
+                If None, falls back to ``self._shell_timeout`` (set in
+                ``__init__``), so direct callers share the same budget as the
+                LLM ``code_exec`` tool.
 
         Returns:
             CommandResult with exit_code, stdout, stderr, and optional error info.
@@ -280,6 +291,8 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
             raise RuntimeError(
                 "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
             )
+        if timeout is None:
+            timeout = self._shell_timeout
 
         # Check allowlist
         if not self._check_allowed(cmd):
@@ -299,12 +312,17 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         process = None
         try:
             with anyio.fail_after(timeout):
-                # Use shell=True by wrapping in a shell command
+                # start_new_session=True puts bash at the head of its own session,
+                # so pgid == child pid and we can killpg the whole tree on timeout.
+                # Without it, process.kill() only terminates root bash, leaving
+                # grandchildren reparented to init (same bug shape as the docker
+                # orphan leak that motivated this PR).
                 process = await anyio.open_process(
                     ["bash", "-c", cmd],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=self._temp_dir,
+                    start_new_session=True,
                 )
 
                 # Read all output from streams concurrently
@@ -333,7 +351,10 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
 
         except TimeoutError:
             if process:
-                process.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                with anyio.move_on_after(5):
+                    await process.wait()
             return CommandResult(
                 exit_code=1,
                 stdout="",
