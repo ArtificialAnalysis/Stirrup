@@ -1169,7 +1169,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
     @staticmethod
     def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
-        boundary = "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
+        boundary = (
+            "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
+        )
         return ContextOverflowError(f"Context overflow reached the {boundary}")
 
     async def step(
@@ -1239,28 +1241,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         return assistant_message, tool_messages, finish_params
 
-    async def _summarize_messages_once(self, messages: list[ChatMessage]) -> list[ChatMessage]:
-        task_context: list[ChatMessage] = list(
-            takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages)
-        )
-
-        summary_prompt = [*messages, UserMessage(content=MESSAGE_SUMMARIZER)]
-
-        # We need to pass the tools to the client so that it has context of tools used in the conversation
-        summary = await self._client.generate(summary_prompt, self._active_tools)
-
-        summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
-        summary_bridge = SummaryMessage(content=summary_bridge_prompt)
-        # UserMessage (not AssistantMessage) to avoid consecutive assistant messages which some providers reject
-        acknowledgement_msg = UserMessage(content="Got it, thanks!")
-
-        # Log the completed summary
-        summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
-        self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
-
-        return [*task_context, summary_bridge, acknowledgement_msg]
-
-    async def _summarize_messages_for_run(
+    async def summarize_messages(
         self,
         messages: list[ChatMessage],
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
@@ -1268,16 +1249,30 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         current_messages = messages
         while True:
             try:
-                return current_messages, await self._summarize_messages_once(current_messages)
+                task_context: list[ChatMessage] = list(
+                    takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), current_messages)
+                )
+
+                summary_prompt = [*current_messages, UserMessage(content=MESSAGE_SUMMARIZER)]
+
+                # Give the summarizer the active tools so it can interpret prior tool calls/results.
+                summary = await self._client.generate(summary_prompt, self._active_tools)
+
+                summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
+                summary_bridge = SummaryMessage(content=summary_bridge_prompt)
+                # Use a user acknowledgement to avoid consecutive assistant messages with strict providers.
+                acknowledgement_msg = UserMessage(content="Got it, thanks!")
+
+                summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
+                self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
+
+                return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
             except ContextOverflowError:
                 if not self._recover_from_context_overflow:
                     raise
+                # Summarization can overflow too; drop the latest completed turn and retry.
+                # _unwind_context_overflow raises if that would cross a progress boundary.
                 current_messages = self._unwind_context_overflow(current_messages)
-
-    async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
-        """Condense message history using LLM to stay within context window."""
-        _, summarized_messages = await self._summarize_messages_for_run(messages)
-        return summarized_messages
 
     async def run(
         self,
@@ -1448,7 +1443,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
             if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
-                messages_to_summarize, msgs = await self._summarize_messages_for_run(msgs)
+                messages_to_summarize, msgs = await self.summarize_messages(msgs)
                 full_msg_history.append(messages_to_summarize)
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
