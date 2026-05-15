@@ -22,6 +22,7 @@ from stirrup.constants import (
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -37,6 +38,7 @@ from stirrup.core.models import (
     ToolProvider,
     ToolResult,
     ToolUseCountMetadata,
+    TurnWarningMessage,
     UserMessage,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
@@ -95,11 +97,11 @@ __all__ = [
 LOGGER = logging.getLogger(__name__)
 
 
-def _num_turns_remaining_msg(number_of_turns_remaining: int) -> UserMessage:
+def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessage:
     """Create a user message warning the agent about remaining turns before max_turns is reached."""
     if number_of_turns_remaining == 1:
-        return UserMessage(content="This is the last turn. Please finish the task by calling a finish tool.")
-    return UserMessage(
+        return TurnWarningMessage(content="This is the last turn. Please finish the task by calling a finish tool.")
+    return TurnWarningMessage(
         content=f"You have {number_of_turns_remaining} turns remaining to complete the task. Please continue. Remember you will need a separate turn to call a finish tool.",
     )
 
@@ -259,6 +261,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
+        recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -278,6 +281,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
+        recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -297,6 +301,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
+        recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -316,6 +321,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
         block_successive_assistant_messages: bool = True,
+        recover_from_context_overflow: bool = True,
         # Subagent options
         share_parent_exec_env: bool = False,
         # Logging
@@ -342,6 +348,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             block_successive_assistant_messages: If True (default), automatically inject a continue
                                                message when assistant responds without tool calls to
                                                prevent successive assistant messages.
+            recover_from_context_overflow: If True (default), drop one completed turn and retry when
+                                           the model reports a context overflow. If the original
+                                           prompt still overflows, the context error is raised.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -369,6 +378,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
         self._block_successive_assistant_messages = block_successive_assistant_messages
+        self._recover_from_context_overflow = recover_from_context_overflow
         self._share_parent_exec_env = share_parent_exec_env
 
         # Logger (can be passed in or created here)
@@ -1124,6 +1134,40 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             tool_end_time=tool_end_time,
         )
 
+    def _unwind_context_overflow(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Drop the latest completed turn, preserving the original task prompt."""
+        if not self._recover_from_context_overflow:
+            raise ContextOverflowError("Context overflow recovery is disabled")
+
+        for index in range(len(messages) - 1, -1, -1):
+            msg = messages[index]
+            if isinstance(msg, SummaryMessage):
+                raise ContextOverflowError("Context overflow reached a summarized context")
+
+            if isinstance(msg, AssistantMessage):
+                turn_start = index
+                if turn_start > 0 and isinstance(messages[turn_start - 1], TurnWarningMessage):
+                    turn_start -= 1
+                if not self._has_prior_completed_turn(messages, turn_start):
+                    error_target = "summarized context" if self._has_summary_before(messages, turn_start) else "original prompt"
+                    raise ContextOverflowError(f"Context overflow reached the {error_target}")
+                return messages[:turn_start]
+
+        raise ContextOverflowError("Context overflow reached the original prompt")
+
+    @staticmethod
+    def _has_prior_completed_turn(messages: list[ChatMessage], before_index: int) -> bool:
+        for msg in reversed(messages[:before_index]):
+            if isinstance(msg, SummaryMessage):
+                return False
+            if isinstance(msg, AssistantMessage):
+                return True
+        return False
+
+    @staticmethod
+    def _has_summary_before(messages: list[ChatMessage], before_index: int) -> bool:
+        return any(isinstance(msg, SummaryMessage) for msg in messages[:before_index])
+
     async def step(
         self,
         messages: list[ChatMessage],
@@ -1191,8 +1235,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         return assistant_message, tool_messages, finish_params
 
-    async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
-        """Condense message history using LLM to stay within context window."""
+    async def _summarize_messages_once(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         task_context: list[ChatMessage] = list(
             takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages)
         )
@@ -1212,6 +1255,25 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
 
         return [*task_context, summary_bridge, acknowledgement_msg]
+
+    async def _summarize_messages_for_run(
+        self,
+        messages: list[ChatMessage],
+    ) -> tuple[list[ChatMessage], list[ChatMessage]]:
+        """Summarize messages, unwinding completed turns if summarization overflows."""
+        current_messages = messages
+        while True:
+            try:
+                return current_messages, await self._summarize_messages_once(current_messages)
+            except ContextOverflowError:
+                if not self._recover_from_context_overflow:
+                    raise
+                current_messages = self._unwind_context_overflow(current_messages)
+
+    async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Condense message history using LLM to stay within context window."""
+        _, summarized_messages = await self._summarize_messages_for_run(messages)
+        return summarized_messages
 
     async def run(
         self,
@@ -1342,13 +1404,20 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 msgs.append(num_turns_remaining_msg)
                 self._logger.user_message(num_turns_remaining_msg)
 
-            # Pass turn info to step() for real-time logging
-            assistant_message, tool_messages, finish_params = await self.step(
-                msgs,
-                run_metadata,
-                turn=i + 1,
-                max_turns=self._max_turns,
-            )
+            while True:
+                try:
+                    # Pass turn info to step() for real-time logging
+                    assistant_message, tool_messages, finish_params = await self.step(
+                        msgs,
+                        run_metadata,
+                        turn=i + 1,
+                        max_turns=self._max_turns,
+                    )
+                    break
+                except ContextOverflowError:
+                    if not self._recover_from_context_overflow:
+                        raise
+                    msgs = self._unwind_context_overflow(msgs)
 
             # Update cumulative stats
             total_tool_calls += len(tool_messages)
@@ -1375,8 +1444,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
             if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
-                full_msg_history.append(msgs)
-                msgs = await self.summarize_messages(msgs)
+                messages_to_summarize, msgs = await self._summarize_messages_for_run(msgs)
+                full_msg_history.append(messages_to_summarize)
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
             next_turn_will_show_warning = self._max_turns - (i + 1) <= self._turns_remaining_warning_threshold

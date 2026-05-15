@@ -33,6 +33,7 @@ __all__ = [
     "ImageContentBlock",
     "LLMClient",
     "SubAgentMetadata",
+    "SummaryMessage",
     "SystemMessage",
     "TokenUsage",
     "Tool",
@@ -41,6 +42,7 @@ __all__ = [
     "ToolProvider",
     "ToolResult",
     "ToolUseCountMetadata",
+    "TurnWarningMessage",
     "UserMessage",
     "VideoContentBlock",
     "aggregate_metadata",
@@ -626,6 +628,12 @@ class UserMessage(BaseModel):
 
 class SummaryMessage(UserMessage):
     """Summary message to the LLM."""
+
+    pass
+
+
+class TurnWarningMessage(UserMessage):
+    """Warning message injected when the agent is close to max_turns."""
 
     pass
 
