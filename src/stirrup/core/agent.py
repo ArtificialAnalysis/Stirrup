@@ -1139,21 +1139,24 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         if not self._recover_from_context_overflow:
             raise ContextOverflowError("Context overflow recovery is disabled")
 
+        turn_start = self._latest_completed_turn_start(messages)
+        if turn_start is None or not self._has_prior_completed_turn(messages, turn_start):
+            raise self._context_boundary_error(messages[:turn_start] if turn_start is not None else messages)
+        return messages[:turn_start]
+
+    @staticmethod
+    def _latest_completed_turn_start(messages: list[ChatMessage]) -> int | None:
         for index in range(len(messages) - 1, -1, -1):
             msg = messages[index]
             if isinstance(msg, SummaryMessage):
-                raise ContextOverflowError("Context overflow reached a summarized context")
+                return None
 
             if isinstance(msg, AssistantMessage):
-                turn_start = index
-                if turn_start > 0 and isinstance(messages[turn_start - 1], TurnWarningMessage):
-                    turn_start -= 1
-                if not self._has_prior_completed_turn(messages, turn_start):
-                    error_target = "summarized context" if self._has_summary_before(messages, turn_start) else "original prompt"
-                    raise ContextOverflowError(f"Context overflow reached the {error_target}")
-                return messages[:turn_start]
+                if index > 0 and isinstance(messages[index - 1], TurnWarningMessage):
+                    return index - 1
+                return index
 
-        raise ContextOverflowError("Context overflow reached the original prompt")
+        return None
 
     @staticmethod
     def _has_prior_completed_turn(messages: list[ChatMessage], before_index: int) -> bool:
@@ -1165,8 +1168,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         return False
 
     @staticmethod
-    def _has_summary_before(messages: list[ChatMessage], before_index: int) -> bool:
-        return any(isinstance(msg, SummaryMessage) for msg in messages[:before_index])
+    def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
+        boundary = "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
+        return ContextOverflowError(f"Context overflow reached the {boundary}")
 
     async def step(
         self,
