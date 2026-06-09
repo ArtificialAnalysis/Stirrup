@@ -175,6 +175,12 @@ def _get_tool_durations(messages: list[list[ChatMessage]]) -> dict[str, list[flo
     return durations
 
 
+def _get_turn_count(full_msg_history: list[list[ChatMessage]], messages: list[ChatMessage]) -> int:
+    """Count accepted assistant turns still present in history."""
+    all_messages = chain(chain.from_iterable(full_msg_history), messages)
+    return sum(1 for msg in all_messages if isinstance(msg, AssistantMessage))
+
+
 def _merge_run_metadata(run_metadata_by_turn: dict[str, dict[str, list[Any]]]) -> dict[str, list[Any]]:
     """Merge per-turn metadata into the public run_metadata shape."""
     run_metadata: dict[str, list[Any]] = {}
@@ -1340,7 +1346,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Initialize cache manager
         cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
-        start_turn = 0
         resumed = False
         cached_run_metadata_by_turn: dict[str, dict[str, list[Any]]] | None = None
 
@@ -1357,9 +1362,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 msgs = cached.msgs
                 full_msg_history = cached.full_msg_history
                 cached_run_metadata_by_turn = cached.run_metadata_by_turn
-                start_turn = cached.turn
                 resumed = True
-                self._logger.info(f"Resuming from cached state at turn {start_turn}")
+                restored_turn = _get_turn_count(full_msg_history, msgs)
+                self._logger.info(f"Resuming from cached state at turn {restored_turn}")
             else:
                 self._logger.info(f"No cache found for task {task_hash}, starting fresh")
 
@@ -1393,8 +1398,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Use logger callback if available and not overridden
         step_callback = self._logger.on_step
-
-        full_msg_history: list[list[ChatMessage]] = []
         run_metadata_by_turn: dict[str, dict[str, list[Any]]] = {}
         if cached_run_metadata_by_turn is not None:
             run_metadata_by_turn.update(cached_run_metadata_by_turn)
@@ -1403,19 +1406,20 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         total_tool_calls = 0
         total_input_tokens = 0
         total_output_tokens = 0
+        finish_params: FinishParams | None = None
 
-        for i in range(start_turn, self._max_turns):
+        while _get_turn_count(full_msg_history, msgs) < self._max_turns:
+            turn = _get_turn_count(full_msg_history, msgs)
             # Capture current state for potential caching (before any async work)
             self._current_run_state = CacheState(
                 msgs=list(msgs),
                 full_msg_history=[list(group) for group in full_msg_history],
-                turn=i,
                 run_metadata_by_turn={turn_id: dict(metadata) for turn_id, metadata in run_metadata_by_turn.items()},
                 task_hash=task_hash,
                 agent_name=self._name,
             )
-            if self._max_turns - i <= self._turns_remaining_warning_threshold and i != 0:
-                num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - i)
+            if self._max_turns - turn <= self._turns_remaining_warning_threshold and turn != 0:
+                num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - turn)
                 msgs.append(num_turns_remaining_msg)
                 self._logger.user_message(num_turns_remaining_msg)
 
@@ -1426,7 +1430,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     assistant_message, tool_messages, finish_params = await self.step(
                         msgs,
                         turn_metadata,
-                        turn=i + 1,
+                        turn=_get_turn_count(full_msg_history, msgs) + 1,
                         max_turns=self._max_turns,
                     )
                     break
@@ -1438,13 +1442,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             # Update cumulative stats
             run_metadata_by_turn[assistant_message.id] = turn_metadata
+            accepted_turn = _get_turn_count(full_msg_history, msgs) + 1
             total_tool_calls += len(tool_messages)
             total_input_tokens += assistant_message.token_usage.input
             total_output_tokens += assistant_message.token_usage.output
 
             # Call progress callback after step completes
             if step_callback:
-                step_callback(i + 1, total_tool_calls, total_input_tokens, total_output_tokens)
+                step_callback(accepted_turn, total_tool_calls, total_input_tokens, total_output_tokens)
 
             user_messages: list[UserMessage] = []
             if self._text_only_tool_responses:
@@ -1460,13 +1465,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 break
 
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
-            if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:
+            if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
                 full_msg_history.append(messages_to_summarize)
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
-            next_turn_will_show_warning = self._max_turns - (i + 1) <= self._turns_remaining_warning_threshold
+            next_turn_will_show_warning = self._max_turns - accepted_turn <= self._turns_remaining_warning_threshold
             if (
                 self._block_successive_assistant_messages
                 and not tool_messages
@@ -1474,7 +1479,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 and not next_turn_will_show_warning
             ):
                 msgs.extend([UserMessage(content="Please continue the task")])
-        else:
+
+        if finish_params is None:
             LOGGER.error(
                 f"Maximum number of turns reached: {self._max_turns}. The agent was not able to finish the task. Consider increasing the max_turns parameter.",
             )

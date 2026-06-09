@@ -253,11 +253,61 @@ async def test_context_overflow_removes_unwound_turn_metadata() -> None:
     assert not any(msg.name == "marker" for group in history for msg in group if isinstance(msg, ToolMessage))
 
 
+async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
+    responses = [
+        AssistantMessage(
+            content="First step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Second step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        ContextOverflowError("too much context"),
+        AssistantMessage(
+            content="Recovered second step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Finished after recovery", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=3,
+        turns_remaining_warning_threshold=0,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    assistant_contents = [msg.content for group in history for msg in group if isinstance(msg, AssistantMessage)]
+
+    assert finish_params is not None
+    assert finish_params.reason == "Finished after recovery"
+    assert assistant_contents == ["First step", "Recovered second step", "Done"]
+
+
 async def test_cache_state_preserves_run_metadata_by_turn() -> None:
     state = CacheState(
         msgs=[UserMessage(content="Test task")],
         full_msg_history=[],
-        turn=2,
         run_metadata_by_turn={"assistant-id": {"marker": [{"value": "kept"}]}},
         task_hash="task",
     )

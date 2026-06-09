@@ -247,9 +247,6 @@ class CacheState:
     full_msg_history: list[list[ChatMessage]]
     """Groups of messages (separated when context summarization occurs)."""
 
-    turn: int
-    """Current turn number (0-indexed) - resume will start from this turn."""
-
     task_hash: str
     """Hash of the original init_msgs for verification on resume."""
 
@@ -267,7 +264,6 @@ class CacheState:
         return {
             "msgs": serialize_messages(self.msgs),
             "full_msg_history": [serialize_messages(group) for group in self.full_msg_history],
-            "turn": self.turn,
             "run_metadata_by_turn": _serialize_run_metadata_by_turn(self.run_metadata_by_turn),
             "task_hash": self.task_hash,
             "timestamp": self.timestamp,
@@ -280,7 +276,6 @@ class CacheState:
         return cls(
             msgs=deserialize_messages(data["msgs"]),
             full_msg_history=[deserialize_messages(group) for group in data["full_msg_history"]],
-            turn=data["turn"],
             task_hash=data["task_hash"],
             timestamp=data.get("timestamp", ""),
             agent_name=data.get("agent_name", ""),
@@ -348,7 +343,7 @@ class CacheManager:
 
         try:
             state_data = state.to_dict()
-            logger.debug("Serialized cache state: turn=%d, msgs=%d", state.turn, len(state.msgs))
+            logger.debug("Serialized cache state: msgs=%d", len(state.msgs))
 
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(state_data, f, indent=2, ensure_ascii=False)
@@ -359,7 +354,7 @@ class CacheManager:
 
             # Atomic rename (on POSIX systems)
             temp_file.replace(state_file)
-            logger.info("Saved cache state to %s (turn %d)", state_file, state.turn)
+            logger.info("Saved cache state to %s", state_file)
         except Exception as e:
             logger.exception("Failed to save cache state: %s", e)
             # Try direct write as fallback
@@ -403,7 +398,7 @@ class CacheManager:
             with open(state_file, encoding="utf-8") as f:
                 data = json.load(f)
             state = CacheState.from_dict(data)
-            logger.info("Loaded cache state from %s (turn %d)", state_file, state.turn)
+            logger.info("Loaded cache state from %s", state_file)
             return state
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning("Failed to load cache for task %s: %s", task_hash, e)
