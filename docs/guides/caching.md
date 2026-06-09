@@ -40,9 +40,10 @@ Resuming from cached state at turn 15
 ## What Gets Cached
 
 - Conversation messages and history
-- Current turn number
-- Tool metadata
+- Tool metadata keyed by accepted assistant turn
 - All files in the execution environment
+
+Turn progress is derived from the restored message history rather than stored separately. This keeps cached runs aligned with context-overflow recovery, where an unwound turn is removed from both history and metadata.
 
 ## Preserving Caches on Success
 
