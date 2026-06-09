@@ -1165,6 +1165,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
     @staticmethod
     def _latest_completed_turn(messages: list[ChatMessage]) -> tuple[int, str] | None:
+        """Return the start index and id for the latest assistant turn.
+
+        A turn-warning message immediately before an assistant response belongs to that
+        assistant turn, so it is unwound with the assistant response.
+        """
         for index in range(len(messages) - 1, -1, -1):
             msg = messages[index]
             if isinstance(msg, SummaryMessage):
