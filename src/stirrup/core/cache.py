@@ -215,6 +215,13 @@ def _serialize_run_metadata(run_metadata: dict[str, list[Any]]) -> dict[str, lis
     }
 
 
+def _serialize_run_metadata_by_turn(
+    run_metadata_by_turn: dict[str, dict[str, list[Any]]],
+) -> dict[str, dict[str, list[Any]]]:
+    """Serialize per-turn metadata dicts to JSON-compatible format."""
+    return {turn_id: _serialize_run_metadata(turn_metadata) for turn_id, turn_metadata in run_metadata_by_turn.items()}
+
+
 def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
     """Deserialize a list of ChatMessages from JSON format.
 
@@ -243,9 +250,6 @@ class CacheState:
     turn: int
     """Current turn number (0-indexed) - resume will start from this turn."""
 
-    run_metadata: dict[str, list[Any]]
-    """Accumulated tool metadata from the run."""
-
     task_hash: str
     """Hash of the original init_msgs for verification on resume."""
 
@@ -255,13 +259,16 @@ class CacheState:
     agent_name: str = ""
     """Name of the agent that created this cache."""
 
+    run_metadata_by_turn: dict[str, dict[str, list[Any]]] = field(default_factory=dict)
+    """Accumulated tool metadata keyed by assistant message id."""
+
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dictionary."""
         return {
             "msgs": serialize_messages(self.msgs),
             "full_msg_history": [serialize_messages(group) for group in self.full_msg_history],
             "turn": self.turn,
-            "run_metadata": _serialize_run_metadata(self.run_metadata),
+            "run_metadata_by_turn": _serialize_run_metadata_by_turn(self.run_metadata_by_turn),
             "task_hash": self.task_hash,
             "timestamp": self.timestamp,
             "agent_name": self.agent_name,
@@ -274,10 +281,10 @@ class CacheState:
             msgs=deserialize_messages(data["msgs"]),
             full_msg_history=[deserialize_messages(group) for group in data["full_msg_history"]],
             turn=data["turn"],
-            run_metadata=data["run_metadata"],
             task_hash=data["task_hash"],
             timestamp=data.get("timestamp", ""),
             agent_name=data.get("agent_name", ""),
+            run_metadata_by_turn=data["run_metadata_by_turn"],
         )
 
 

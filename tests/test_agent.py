@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
+from stirrup.core.cache import CacheState
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -191,6 +192,81 @@ async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
     assistant_contents = [msg.content for group in history for msg in group if isinstance(msg, AssistantMessage)]
     assert "First step" in assistant_contents
     assert "Second step" not in assistant_contents
+
+
+async def test_context_overflow_removes_unwound_turn_metadata() -> None:
+    class MarkerParams(BaseModel):
+        value: str
+
+    class MarkerMetadata(BaseModel):
+        value: str
+
+    def marker_executor(params: MarkerParams) -> ToolResult[MarkerMetadata]:
+        return ToolResult(content=params.value, metadata=MarkerMetadata(value=params.value))
+
+    marker_tool = Tool[MarkerParams, MarkerMetadata](
+        name="marker",
+        description="Return marker metadata",
+        parameters=MarkerParams,
+        executor=marker_executor,  # ty: ignore[invalid-argument-type]
+    )
+
+    responses = [
+        AssistantMessage(
+            content="First step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Second step",
+            tool_calls=[ToolCall(name="marker", arguments='{"value": "dropped"}', tool_call_id="call_marker")],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        ContextOverflowError("too much context"),
+        AssistantMessage(
+            content="Recovered",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Recovered", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[marker_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, run_metadata = await session.run([UserMessage(content="Test task")])
+
+    assert finish_params is not None
+    assert "marker" not in run_metadata
+    assert not any(msg.name == "marker" for group in history for msg in group if isinstance(msg, ToolMessage))
+
+
+async def test_cache_state_preserves_run_metadata_by_turn() -> None:
+    state = CacheState(
+        msgs=[UserMessage(content="Test task")],
+        full_msg_history=[],
+        turn=2,
+        run_metadata_by_turn={"assistant-id": {"marker": [{"value": "kept"}]}},
+        task_hash="task",
+    )
+
+    data = state.to_dict()
+    restored = CacheState.from_dict(data)
+
+    assert "run_metadata" not in data
+    assert restored.run_metadata_by_turn == {"assistant-id": {"marker": [{"value": "kept"}]}}
 
 
 async def test_context_overflow_at_original_prompt_raises() -> None:

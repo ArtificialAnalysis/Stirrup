@@ -175,6 +175,15 @@ def _get_tool_durations(messages: list[list[ChatMessage]]) -> dict[str, list[flo
     return durations
 
 
+def _merge_run_metadata(run_metadata_by_turn: dict[str, dict[str, list[Any]]]) -> dict[str, list[Any]]:
+    """Merge per-turn metadata into the public run_metadata shape."""
+    run_metadata: dict[str, list[Any]] = {}
+    for turn_metadata in run_metadata_by_turn.values():
+        for name, metadata_list in turn_metadata.items():
+            run_metadata.setdefault(name, []).extend(metadata_list)
+    return run_metadata
+
+
 def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -> dict[str, float | int | str]:
     """Compute speed stats for this agent's model from AssistantMessages.
 
@@ -1134,18 +1143,22 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             tool_end_time=tool_end_time,
         )
 
-    def _unwind_context_overflow(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+    def _unwind_context_overflow(self, messages: list[ChatMessage]) -> tuple[list[ChatMessage], str]:
         """Drop the latest completed turn, preserving the original task prompt."""
         if not self._recover_from_context_overflow:
             raise ContextOverflowError("Context overflow recovery is disabled")
 
-        turn_start = self._latest_completed_turn_start(messages)
-        if turn_start is None or not self._has_prior_completed_turn(messages, turn_start):
-            raise self._context_boundary_error(messages[:turn_start] if turn_start is not None else messages)
-        return messages[:turn_start]
+        turn = self._latest_completed_turn(messages)
+        if turn is None:
+            raise self._context_boundary_error(messages)
+
+        turn_start, assistant_message_id = turn
+        if not self._has_prior_completed_turn(messages, turn_start):
+            raise self._context_boundary_error(messages[:turn_start])
+        return messages[:turn_start], assistant_message_id
 
     @staticmethod
-    def _latest_completed_turn_start(messages: list[ChatMessage]) -> int | None:
+    def _latest_completed_turn(messages: list[ChatMessage]) -> tuple[int, str] | None:
         for index in range(len(messages) - 1, -1, -1):
             msg = messages[index]
             if isinstance(msg, SummaryMessage):
@@ -1153,8 +1166,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             if isinstance(msg, AssistantMessage):
                 if index > 0 and isinstance(messages[index - 1], TurnWarningMessage):
-                    return index - 1
-                return index
+                    return index - 1, msg.id
+                return index, msg.id
 
         return None
 
@@ -1244,6 +1257,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
     async def summarize_messages(
         self,
         messages: list[ChatMessage],
+        run_metadata_by_turn: dict[str, dict[str, list[Any]]],
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
         """Summarize messages, unwinding completed turns if summarization overflows."""
         current_messages = messages
@@ -1272,7 +1286,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     raise
                 # Summarization can overflow too; drop the latest completed turn and retry.
                 # _unwind_context_overflow raises if that would cross a progress boundary.
-                current_messages = self._unwind_context_overflow(current_messages)
+                current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
+                run_metadata_by_turn.pop(dropped_turn_id, None)
 
     async def run(
         self,
@@ -1327,6 +1342,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
         start_turn = 0
         resumed = False
+        cached_run_metadata_by_turn: dict[str, dict[str, list[Any]]] | None = None
 
         # Try to resume from cache if requested
         if self._resume:
@@ -1340,7 +1356,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Restore state
                 msgs = cached.msgs
                 full_msg_history = cached.full_msg_history
-                run_metadata = cached.run_metadata
+                cached_run_metadata_by_turn = cached.run_metadata_by_turn
                 start_turn = cached.turn
                 resumed = True
                 self._logger.info(f"Resuming from cached state at turn {start_turn}")
@@ -1358,9 +1374,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 msgs.append(UserMessage(content=init_msgs))
             else:
                 msgs.extend(init_msgs)
-
-            # Local metadata storage - isolated per run() invocation for thread safety
-            run_metadata: dict[str, list[Any]] = {}
 
             full_msg_history: list[list[ChatMessage]] = []
 
@@ -1382,6 +1395,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         step_callback = self._logger.on_step
 
         full_msg_history: list[list[ChatMessage]] = []
+        run_metadata_by_turn: dict[str, dict[str, list[Any]]] = {}
+        if cached_run_metadata_by_turn is not None:
+            run_metadata_by_turn.update(cached_run_metadata_by_turn)
 
         # Cumulative stats for spinner
         total_tool_calls = 0
@@ -1394,7 +1410,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 msgs=list(msgs),
                 full_msg_history=[list(group) for group in full_msg_history],
                 turn=i,
-                run_metadata=dict(run_metadata),
+                run_metadata_by_turn={turn_id: dict(metadata) for turn_id, metadata in run_metadata_by_turn.items()},
                 task_hash=task_hash,
                 agent_name=self._name,
             )
@@ -1404,11 +1420,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.user_message(num_turns_remaining_msg)
 
             while True:
+                turn_metadata: dict[str, list[Any]] = {}
                 try:
                     # Pass turn info to step() for real-time logging
                     assistant_message, tool_messages, finish_params = await self.step(
                         msgs,
-                        run_metadata,
+                        turn_metadata,
                         turn=i + 1,
                         max_turns=self._max_turns,
                     )
@@ -1416,9 +1433,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 except ContextOverflowError:
                     if not self._recover_from_context_overflow:
                         raise
-                    msgs = self._unwind_context_overflow(msgs)
+                    msgs, dropped_turn_id = self._unwind_context_overflow(msgs)
+                    run_metadata_by_turn.pop(dropped_turn_id, None)
 
             # Update cumulative stats
+            run_metadata_by_turn[assistant_message.id] = turn_metadata
             total_tool_calls += len(tool_messages)
             total_input_tokens += assistant_message.token_usage.input
             total_output_tokens += assistant_message.token_usage.output
@@ -1443,7 +1462,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
             if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
-                messages_to_summarize, msgs = await self.summarize_messages(msgs)
+                messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
                 full_msg_history.append(messages_to_summarize)
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
@@ -1463,6 +1482,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         full_msg_history.append(msgs)
 
         # Add agent's own token usage, tool durations, and model speed to run_metadata
+        run_metadata = _merge_run_metadata(run_metadata_by_turn)
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
         run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
         run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]
