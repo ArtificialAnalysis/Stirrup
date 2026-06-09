@@ -21,6 +21,8 @@ from stirrup.core.models import (
     AudioContentBlock,
     ChatMessage,
     ImageContentBlock,
+    SummaryMessage,
+    TurnWarningMessage,
     VideoContentBlock,
 )
 
@@ -162,6 +164,12 @@ def deserialize_message(data: dict) -> ChatMessage:
         data["content"] = [_deserialize_content_block(block) for block in content]
     elif content is not None and not isinstance(content, str):
         data["content"] = _deserialize_content_block(content)
+
+    if data.get("role") == "user":
+        if data.get("kind") == "summary":
+            return SummaryMessage.model_validate(data)
+        if data.get("kind") == "turn_warning":
+            return TurnWarningMessage.model_validate(data)
 
     # Use TypeAdapter for discriminated union deserialization
     return ChatMessageAdapter.validate_python(data)

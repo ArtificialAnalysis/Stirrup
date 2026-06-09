@@ -22,6 +22,7 @@ from stirrup.core.models import (
     ToolCall,
     ToolMessage,
     ToolResult,
+    TurnWarningMessage,
     UserMessage,
 )
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
@@ -317,6 +318,25 @@ async def test_cache_state_preserves_run_metadata_by_turn() -> None:
 
     assert "run_metadata" not in data
     assert restored.run_metadata_by_turn == {"assistant-id": {"marker": [{"value": "kept"}]}}
+
+
+async def test_cache_state_preserves_special_user_message_types() -> None:
+    state = CacheState(
+        msgs=[
+            SummaryMessage(content="Summary"),
+            TurnWarningMessage(content="One turn left"),
+            UserMessage(content="Regular user message"),
+        ],
+        full_msg_history=[],
+        run_metadata_by_turn={},
+        task_hash="task",
+    )
+
+    restored = CacheState.from_dict(state.to_dict())
+
+    assert isinstance(restored.msgs[0], SummaryMessage)
+    assert isinstance(restored.msgs[1], TurnWarningMessage)
+    assert type(restored.msgs[2]) is UserMessage
 
 
 async def test_context_overflow_at_original_prompt_raises() -> None:

@@ -623,19 +623,20 @@ class UserMessage(BaseModel):
     """User input message to the LLM."""
 
     role: Literal["user"] = "user"
+    kind: Literal["user"] = "user"
     content: Content
 
 
 class SummaryMessage(UserMessage):
     """Summary message to the LLM."""
 
-    pass
+    kind: Literal["summary"] = "summary"
 
 
 class TurnWarningMessage(UserMessage):
     """Warning message injected when the agent is close to max_turns."""
 
-    pass
+    kind: Literal["turn_warning"] = "turn_warning"
 
 
 class Reasoning(BaseModel):
