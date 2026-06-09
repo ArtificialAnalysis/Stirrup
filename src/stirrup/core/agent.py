@@ -22,6 +22,7 @@ from stirrup.constants import (
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -37,6 +38,7 @@ from stirrup.core.models import (
     ToolProvider,
     ToolResult,
     ToolUseCountMetadata,
+    TurnWarningMessage,
     UserMessage,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
@@ -95,11 +97,11 @@ __all__ = [
 LOGGER = logging.getLogger(__name__)
 
 
-def _num_turns_remaining_msg(number_of_turns_remaining: int) -> UserMessage:
+def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessage:
     """Create a user message warning the agent about remaining turns before max_turns is reached."""
     if number_of_turns_remaining == 1:
-        return UserMessage(content="This is the last turn. Please finish the task by calling a finish tool.")
-    return UserMessage(
+        return TurnWarningMessage(content="This is the last turn. Please finish the task by calling a finish tool.")
+    return TurnWarningMessage(
         content=f"You have {number_of_turns_remaining} turns remaining to complete the task. Please continue. Remember you will need a separate turn to call a finish tool.",
     )
 
@@ -171,6 +173,21 @@ def _get_tool_durations(messages: list[list[ChatMessage]]) -> dict[str, list[flo
         if isinstance(msg, ToolMessage) and msg.name and msg.tool_duration is not None:
             durations.setdefault(msg.name, []).append(msg.tool_duration)
     return durations
+
+
+def _get_turn_count(full_msg_history: list[list[ChatMessage]], messages: list[ChatMessage]) -> int:
+    """Count accepted assistant turns still present in history."""
+    all_messages = chain(chain.from_iterable(full_msg_history), messages)
+    return sum(1 for msg in all_messages if isinstance(msg, AssistantMessage))
+
+
+def _merge_run_metadata(run_metadata_by_turn: dict[str, dict[str, list[Any]]]) -> dict[str, list[Any]]:
+    """Merge per-turn metadata into the public run_metadata shape."""
+    run_metadata: dict[str, list[Any]] = {}
+    for turn_metadata in run_metadata_by_turn.values():
+        for name, metadata_list in turn_metadata.items():
+            run_metadata.setdefault(name, []).extend(metadata_list)
+    return run_metadata
 
 
 def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -> dict[str, float | int | str]:
@@ -259,6 +276,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
+        recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -278,6 +296,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
+        recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -297,6 +316,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
+        recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -316,6 +336,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
         block_successive_assistant_messages: bool = True,
+        recover_from_context_overflow: bool = True,
         # Subagent options
         share_parent_exec_env: bool = False,
         # Logging
@@ -342,6 +363,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             block_successive_assistant_messages: If True (default), automatically inject a continue
                                                message when assistant responds without tool calls to
                                                prevent successive assistant messages.
+            recover_from_context_overflow: If True (default), drop one completed turn and retry when
+                                           the model reports a context overflow. If the original
+                                           prompt still overflows, the context error is raised.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -369,6 +393,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
         self._block_successive_assistant_messages = block_successive_assistant_messages
+        self._recover_from_context_overflow = recover_from_context_overflow
         self._share_parent_exec_env = share_parent_exec_env
 
         # Logger (can be passed in or created here)
@@ -1124,6 +1149,55 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             tool_end_time=tool_end_time,
         )
 
+    def _unwind_context_overflow(self, messages: list[ChatMessage]) -> tuple[list[ChatMessage], str]:
+        """Drop the latest completed turn, preserving the original task prompt."""
+        if not self._recover_from_context_overflow:
+            raise ContextOverflowError("Context overflow recovery is disabled")
+
+        turn = self._latest_completed_turn(messages)
+        if turn is None:
+            raise self._context_boundary_error(messages)
+
+        turn_start, assistant_message_id = turn
+        if not self._has_prior_completed_turn(messages, turn_start):
+            raise self._context_boundary_error(messages[:turn_start])
+        return messages[:turn_start], assistant_message_id
+
+    @staticmethod
+    def _latest_completed_turn(messages: list[ChatMessage]) -> tuple[int, str] | None:
+        """Return the start index and id for the latest assistant turn.
+
+        A turn-warning message immediately before an assistant response belongs to that
+        assistant turn, so it is unwound with the assistant response.
+        """
+        for index in range(len(messages) - 1, -1, -1):
+            msg = messages[index]
+            if isinstance(msg, SummaryMessage):
+                return None
+
+            if isinstance(msg, AssistantMessage):
+                if index > 0 and isinstance(messages[index - 1], TurnWarningMessage):
+                    return index - 1, msg.id
+                return index, msg.id
+
+        return None
+
+    @staticmethod
+    def _has_prior_completed_turn(messages: list[ChatMessage], before_index: int) -> bool:
+        for msg in reversed(messages[:before_index]):
+            if isinstance(msg, SummaryMessage):
+                return False
+            if isinstance(msg, AssistantMessage):
+                return True
+        return False
+
+    @staticmethod
+    def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
+        boundary = (
+            "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
+        )
+        return ContextOverflowError(f"Context overflow reached the {boundary}")
+
     async def step(
         self,
         messages: list[ChatMessage],
@@ -1191,27 +1265,38 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         return assistant_message, tool_messages, finish_params
 
-    async def summarize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
-        """Condense message history using LLM to stay within context window."""
-        task_context: list[ChatMessage] = list(
-            takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), messages)
-        )
+    async def summarize_messages(
+        self,
+        messages: list[ChatMessage],
+        run_metadata_by_turn: dict[str, dict[str, list[Any]]],
+    ) -> tuple[list[ChatMessage], list[ChatMessage]]:
+        """Summarize messages, unwinding completed turns if summarization overflows."""
+        current_messages = messages
+        while True:
+            try:
+                task_context: list[ChatMessage] = list(
+                    takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), current_messages)
+                )
 
-        summary_prompt = [*messages, UserMessage(content=MESSAGE_SUMMARIZER)]
+                summary_prompt = [*current_messages, UserMessage(content=MESSAGE_SUMMARIZER)]
 
-        # We need to pass the tools to the client so that it has context of tools used in the conversation
-        summary = await self._client.generate(summary_prompt, self._active_tools)
+                # Give the summarizer the active tools so it can interpret prior tool calls/results.
+                summary = await self._client.generate(summary_prompt, self._active_tools)
 
-        summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
-        summary_bridge = SummaryMessage(content=summary_bridge_prompt)
-        # UserMessage (not AssistantMessage) to avoid consecutive assistant messages which some providers reject
-        acknowledgement_msg = UserMessage(content="Got it, thanks!")
+                summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
+                summary_bridge = SummaryMessage(content=summary_bridge_prompt)
+                # Use a user acknowledgement to avoid consecutive assistant messages with strict providers.
+                acknowledgement_msg = UserMessage(content="Got it, thanks!")
 
-        # Log the completed summary
-        summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
-        self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
+                summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
+                self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
 
-        return [*task_context, summary_bridge, acknowledgement_msg]
+                return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
+            except ContextOverflowError:
+                # Summarization can overflow too; drop the latest completed turn and retry.
+                # _unwind_context_overflow raises if that would cross a progress boundary.
+                current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
+                run_metadata_by_turn.pop(dropped_turn_id, None)
 
     async def run(
         self,
@@ -1264,8 +1349,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Initialize cache manager
         cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
-        start_turn = 0
         resumed = False
+        cached_run_metadata_by_turn: dict[str, dict[str, list[Any]]] | None = None
 
         # Try to resume from cache if requested
         if self._resume:
@@ -1279,10 +1364,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Restore state
                 msgs = cached.msgs
                 full_msg_history = cached.full_msg_history
-                run_metadata = cached.run_metadata
-                start_turn = cached.turn
+                cached_run_metadata_by_turn = cached.run_metadata_by_turn
                 resumed = True
-                self._logger.info(f"Resuming from cached state at turn {start_turn}")
+                restored_turn = _get_turn_count(full_msg_history, msgs)
+                self._logger.info(f"Resuming from cached state at turn {restored_turn}")
             else:
                 self._logger.info(f"No cache found for task {task_hash}, starting fresh")
 
@@ -1297,9 +1382,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 msgs.append(UserMessage(content=init_msgs))
             else:
                 msgs.extend(init_msgs)
-
-            # Local metadata storage - isolated per run() invocation for thread safety
-            run_metadata: dict[str, list[Any]] = {}
 
             full_msg_history: list[list[ChatMessage]] = []
 
@@ -1319,45 +1401,56 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Use logger callback if available and not overridden
         step_callback = self._logger.on_step
-
-        full_msg_history: list[list[ChatMessage]] = []
+        run_metadata_by_turn: dict[str, dict[str, list[Any]]] = {}
+        if cached_run_metadata_by_turn is not None:
+            run_metadata_by_turn.update(cached_run_metadata_by_turn)
 
         # Cumulative stats for spinner
         total_tool_calls = 0
         total_input_tokens = 0
         total_output_tokens = 0
+        finish_params: FinishParams | None = None
 
-        for i in range(start_turn, self._max_turns):
+        while _get_turn_count(full_msg_history, msgs) < self._max_turns:
+            turn = _get_turn_count(full_msg_history, msgs)
             # Capture current state for potential caching (before any async work)
             self._current_run_state = CacheState(
                 msgs=list(msgs),
                 full_msg_history=[list(group) for group in full_msg_history],
-                turn=i,
-                run_metadata=dict(run_metadata),
+                run_metadata_by_turn={turn_id: dict(metadata) for turn_id, metadata in run_metadata_by_turn.items()},
                 task_hash=task_hash,
                 agent_name=self._name,
             )
-            if self._max_turns - i <= self._turns_remaining_warning_threshold and i != 0:
-                num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - i)
+            if self._max_turns - turn <= self._turns_remaining_warning_threshold and turn != 0:
+                num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - turn)
                 msgs.append(num_turns_remaining_msg)
                 self._logger.user_message(num_turns_remaining_msg)
 
-            # Pass turn info to step() for real-time logging
-            assistant_message, tool_messages, finish_params = await self.step(
-                msgs,
-                run_metadata,
-                turn=i + 1,
-                max_turns=self._max_turns,
-            )
+            while True:
+                turn_metadata: dict[str, list[Any]] = {}
+                try:
+                    # Pass turn info to step() for real-time logging
+                    assistant_message, tool_messages, finish_params = await self.step(
+                        msgs,
+                        turn_metadata,
+                        turn=_get_turn_count(full_msg_history, msgs) + 1,
+                        max_turns=self._max_turns,
+                    )
+                    break
+                except ContextOverflowError:
+                    msgs, dropped_turn_id = self._unwind_context_overflow(msgs)
+                    run_metadata_by_turn.pop(dropped_turn_id, None)
 
             # Update cumulative stats
+            run_metadata_by_turn[assistant_message.id] = turn_metadata
+            accepted_turn = _get_turn_count(full_msg_history, msgs) + 1
             total_tool_calls += len(tool_messages)
             total_input_tokens += assistant_message.token_usage.input
             total_output_tokens += assistant_message.token_usage.output
 
             # Call progress callback after step completes
             if step_callback:
-                step_callback(i + 1, total_tool_calls, total_input_tokens, total_output_tokens)
+                step_callback(accepted_turn, total_tool_calls, total_input_tokens, total_output_tokens)
 
             user_messages: list[UserMessage] = []
             if self._text_only_tool_responses:
@@ -1373,13 +1466,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 break
 
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
-            if pct_context_used >= self._context_summarization_cutoff and i + 1 != self._max_turns:
+            if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
-                full_msg_history.append(msgs)
-                msgs = await self.summarize_messages(msgs)
+                messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
+                full_msg_history.append(messages_to_summarize)
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
-            next_turn_will_show_warning = self._max_turns - (i + 1) <= self._turns_remaining_warning_threshold
+            next_turn_will_show_warning = self._max_turns - accepted_turn <= self._turns_remaining_warning_threshold
             if (
                 self._block_successive_assistant_messages
                 and not tool_messages
@@ -1387,7 +1480,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 and not next_turn_will_show_warning
             ):
                 msgs.extend([UserMessage(content="Please continue the task")])
-        else:
+
+        if finish_params is None:
             LOGGER.error(
                 f"Maximum number of turns reached: {self._max_turns}. The agent was not able to finish the task. Consider increasing the max_turns parameter.",
             )
@@ -1395,6 +1489,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         full_msg_history.append(msgs)
 
         # Add agent's own token usage, tool durations, and model speed to run_metadata
+        run_metadata = _merge_run_metadata(run_metadata_by_turn)
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
         run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
         run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]

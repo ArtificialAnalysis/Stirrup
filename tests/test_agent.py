@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
+from stirrup.core.cache import CacheState
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -20,6 +22,7 @@ from stirrup.core.models import (
     ToolCall,
     ToolMessage,
     ToolResult,
+    TurnWarningMessage,
     UserMessage,
 )
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
@@ -28,7 +31,7 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 class MockLLMClient(LLMClient):
     """Mock LLM client for testing."""
 
-    def __init__(self, responses: list[AssistantMessage], max_tokens: int = 100_000) -> None:
+    def __init__(self, responses: list[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
@@ -46,6 +49,8 @@ class MockLLMClient(LLMClient):
         self.tools_seen.append(tools)
         response = self.responses[self.call_count]
         self.call_count += 1
+        if isinstance(response, Exception):
+            raise response
         return response
 
 
@@ -142,6 +147,295 @@ async def test_agent_max_turns() -> None:
     assert isinstance(run_metadata, dict)
     # Agent's own token usage metadata should be present
     assert "token_usage" in run_metadata
+
+
+async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
+    responses = [
+        AssistantMessage(
+            content="First step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Second step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        ContextOverflowError("too much context"),
+        AssistantMessage(
+            content="Recovered",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Recovered", "paths": []}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    assert finish_params is not None
+    assert finish_params.reason == "Recovered"
+    assert client.call_count == 4
+    assistant_contents = [msg.content for group in history for msg in group if isinstance(msg, AssistantMessage)]
+    assert "First step" in assistant_contents
+    assert "Second step" not in assistant_contents
+
+
+async def test_context_overflow_removes_unwound_turn_metadata() -> None:
+    class MarkerParams(BaseModel):
+        value: str
+
+    class MarkerMetadata(BaseModel):
+        value: str
+
+    def marker_executor(params: MarkerParams) -> ToolResult[MarkerMetadata]:
+        return ToolResult(content=params.value, metadata=MarkerMetadata(value=params.value))
+
+    marker_tool = Tool[MarkerParams, MarkerMetadata](
+        name="marker",
+        description="Return marker metadata",
+        parameters=MarkerParams,
+        executor=marker_executor,  # ty: ignore[invalid-argument-type]
+    )
+
+    responses = [
+        AssistantMessage(
+            content="First step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Second step",
+            tool_calls=[ToolCall(name="marker", arguments='{"value": "dropped"}', tool_call_id="call_marker")],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        ContextOverflowError("too much context"),
+        AssistantMessage(
+            content="Recovered",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Recovered", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[marker_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, run_metadata = await session.run([UserMessage(content="Test task")])
+
+    assert finish_params is not None
+    assert "marker" not in run_metadata
+    assert not any(msg.name == "marker" for group in history for msg in group if isinstance(msg, ToolMessage))
+
+
+async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
+    responses = [
+        AssistantMessage(
+            content="First step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Second step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        ContextOverflowError("too much context"),
+        AssistantMessage(
+            content="Recovered second step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Finished after recovery", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=3,
+        turns_remaining_warning_threshold=0,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    assistant_contents = [msg.content for group in history for msg in group if isinstance(msg, AssistantMessage)]
+
+    assert finish_params is not None
+    assert finish_params.reason == "Finished after recovery"
+    assert assistant_contents == ["First step", "Recovered second step", "Done"]
+
+
+async def test_cache_state_preserves_run_metadata_by_turn() -> None:
+    state = CacheState(
+        msgs=[UserMessage(content="Test task")],
+        full_msg_history=[],
+        run_metadata_by_turn={"assistant-id": {"marker": [{"value": "kept"}]}},
+        task_hash="task",
+    )
+
+    data = state.to_dict()
+    restored = CacheState.from_dict(data)
+
+    assert "run_metadata" not in data
+    assert restored.run_metadata_by_turn == {"assistant-id": {"marker": [{"value": "kept"}]}}
+
+
+async def test_cache_state_preserves_special_user_message_types() -> None:
+    state = CacheState(
+        msgs=[
+            SummaryMessage(content="Summary"),
+            TurnWarningMessage(content="One turn left"),
+            UserMessage(content="Regular user message"),
+        ],
+        full_msg_history=[],
+        run_metadata_by_turn={},
+        task_hash="task",
+    )
+
+    restored = CacheState.from_dict(state.to_dict())
+
+    assert isinstance(restored.msgs[0], SummaryMessage)
+    assert isinstance(restored.msgs[1], TurnWarningMessage)
+    assert type(restored.msgs[2]) is UserMessage
+
+
+async def test_context_overflow_at_original_prompt_raises() -> None:
+    client = MockLLMClient([ContextOverflowError("too much context")])
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        with pytest.raises(ContextOverflowError, match="original prompt"):
+            await session.run([UserMessage(content="Test task")])
+
+
+async def test_context_overflow_does_not_unwind_first_turn_after_initial_prompt() -> None:
+    responses = [
+        AssistantMessage(
+            content="First step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        ContextOverflowError("too much context"),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        with pytest.raises(ContextOverflowError, match="original prompt"):
+            await session.run([UserMessage(content="Test task")])
+
+    assert client.call_count == 2
+
+
+async def test_context_overflow_does_not_unwind_existing_summary() -> None:
+    responses = [
+        ContextOverflowError("first overflow"),
+        ContextOverflowError("second overflow"),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        with pytest.raises(ContextOverflowError, match="summarized context"):
+            await session.run(
+                [
+                    UserMessage(content="Test task"),
+                    SummaryMessage(content="Summary already accepted by the model"),
+                    UserMessage(content="Got it, thanks!"),
+                    AssistantMessage(
+                        content="Post-summary work",
+                        tool_calls=[],
+                        token_usage=TokenUsage(input=100, answer=50),
+                    ),
+                ]
+            )
+
+    assert client.call_count == 1
+
+
+async def test_context_overflow_recovery_can_be_disabled() -> None:
+    responses = [
+        AssistantMessage(
+            content="Working",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        ContextOverflowError("too much context"),
+    ]
+
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        recover_from_context_overflow=False,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        with pytest.raises(ContextOverflowError, match="recovery is disabled"):
+            await session.run([UserMessage(content="Test task")])
 
 
 async def test_agent_tool_execution() -> None:
@@ -912,3 +1206,55 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
 
     # The summary content should be different between history[1] and history[2]
     assert summaries_1[0].content != summaries_2[0].content
+
+
+async def test_summarization_context_overflow_unwinds_and_retries() -> None:
+    responses = [
+        AssistantMessage(
+            content="First step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Second step",
+            tool_calls=[],
+            token_usage=TokenUsage(input=250, answer=100),
+        ),
+        ContextOverflowError("summary context overflow"),
+        AssistantMessage(
+            content="Recovered summary.",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Completed", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses, max_tokens=1000)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run(
+            [SystemMessage(content="System prompt"), UserMessage(content="Do the task")]
+        )
+
+    assert finish_params is not None
+    assert finish_params.reason == "Completed"
+    assert client.call_count == 5
+    assert any(isinstance(msg, SummaryMessage) for msg in history[-1])

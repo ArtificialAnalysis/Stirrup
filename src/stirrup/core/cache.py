@@ -21,6 +21,8 @@ from stirrup.core.models import (
     AudioContentBlock,
     ChatMessage,
     ImageContentBlock,
+    SummaryMessage,
+    TurnWarningMessage,
     VideoContentBlock,
 )
 
@@ -163,6 +165,12 @@ def deserialize_message(data: dict) -> ChatMessage:
     elif content is not None and not isinstance(content, str):
         data["content"] = _deserialize_content_block(content)
 
+    if data.get("role") == "user":
+        if data.get("kind") == "summary":
+            return SummaryMessage.model_validate(data)
+        if data.get("kind") == "turn_warning":
+            return TurnWarningMessage.model_validate(data)
+
     # Use TypeAdapter for discriminated union deserialization
     return ChatMessageAdapter.validate_python(data)
 
@@ -215,6 +223,13 @@ def _serialize_run_metadata(run_metadata: dict[str, list[Any]]) -> dict[str, lis
     }
 
 
+def _serialize_run_metadata_by_turn(
+    run_metadata_by_turn: dict[str, dict[str, list[Any]]],
+) -> dict[str, dict[str, list[Any]]]:
+    """Serialize per-turn metadata dicts to JSON-compatible format."""
+    return {turn_id: _serialize_run_metadata(turn_metadata) for turn_id, turn_metadata in run_metadata_by_turn.items()}
+
+
 def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
     """Deserialize a list of ChatMessages from JSON format.
 
@@ -240,12 +255,6 @@ class CacheState:
     full_msg_history: list[list[ChatMessage]]
     """Groups of messages (separated when context summarization occurs)."""
 
-    turn: int
-    """Current turn number (0-indexed) - resume will start from this turn."""
-
-    run_metadata: dict[str, list[Any]]
-    """Accumulated tool metadata from the run."""
-
     task_hash: str
     """Hash of the original init_msgs for verification on resume."""
 
@@ -255,13 +264,15 @@ class CacheState:
     agent_name: str = ""
     """Name of the agent that created this cache."""
 
+    run_metadata_by_turn: dict[str, dict[str, list[Any]]] = field(default_factory=dict)
+    """Accumulated tool metadata keyed by assistant message id."""
+
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dictionary."""
         return {
             "msgs": serialize_messages(self.msgs),
             "full_msg_history": [serialize_messages(group) for group in self.full_msg_history],
-            "turn": self.turn,
-            "run_metadata": _serialize_run_metadata(self.run_metadata),
+            "run_metadata_by_turn": _serialize_run_metadata_by_turn(self.run_metadata_by_turn),
             "task_hash": self.task_hash,
             "timestamp": self.timestamp,
             "agent_name": self.agent_name,
@@ -273,11 +284,10 @@ class CacheState:
         return cls(
             msgs=deserialize_messages(data["msgs"]),
             full_msg_history=[deserialize_messages(group) for group in data["full_msg_history"]],
-            turn=data["turn"],
-            run_metadata=data["run_metadata"],
             task_hash=data["task_hash"],
             timestamp=data.get("timestamp", ""),
             agent_name=data.get("agent_name", ""),
+            run_metadata_by_turn=data["run_metadata_by_turn"],
         )
 
 
@@ -341,7 +351,7 @@ class CacheManager:
 
         try:
             state_data = state.to_dict()
-            logger.debug("Serialized cache state: turn=%d, msgs=%d", state.turn, len(state.msgs))
+            logger.debug("Serialized cache state: msgs=%d", len(state.msgs))
 
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(state_data, f, indent=2, ensure_ascii=False)
@@ -352,7 +362,7 @@ class CacheManager:
 
             # Atomic rename (on POSIX systems)
             temp_file.replace(state_file)
-            logger.info("Saved cache state to %s (turn %d)", state_file, state.turn)
+            logger.info("Saved cache state to %s", state_file)
         except Exception as e:
             logger.exception("Failed to save cache state: %s", e)
             # Try direct write as fallback
@@ -396,7 +406,7 @@ class CacheManager:
             with open(state_file, encoding="utf-8") as f:
                 data = json.load(f)
             state = CacheState.from_dict(data)
-            logger.info("Loaded cache state from %s (turn %d)", state_file, state.turn)
+            logger.info("Loaded cache state from %s", state_file)
             return state
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning("Failed to load cache for task %s: %s", task_hash, e)
