@@ -72,7 +72,8 @@
    -------------------------------------------------------------------------- */
 .md-header,
 .md-tabs {
-  background-color: var(--md-primary-fg-color);
+  /* Slightly deeper than the neon brand purple so the bar reads calmer */
+  background-color: #6f37d8;
 }
 
 /* Stirrup horse logo sizing */
@@ -128,18 +129,10 @@
 /* --------------------------------------------------------------------------
    Accent touches shared across modes
    -------------------------------------------------------------------------- */
-/* Section headings get the brand purple */
-.md-typeset h1,
-.md-typeset h2 {
-  color: var(--aa-purple);
-}
+/* Headings stay neutral; purple is reserved for the header, links, and
+   active nav so the brand reads as an accent rather than dominating. */
 
-[data-md-color-scheme="slate"] .md-typeset h1,
-[data-md-color-scheme="slate"] .md-typeset h2 {
-  color: var(--aa-purple-light);
-}
-
-/* Inline code keeps a soft purple tint */
+/* Inline code keeps soft, rounded corners */
 .md-typeset code {
   border-radius: 0.2rem;
 }
