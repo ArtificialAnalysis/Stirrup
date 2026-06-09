@@ -25,6 +25,7 @@ agent = Agent(
     run_sync_in_thread=True,                              # (default: True) Run sync tools in thread
     text_only_tool_responses=True,                        # (default: True) Extract images from responses
     block_successive_assistant_messages=True,               # (default: True) Inject continue prompt between assistant messages
+    recover_from_context_overflow=True,                   # (default: True) Retry overflows by unwinding recent progress
     logger=None,                                          # (default: None) Custom logger instance
 )
 ```
@@ -43,6 +44,7 @@ agent = Agent(
     | `run_sync_in_thread` | `bool` | `True` | Run sync tools in separate thread |
     | `text_only_tool_responses` | `bool` | `True` | Extract images to user messages |
     | `block_successive_assistant_messages` | `bool` | `True` | Inject continue prompt to prevent back-to-back assistant messages |
+    | `recover_from_context_overflow` | `bool` | `True` | Retry context overflows by unwinding recent completed turns |
     | `logger` | `AgentLoggerBase \| None` | `None` | Custom logger instance |
 
 ### Understanding Agent Output
@@ -420,6 +422,24 @@ from stirrup import aggregate_metadata
 _, _, metadata = await session.run("task")
 aggregated = aggregate_metadata(metadata)
 print(f"Total tokens: {aggregated['token_usage'].total}")
+```
+
+### Context Overflow Recovery
+
+By default, Stirrup retries context overflow errors by shortening the conversation and trying again.
+
+When overflow happens, the agent removes the latest completed assistant turn. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
+
+This also applies when eager summarization overflows. Any removed turn is also removed from final metadata and does not count against `max_turns`.
+
+To fail immediately instead:
+
+```python
+agent = Agent(
+    client=client,
+    name="my_agent",
+    recover_from_context_overflow=False,
+)
 ```
 
 ## Logging
