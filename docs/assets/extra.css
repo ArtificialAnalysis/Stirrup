@@ -1,88 +1,138 @@
-/* Artificial Analysis color scheme for mkdocs-material */
+/* ==========================================================================
+   Artificial Analysis design system for mkdocs-material
+   Palette (2026 brand guidelines):
+     Primary purple   #8842fd
+     Light purple      #c394ff
+     Dark plum         #43003b
+     Magenta           #741a66
+     Warm cream bg     #f2f1ea
+   ========================================================================== */
 
 :root {
-  /* Primary indigo from AA - indigo-500 */
-  --md-primary-fg-color: #6366f1;
-  --md-primary-fg-color--light: #818cf8;
-  --md-primary-fg-color--dark: #4f46e5;
-
-  /* Accent */
-  --md-accent-fg-color: #6366f1;
-  --md-accent-fg-color--transparent: rgba(99, 102, 241, 0.1);
+  --aa-purple: #8842fd;
+  --aa-purple-light: #c394ff;
+  --aa-plum: #43003b;
+  --aa-magenta: #741a66;
+  --aa-cream: #f2f1ea;
 }
 
-/* Dark mode - slate tones matching AA */
+/* --------------------------------------------------------------------------
+   Light mode
+   -------------------------------------------------------------------------- */
+:root,
+[data-md-color-scheme="default"] {
+  /* Primary (header, nav highlights) */
+  --md-primary-fg-color: var(--aa-purple);
+  --md-primary-fg-color--light: var(--aa-purple-light);
+  --md-primary-fg-color--dark: #6a2fd6;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+
+  /* Accent (hover / active links) */
+  --md-accent-fg-color: #6a2fd6;
+  --md-accent-fg-color--transparent: rgba(136, 66, 253, 0.1);
+
+  /* Warm cream brand background */
+  --md-default-bg-color: var(--aa-cream);
+  --md-typeset-a-color: var(--aa-purple);
+}
+
+/* Subtle warm tint for sidebars / footer in light mode */
+[data-md-color-scheme="default"] .md-main,
+[data-md-color-scheme="default"] .md-sidebar {
+  background-color: var(--aa-cream);
+}
+
+/* --------------------------------------------------------------------------
+   Dark mode — deep plum-tinted slate
+   -------------------------------------------------------------------------- */
 [data-md-color-scheme="slate"] {
-  --md-default-bg-color: #0f172a;
-  --md-default-bg-color--light: #1e293b;
-  --md-default-bg-color--lighter: #334155;
-  --md-default-bg-color--lightest: #475569;
+  --md-hue: 270;
 
-  --md-primary-fg-color: #6366f1;
-  --md-accent-fg-color: #a5b4fc;
+  --md-default-bg-color: #15101c;
+  --md-default-bg-color--light: #1d1628;
+  --md-default-bg-color--lighter: #2a2038;
+  --md-default-bg-color--lightest: #3a2d4d;
 
-  --md-code-bg-color: #1e293b;
-  --md-code-fg-color: #e5e7eb;
+  --md-primary-fg-color: var(--aa-purple);
+  --md-primary-bg-color: #ffffff;
 
-  --md-typeset-color: #e5e7eb;
-  --md-typeset-a-color: #a5b4fc;
+  --md-accent-fg-color: var(--aa-purple-light);
+  --md-accent-fg-color--transparent: rgba(195, 148, 255, 0.1);
+
+  --md-code-bg-color: #1d1628;
+  --md-code-fg-color: #e9e6f0;
+
+  --md-typeset-color: #e9e6f0;
+  --md-typeset-a-color: var(--aa-purple-light);
 }
 
-/* Header */
-.md-header {
-  background-color: var(--md-primary-fg-color);
+/* --------------------------------------------------------------------------
+   Header
+   -------------------------------------------------------------------------- */
+.md-header,
+.md-tabs {
+  /* Slightly deeper than the neon brand purple so the bar reads calmer */
+  background-color: #6f37d8;
 }
 
-/* Logo sizing - larger */
+/* Stirrup horse logo sizing */
+.md-header__button.md-logo {
+  padding: 0.2rem;
+}
+
 .md-header__button.md-logo img {
-  height: 2.2rem;
+  height: 3.2rem;
   width: auto;
 }
 
-/* Dark mode content links - brighter for visibility */
+/* --------------------------------------------------------------------------
+   Dark mode element overrides
+   -------------------------------------------------------------------------- */
 [data-md-color-scheme="slate"] .md-typeset a {
-  color: #a5b4fc;
+  color: var(--aa-purple-light);
 }
 
 [data-md-color-scheme="slate"] .md-typeset a:hover {
-  color: #c7d2fe;
+  color: #d9c2ff;
 }
 
-/* Dark mode code blocks */
 [data-md-color-scheme="slate"] .md-typeset code,
 [data-md-color-scheme="slate"] .md-typeset pre > code {
-  background-color: #1e293b;
-  color: #e5e7eb;
+  background-color: #1d1628;
+  color: #e9e6f0;
 }
 
 [data-md-color-scheme="slate"] .highlight {
-  background-color: #1e293b;
+  background-color: #1d1628;
 }
 
-/* Dark mode nav - softer gray */
 [data-md-color-scheme="slate"] .md-nav__link {
-  color: #94a3b8;
+  color: #b3a9c4;
 }
 
-[data-md-color-scheme="slate"] .md-nav__link:hover {
-  color: #a5b4fc;
-}
-
+[data-md-color-scheme="slate"] .md-nav__link:hover,
 [data-md-color-scheme="slate"] .md-nav__link--active {
-  color: #a5b4fc;
+  color: var(--aa-purple-light);
 }
 
-/* Dark mode sidebar */
-[data-md-color-scheme="slate"] .md-sidebar {
-  background-color: #0f172a;
-}
-
-/* Dark mode footer */
+[data-md-color-scheme="slate"] .md-sidebar,
+[data-md-color-scheme="slate"] .md-main,
 [data-md-color-scheme="slate"] .md-footer {
-  background-color: #0f172a;
+  background-color: var(--md-default-bg-color);
 }
 
-/* Dark mode search */
 [data-md-color-scheme="slate"] .md-search__input {
-  background-color: #1e293b;
+  background-color: #2a2038;
+}
+
+/* --------------------------------------------------------------------------
+   Accent touches shared across modes
+   -------------------------------------------------------------------------- */
+/* Headings stay neutral; purple is reserved for the header, links, and
+   active nav so the brand reads as an accent rather than dominating. */
+
+/* Inline code keeps soft, rounded corners */
+.md-typeset code {
+  border-radius: 0.2rem;
 }
