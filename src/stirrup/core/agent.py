@@ -1288,8 +1288,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
                 return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
             except ContextOverflowError:
-                if not self._recover_from_context_overflow:
-                    raise
                 # Summarization can overflow too; drop the latest completed turn and retry.
                 # _unwind_context_overflow raises if that would cross a progress boundary.
                 current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
@@ -1435,8 +1433,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     )
                     break
                 except ContextOverflowError:
-                    if not self._recover_from_context_overflow:
-                        raise
                     msgs, dropped_turn_id = self._unwind_context_overflow(msgs)
                     run_metadata_by_turn.pop(dropped_turn_id, None)
 

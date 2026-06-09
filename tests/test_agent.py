@@ -434,7 +434,7 @@ async def test_context_overflow_recovery_can_be_disabled() -> None:
     )
 
     async with agent.session(cache_on_interrupt=False) as session:
-        with pytest.raises(ContextOverflowError, match="too much context"):
+        with pytest.raises(ContextOverflowError, match="recovery is disabled"):
             await session.run([UserMessage(content="Test task")])
 
 
