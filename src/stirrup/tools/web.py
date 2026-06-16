@@ -27,7 +27,15 @@ from typing import Annotated, Any
 import httpx
 import trafilatura
 from pydantic import BaseModel, Field
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    AsyncRetrying,
+    retry,
+    retry_if_exception,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    wait_random_exponential,
+)
 
 from stirrup.core.models import Tool, ToolProvider, ToolResult
 from stirrup.utils.text import truncate_msg
@@ -50,6 +58,7 @@ DEFAULT_WEBFETCH_HEADERS = {
 }
 WEB_FETCH_TIMEOUT = 60 * 3
 WEB_SEARCH_TIMEOUT = 60 * 3
+WEB_SEARCH_RETRY_WAIT = wait_random_exponential(multiplier=1, min=1, max=15)
 
 
 # =============================================================================
@@ -158,12 +167,22 @@ class WebSearchMetadata(BaseModel):
 
     num_uses: int = 1
     pages_returned: int = 0
+    retry_idle_for: float = 0.0
 
     def __add__(self, other: "WebSearchMetadata") -> "WebSearchMetadata":
         return WebSearchMetadata(
             num_uses=self.num_uses + other.num_uses,
             pages_returned=self.pages_returned + other.pages_returned,
+            retry_idle_for=self.retry_idle_for + other.retry_idle_for,
         )
+
+
+def _should_retry_web_search(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return False
 
 
 def _get_websearch_tool(
@@ -187,14 +206,8 @@ def _get_websearch_tool(
     if brave_api_key is None:
         raise RuntimeError("No Brave Search API key provided.")
 
-    @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=4, min=1, max=3),
-        reraise=True,
-    )
-    async def _search(query: str, http_client: httpx.AsyncClient) -> dict:
-        """Execute Brave Search API request with automatic retries on network errors."""
+    async def _search_once(query: str, http_client: httpx.AsyncClient) -> dict:
+        """Execute one Brave Search API request."""
         response = await http_client.get(
             "https://api.search.brave.com/res/v1/web/search",
             headers={
@@ -206,14 +219,32 @@ def _get_websearch_tool(
         response.raise_for_status()
         return response.json()
 
+    async def _search(query: str, http_client: httpx.AsyncClient) -> tuple[dict, float]:
+        """Execute Brave Search API request with retries and return retry sleep time."""
+        data: dict | None = None
+        retryer = AsyncRetrying(
+            retry=retry_if_exception(_should_retry_web_search),
+            stop=stop_after_attempt(10),
+            wait=WEB_SEARCH_RETRY_WAIT,
+            reraise=True,
+        )
+
+        async for attempt in retryer:
+            with attempt:
+                data = await _search_once(query, http_client)
+
+        if data is None:
+            raise RuntimeError("Brave search retry loop completed without a result.")
+        return data, float(retryer.statistics.get("idle_for", 0.0))
+
     async def websearch_executor(params: WebSearchParams) -> ToolResult[WebSearchMetadata]:
         """Execute web search and format results as XML with title, URL, and description."""
         # Use provided client or create temporary one for backward compatibility
         if client is not None:
-            data = await _search(params.query, client)
+            data, retry_idle_for = await _search(params.query, client)
         else:
             async with httpx.AsyncClient(timeout=WEB_SEARCH_TIMEOUT) as temp_client:
-                data = await _search(params.query, temp_client)
+                data, retry_idle_for = await _search(params.query, temp_client)
 
         results = data.get("web", {}).get("results", [])
         results_xml = (
@@ -233,7 +264,7 @@ def _get_websearch_tool(
 
         return ToolResult(
             content=truncate_msg(results_xml, MAX_LENGTH_WEB_SEARCH_RESULTS),
-            metadata=WebSearchMetadata(pages_returned=len(results)),
+            metadata=WebSearchMetadata(pages_returned=len(results), retry_idle_for=retry_idle_for),
         )
 
     return Tool[WebSearchParams, WebSearchMetadata](
