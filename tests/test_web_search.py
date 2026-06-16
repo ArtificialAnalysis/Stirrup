@@ -1,10 +1,22 @@
+from collections.abc import Awaitable
+from typing import cast
+
 import httpx
 import pytest
 from pytest import MonkeyPatch
 from tenacity import wait_none
 
+from stirrup.core.models import Tool, ToolResult
 from stirrup.tools import web
-from stirrup.tools.web import WebSearchParams, _get_websearch_tool
+from stirrup.tools.web import WebSearchMetadata, WebSearchParams, _get_websearch_tool
+
+
+async def run_web_search_tool(
+    tool: Tool[WebSearchParams, WebSearchMetadata],
+    query: str,
+) -> ToolResult[WebSearchMetadata]:
+    result = tool.executor(WebSearchParams(query=query))
+    return await cast(Awaitable[ToolResult[WebSearchMetadata]], result)
 
 
 async def test_web_search_retries_brave_429(monkeypatch: MonkeyPatch) -> None:
@@ -34,7 +46,7 @@ async def test_web_search_retries_brave_429(monkeypatch: MonkeyPatch) -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         tool = _get_websearch_tool("test-key", client)
-        result = await tool.executor(WebSearchParams(query="example"))
+        result = await run_web_search_tool(tool, "example")
 
     assert attempts == 2
     assert result.success is True
@@ -55,6 +67,6 @@ async def test_web_search_does_not_retry_non_429_http_errors(monkeypatch: Monkey
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         tool = _get_websearch_tool("test-key", client)
         with pytest.raises(httpx.HTTPStatusError):
-            await tool.executor(WebSearchParams(query="example"))
+            await run_web_search_tool(tool, "example")
 
     assert attempts == 1
