@@ -27,7 +27,7 @@ from typing import Annotated, Any
 import httpx
 import trafilatura
 from pydantic import BaseModel, Field
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from stirrup.core.models import Tool, ToolProvider, ToolResult
 from stirrup.utils.text import truncate_msg
@@ -50,6 +50,7 @@ DEFAULT_WEBFETCH_HEADERS = {
 }
 WEB_FETCH_TIMEOUT = 60 * 3
 WEB_SEARCH_TIMEOUT = 60 * 3
+WEB_SEARCH_RETRY_WAIT = wait_exponential(multiplier=4, min=1, max=15)
 
 
 # =============================================================================
@@ -166,6 +167,14 @@ class WebSearchMetadata(BaseModel):
         )
 
 
+def _should_retry_web_search(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return False
+
+
 def _get_websearch_tool(
     brave_api_key: str | None, client: httpx.AsyncClient | None = None
 ) -> Tool[WebSearchParams, WebSearchMetadata]:
@@ -188,13 +197,13 @@ def _get_websearch_tool(
         raise RuntimeError("No Brave Search API key provided.")
 
     @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=4, min=1, max=3),
+        retry=retry_if_exception(_should_retry_web_search),
+        stop=stop_after_attempt(10),
+        wait=WEB_SEARCH_RETRY_WAIT,
         reraise=True,
     )
     async def _search(query: str, http_client: httpx.AsyncClient) -> dict:
-        """Execute Brave Search API request with automatic retries on network errors."""
+        """Execute Brave Search API request with automatic retries on transient errors."""
         response = await http_client.get(
             "https://api.search.brave.com/res/v1/web/search",
             headers={
