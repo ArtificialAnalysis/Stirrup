@@ -4,6 +4,7 @@ import asyncio
 import logging
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -52,7 +53,7 @@ def make_create_gate(max_rate: float, time_period: float = 1) -> AbstractAsyncCo
 
     """
     try:
-        from aiolimiter import AsyncLimiter
+        from aiolimiter import AsyncLimiter  # ty: ignore[unresolved-import]
     except ImportError as e:
         raise ImportError(
             "Sandbox creation throttling requires the `aiolimiter` package, which is not installed. "
@@ -167,7 +168,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             raise RuntimeError("ExecutionEnvironment not started.")
 
         if self._paused:
-            self._sbx = await self._sbx.connect(timeout=self._timeout)
+            self._sbx = await self._sbx.connect(timeout=self._timeout)  # ty: ignore[invalid-argument-type]
             self._paused = False
 
         return self._sbx
@@ -175,7 +176,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
     async def _pause_when_idle(self) -> None:
         if self._pause_between_calls and self._sbx is not None and not self._paused:
             try:
-                pause = getattr(self._sbx, "pause", None) or self._sbx.beta_pause
+                pause = cast(Any, getattr(self._sbx, "pause", None) or self._sbx.beta_pause)
                 await pause()
                 self._paused = True
             except Exception:
@@ -438,7 +439,9 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                             )
                             continue
 
-                        file_bytes = await sbx.files.read(env_path, format="bytes", request_timeout=self._request_timeout)
+                        file_bytes = await sbx.files.read(
+                            env_path, format="bytes", request_timeout=self._request_timeout
+                        )
                         content = bytes(file_bytes)
                         local_path = output_dir_path / Path(env_path).name
                         local_path.write_bytes(content)
@@ -530,7 +533,9 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                                 if file_path.is_file():
                                     relative = file_path.relative_to(source)
                                     dest = (
-                                        f"{dest_base}/{relative}" if dest_dir else f"{dest_base}/{source.name}/{relative}"
+                                        f"{dest_base}/{relative}"
+                                        if dest_dir
+                                        else f"{dest_base}/{source.name}/{relative}"
                                     )
                                     content = file_path.read_bytes()
                                     await sbx.files.write(dest, content, request_timeout=self._request_timeout)
