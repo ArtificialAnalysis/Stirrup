@@ -880,14 +880,17 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     state.exec_env_owned,
                 )
 
+                input_files: list[str | Path] = (
+                    [self._pending_input_files]
+                    if isinstance(self._pending_input_files, (str, Path))
+                    else self._pending_input_files
+                )
+
                 if state.depth > 0 and state.parent_exec_env:
                     if not state.exec_env_owned:
                         # SHARED EXEC ENV: Files already accessible - no transfer needed
                         # Just record the paths as "uploaded" for system prompt
-                        if isinstance(self._pending_input_files, (str, Path)):
-                            state.uploaded_file_paths = [str(self._pending_input_files)]
-                        else:
-                            state.uploaded_file_paths = [str(p) for p in self._pending_input_files]
+                        state.uploaded_file_paths = [str(p) for p in input_files]
                         logger.debug(
                             "[%s __aenter__] Shared exec_env - files already accessible: %s",
                             self._name,
@@ -897,7 +900,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         # SEPARATE EXEC ENV: Read files from parent's exec env, write to subagent's exec env
                         # input_files are paths within the parent's environment
                         result = await state.exec_env.upload_files(
-                            *self._pending_input_files,
+                            *input_files,
                             source_env=state.parent_exec_env,
                         )
                         logger.debug(
@@ -1162,12 +1165,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)
                 try:
                     if inspect.iscoroutinefunction(tool.executor):
-                        result = await tool.executor(params)  # ty: ignore[invalid-await]
+                        result = await tool.executor(params)
                     elif self._run_sync_in_thread:
-                        # ty: ignore - type checker doesn't understand iscoroutinefunction narrowing
+                        # type checker doesn't understand iscoroutinefunction narrowing
                         result = await anyio.to_thread.run_sync(tool.executor, params)  # ty: ignore[unresolved-attribute]
                     else:
-                        # ty: ignore - iscoroutinefunction check above ensures this is sync
+                        # iscoroutinefunction check above ensures this is sync
                         result = tool.executor(params)  # ty: ignore[invalid-assignment]
                 finally:
                     _PARENT_DEPTH.reset(prev_depth)
@@ -1583,10 +1586,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         full_msg_history.append(msgs)
 
         # Add agent's own token usage, tool durations, and model speed to run_metadata
-        run_metadata = _merge_run_metadata(run_metadata_by_turn)
+        run_metadata: dict[str, Any] = _merge_run_metadata(run_metadata_by_turn)
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
-        run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
-        run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]
+        run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)
+        run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)
         if session_state is not None:
             session_state.finish_params = finish_params
             session_state.run_metadata = run_metadata
@@ -1660,7 +1663,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Files are transferred to parent's env at __aexit__ via save_output_files(dest_env=parent)
                 async with agent.session(
                     output_dir=".",  # Path in parent's exec env
-                    input_files=list(params.input_files) if params.input_files else None,  # ty: ignore[invalid-argument-type]
+                    input_files=list(params.input_files) if params.input_files else None,
                 ) as agent_session:
                     agent_session._logger.depth = sub_agent_depth  # noqa: SLF001
                     finish_params, msg_history, run_metadata = await agent_session.run(init_msgs)
@@ -1753,7 +1756,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             name=self._name,
             description=description,
             parameters=SubAgentParams,
-            executor=sub_agent_executor,  # ty: ignore[invalid-argument-type]
+            executor=sub_agent_executor,
         )
 
 

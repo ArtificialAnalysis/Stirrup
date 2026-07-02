@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from stirrup.core.models import ImageContentBlock, ToolUseCountMetadata
+from stirrup.core.models import ImageContentBlock, ToolResult, ToolUseCountMetadata
 from stirrup.tools.code_backends.base import ViewImageParams
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 
@@ -145,8 +145,10 @@ class TestViewImageTool:
 
             # Execute tool
             params = ViewImageParams(path="test_image.png")
-            executor_result = tool.executor(params)
-            result = await executor_result if inspect.isawaitable(executor_result) else executor_result
+            result = tool.executor(params)
+            if inspect.isawaitable(result):
+                result = await result
+            assert isinstance(result, ToolResult)
 
             assert isinstance(result.content, list)
             assert len(result.content) == 2
@@ -163,8 +165,10 @@ class TestViewImageTool:
             tool = provider.get_view_image_tool()
 
             params = ViewImageParams(path="nonexistent.png")
-            executor_result = tool.executor(params)
-            result = await executor_result if inspect.isawaitable(executor_result) else executor_result
+            result = tool.executor(params)
+            if inspect.isawaitable(result):
+                result = await result
+            assert isinstance(result, ToolResult)
 
             assert isinstance(result.content, str)
             assert "not found" in result.content.lower()
@@ -184,14 +188,18 @@ class TestViewImageTool:
 
             # Execute tool twice
             params = ViewImageParams(path="test_image.png")
-            executor_result1 = tool.executor(params)  # ty: ignore[too-many-positional-arguments]
-            result1 = await executor_result1 if inspect.isawaitable(executor_result1) else executor_result1
-            executor_result2 = tool.executor(params)  # ty: ignore[too-many-positional-arguments]
-            result2 = await executor_result2 if inspect.isawaitable(executor_result2) else executor_result2
+            result1 = tool.executor(params)
+            if inspect.isawaitable(result1):
+                result1 = await result1
+            assert isinstance(result1, ToolResult)
+            result2 = tool.executor(params)
+            if inspect.isawaitable(result2):
+                result2 = await result2
+            assert isinstance(result2, ToolResult)
 
             # Aggregate metadata
-            assert result1.metadata is not None
-            assert result2.metadata is not None
+            assert isinstance(result1.metadata, ToolUseCountMetadata)
+            assert isinstance(result2.metadata, ToolUseCountMetadata)
             combined = result1.metadata + result2.metadata
             assert combined.num_uses == 2
 

@@ -10,7 +10,7 @@ This example demonstrates how to create an agent that can:
 import argparse
 import asyncio
 
-from stirrup import Agent
+from stirrup import Agent, Tool, ToolProvider
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import CALCULATOR_TOOL
 from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
@@ -45,7 +45,7 @@ async def main(openrouter_slug: str) -> None:
     )
 
     # Create agent with E2B execution + web tools + calculator
-    tools = [E2BCodeExecToolProvider(), WebToolProvider(), CALCULATOR_TOOL]
+    tools: list[Tool | ToolProvider] = [E2BCodeExecToolProvider(), WebToolProvider(), CALCULATOR_TOOL]
     agent = Agent(
         client=client,
         name="web_calculator_agent",

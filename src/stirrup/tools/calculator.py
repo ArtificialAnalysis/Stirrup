@@ -28,5 +28,5 @@ CALCULATOR_TOOL: Tool[CalculatorParams, ToolUseCountMetadata] = Tool[CalculatorP
     name="calculator",
     description="Evaluate mathematical expressions. Supports basic arithmetic operations (+, -, *, /, **, %, //).",
     parameters=CalculatorParams,
-    executor=calculator_executor,  # ty: ignore[invalid-argument-type]
+    executor=calculator_executor,
 )

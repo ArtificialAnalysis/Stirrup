@@ -884,7 +884,7 @@ class CodeExecToolProvider(ToolProvider, ABC):
             description=description
             or "Execute a shell command in the execution environment. Returns exit code, stdout, and stderr as XML.",
             parameters=CodeExecutionParams,
-            executor=executor,  # ty: ignore[invalid-argument-type]
+            executor=executor,
         )
 
     def get_view_image_tool(
@@ -929,7 +929,7 @@ class CodeExecToolProvider(ToolProvider, ABC):
             name=name,
             description=description or "View an image file from the execution environment's filesystem.",
             parameters=ViewImageParams,
-            executor=executor,  # ty: ignore[invalid-argument-type]
+            executor=executor,
         )
 
     @abstractmethod

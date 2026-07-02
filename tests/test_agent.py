@@ -1,7 +1,7 @@
 """Tests for agent core functionality."""
 
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,7 +35,7 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 class MockLLMClient(LLMClient):
     """Mock LLM client for testing."""
 
-    def __init__(self, responses: list[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
+    def __init__(self, responses: Sequence[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
@@ -225,7 +225,7 @@ async def test_context_overflow_removes_unwound_turn_metadata() -> None:
         name="marker",
         description="Return marker metadata",
         parameters=MarkerParams,
-        executor=marker_executor,  # ty: ignore[invalid-argument-type]
+        executor=marker_executor,
     )
 
     responses = [
@@ -467,7 +467,7 @@ async def test_agent_tool_execution() -> None:
         name="echo",
         description="Echo a message",
         parameters=EchoParams,
-        executor=echo_executor,  # ty: ignore[invalid-argument-type]
+        executor=echo_executor,
     )
 
     # Create mock responses
@@ -551,7 +551,7 @@ async def test_run_tool_preserves_image_content() -> None:
         name="image_tool",
         description="Return an image",
         parameters=EmptyParams,
-        executor=image_executor,  # ty: ignore[invalid-argument-type]
+        executor=image_executor,
     )
 
     client = MockLLMClient([])
@@ -732,13 +732,13 @@ async def test_agent_accepts_multiple_finish_tools() -> None:
         name="submit_files",
         description="Finish the task and submit created files",
         parameters=SubmitFilesParams,
-        executor=submit_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=submit_files_executor,
     )
     finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
         name="finish_without_files",
         description="Finish the task without submitting files",
         parameters=FinishWithoutFilesParams,
-        executor=finish_without_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_without_files_executor,
     )
 
     responses = [
@@ -790,13 +790,13 @@ async def test_finish_tool_property_requires_single_finish_tool() -> None:
         name="submit_files",
         description="Finish the task and submit created files",
         parameters=SubmitFilesParams,
-        executor=lambda params: ToolResult(content=params.reason),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.reason),
     )
     finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
         name="finish_without_files",
         description="Finish the task without submitting files",
         parameters=FinishWithoutFilesParams,
-        executor=lambda params: ToolResult(content=params.reason),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.reason),
     )
 
     agent = Agent(
@@ -830,13 +830,13 @@ async def test_agent_continues_after_failed_finish_tool_from_multiple_finish_too
         name="submit_files",
         description="Finish the task and submit created files",
         parameters=SubmitFilesParams,
-        executor=submit_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=submit_files_executor,
     )
     finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
         name="finish_without_files",
         description="Finish the task without submitting files",
         parameters=FinishWithoutFilesParams,
-        executor=finish_without_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_without_files_executor,
     )
 
     responses = [
@@ -910,13 +910,13 @@ async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
         name="finish_a",
         description="Finish variant A",
         parameters=FinishAParams,
-        executor=finish_a_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_a_executor,
     )
     finish_b = Tool[FinishBParams, None](
         name="finish_b",
         description="Finish variant B",
         parameters=FinishBParams,
-        executor=finish_b_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_b_executor,
     )
 
     responses = [
@@ -971,13 +971,13 @@ async def test_tools_finish_tool_name_collision_raises_at_init() -> None:
         name="finish_a",
         description="Not actually a finish tool",
         parameters=DummyParams,
-        executor=lambda params: ToolResult(content=params.x),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.x),
     )
     finish_a = Tool[DummyParams, None](
         name="finish_a",
         description="Real finish tool",
         parameters=DummyParams,
-        executor=lambda params: ToolResult(content=params.x, success=True),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.x, success=True),
     )
 
     with pytest.raises(ValueError, match="collides with a finish tool"):

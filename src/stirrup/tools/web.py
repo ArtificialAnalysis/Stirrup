@@ -162,7 +162,7 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
         name="fetch_web_page",
         description="Fetch and extract the main content from a web page as markdown. Returns body text or error as XML.",
         parameters=FetchWebPageParams,
-        executor=fetch_web_page_executor,  # ty: ignore[invalid-argument-type]
+        executor=fetch_web_page_executor,
     )
 
 
@@ -291,7 +291,7 @@ def _get_websearch_tool(
         name="web_search",
         description="Search the web using Brave Search API. Returns top 5 results with title, URL, and description as XML.",
         parameters=WebSearchParams,
-        executor=websearch_executor,  # ty: ignore[invalid-argument-type]
+        executor=websearch_executor,
     )
 
 

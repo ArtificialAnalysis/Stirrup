@@ -66,7 +66,7 @@ def test_token_usage_output_deprecation_warning() -> None:
     """TokenUsage(output=...) should emit DeprecationWarning and map to answer."""
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        usage = TokenUsage(output=50)  # type: ignore[unknown-argument]
+        usage = TokenUsage(output=50)  # ty: ignore[unknown-argument]
     assert usage.answer == 50
     assert len(w) == 1
     assert issubclass(w[0].category, DeprecationWarning)

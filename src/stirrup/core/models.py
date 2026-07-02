@@ -10,7 +10,7 @@ from io import BytesIO
 from math import isinf, isnan, sqrt
 from tempfile import NamedTemporaryFile
 from types import TracebackType
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Protocol, Self, overload, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Protocol, Self, cast, overload, runtime_checkable
 from uuid import uuid4
 
 import filetype
@@ -294,9 +294,9 @@ def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
     aggregated: T = metadata_list[0]
     for m in metadata_list[1:]:
         if isinstance(aggregated, dict) and isinstance(m, dict):
-            aggregated = _merge_dicts(aggregated, m)  # type: ignore[assignment]
+            aggregated = _merge_dicts(aggregated, m)  # ty: ignore[invalid-assignment]
         else:
-            aggregated = aggregated + m  # type: ignore[assignment]
+            aggregated = aggregated + m
     return aggregated
 
 
@@ -447,14 +447,15 @@ class TokenUsage(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _deprecate_output_field(cls, data: dict | object) -> dict | object:  # type: ignore[override]
+    def _deprecate_output_field(cls, data: object) -> object:
         if isinstance(data, dict) and "output" in data:
             warnings.warn(
                 "The 'output' field is deprecated. Use 'answer' instead.",
                 DeprecationWarning,
                 stacklevel=3,
             )
-            data.setdefault("answer", data.pop("output"))  # type: ignore[union-attr]
+            values = cast("dict[str, Any]", data)
+            values.setdefault("answer", values.pop("output"))
         return data
 
     @property
@@ -547,7 +548,7 @@ class Tool[P: BaseModel, M](BaseModel):
 
     name: str
     description: str
-    parameters: type[P] = EmptyParams  # type: ignore[assignment]
+    parameters: type[P] = EmptyParams  # ty: ignore[invalid-assignment]
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
 
 

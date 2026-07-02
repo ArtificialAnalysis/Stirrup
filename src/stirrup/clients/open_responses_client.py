@@ -7,6 +7,7 @@ the Responses API via the `base_url` parameter.
 
 import logging
 import os
+from collections.abc import Sequence
 from time import perf_counter
 from typing import Any
 
@@ -122,7 +123,7 @@ def _to_open_responses_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:
 
 
 def _to_open_responses_input(
-    msgs: list[ChatMessage],
+    msgs: Sequence[ChatMessage],
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert ChatMessage list to OpenResponses (instructions, input) tuple.
 
