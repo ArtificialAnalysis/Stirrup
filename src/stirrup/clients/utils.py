@@ -14,11 +14,14 @@ from stirrup.core.models import (
     Content,
     EmptyParams,
     ImageContentBlock,
+    RedactedReasoningBlock,
+    SignedReasoningBlock,
     SystemMessage,
     Tool,
     ToolMessage,
     UserMessage,
     VideoContentBlock,
+    reasoning_blocks,
 )
 
 __all__ = [
@@ -129,23 +132,34 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
         elif isinstance(m, UserMessage):
             out.append({"role": "user", "content": content_to_openai(m.content)})
         elif isinstance(m, AssistantMessage):
+            # Note: message metadata is deliberately NOT sent on the wire — it is
+            # integrator/user state, opaque to the framework.
             msg: dict[str, Any] = {"role": "assistant", "content": content_to_openai(m.content)}
-            if m.metadata:
-                msg["metadata"] = m.metadata
 
-            if m.reasoning:
-                if m.reasoning.content:
-                    msg["reasoning_content"] = m.reasoning.content
+            rblocks = reasoning_blocks(m.blocks)
+            reasoning_content = "".join(
+                block.content for block in rblocks if not isinstance(block, RedactedReasoningBlock)
+            )
+            if reasoning_content:
+                msg["reasoning_content"] = reasoning_content
 
-                if m.reasoning.signature:
-                    msg["thinking_blocks"] = [
-                        {"type": "thinking", "signature": m.reasoning.signature, "thinking": m.reasoning.content}
-                    ]
+            # Signed passback is per-block: one thinking entry per signed block,
+            # redacted payloads re-emitted verbatim, in emission order.
+            thinking_payload: list[dict[str, Any]] = []
+            for block in rblocks:
+                if isinstance(block, SignedReasoningBlock):
+                    thinking_payload.append(
+                        {"type": "thinking", "signature": block.signature, "thinking": block.content}
+                    )
+                elif isinstance(block, RedactedReasoningBlock):
+                    thinking_payload.append({"type": "redacted_thinking", "data": block.data})
+            if thinking_payload:
+                msg["thinking_blocks"] = thinking_payload
 
             if m.tool_calls:
                 msg["tool_calls"] = []
                 for tool in m.tool_calls:
-                    tool_dict = tool.model_dump()
+                    tool_dict = tool.model_dump(exclude={"kind"})
                     tool_dict["id"] = tool.tool_call_id
                     tool_dict["type"] = "function"
                     if tool.signature is not None:

@@ -75,30 +75,39 @@ A list of message groups representing the conversation history. Each group conta
 
 - `SystemMessage`: System prompts
 - `UserMessage`: User inputs and file contents
-- `AssistantMessage`: LLM responses with tool calls
+- `AssistantMessage`: LLM responses — an ordered sequence of blocks (reasoning, text, tool calls, media)
 - `ToolMessage`: Results from tool executions
+
+An assistant turn is stored as `blocks`, preserving the model's actual emission order
+(modern models interleave thinking → text → thinking → tool call). Each block is
+discriminated on `kind`: `text`, `reasoning` (in-band), `signed_reasoning`,
+`redacted_reasoning`, `reasoning_ref` (provider-side reference), `tool_call`, and the
+media block kinds.
 
 ```python
 history = [
     SystemMessage(role='system', content="You are an AI agent..."),
     UserMessage(role='user', content="What is the population of Australia..."),
     AssistantMessage(
-        role='assistant',
-        content="I'll search for Australia's population data...",
-        tool_calls=[ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...')],
+        blocks=[
+            TextBlock(text="I'll search for Australia's population data..."),
+            ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...'),
+        ],
         token_usage=TokenUsage(input=1523, answer=156, reasoning=0)
     ),
     ToolMessage(role='tool', content="<results>...ABS data...</results>", name='web_search', ...),
     # ... additional turns ...
-    AssistantMessage(
-        role='assistant',
-        content="All files are ready. Let me finish the task.",
-        tool_calls=[ToolCall(name='finish', arguments='{"reason": "...", "paths": [...]}', ...)],
-        token_usage=TokenUsage(input=25102, answer=285, reasoning=0)
-    ),
-    ToolMessage(role='tool', content="Successfully completed...", name='finish', ...),
 ]
 ```
+
+The channel-era attributes `content`, `reasoning`, and `tool_calls` remain available as
+read-only projections of `blocks` (`content` joins text blocks; `tool_calls` filters
+tool-call blocks), and channel-shaped construction
+(`AssistantMessage(content=..., reasoning=..., tool_calls=...)`) is a permanently
+supported path that synthesizes blocks in reasoning → text → tool-calls order. Assigning
+to a projection raises; use `msg.with_text(...)` / `msg.with_blocks(...)` instead.
+Convenience accessors `joined_text`, `final_text`, `tool_call_blocks`, and
+`reasoning_blocks` operate on any block list.
 
 #### `metadata`
 

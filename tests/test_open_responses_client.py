@@ -14,7 +14,10 @@ from stirrup.clients.open_responses_client import (
 )
 from stirrup.core.models import (
     AssistantMessage,
+    ReasoningBlock,
+    ReasoningRefBlock,
     SystemMessage,
+    TextBlock,
     TokenUsage,
     ToolCall,
     ToolMessage,
@@ -210,11 +213,9 @@ class TestResponseParsing:
                 content=[MagicMock(type="output_text", text="Hello there!")],
             )
         ]
-        content, tool_calls, reasoning = _parse_response_output(output)
+        blocks = _parse_response_output(output)
 
-        assert content == "Hello there!"
-        assert tool_calls == []
-        assert reasoning is None
+        assert blocks == [TextBlock(text="Hello there!")]
 
     def test_parse_function_call_output(self) -> None:
         """Test parsing a function call response."""
@@ -224,16 +225,17 @@ class TestResponseParsing:
         fn_call.name = "get_weather"
         fn_call.arguments = '{"city": "NYC"}'
         output = [fn_call]
-        content, tool_calls, _reasoning = _parse_response_output(output)
+        blocks = _parse_response_output(output)
 
-        assert content == ""
-        assert len(tool_calls) == 1
-        assert tool_calls[0].tool_call_id == "call_abc"
-        assert tool_calls[0].name == "get_weather"
-        assert tool_calls[0].arguments == '{"city": "NYC"}'
+        assert len(blocks) == 1
+        tool_call = blocks[0]
+        assert isinstance(tool_call, ToolCall)
+        assert tool_call.tool_call_id == "call_abc"
+        assert tool_call.name == "get_weather"
+        assert tool_call.arguments == '{"city": "NYC"}'
 
     def test_parse_reasoning_output(self) -> None:
-        """Test parsing a response with reasoning."""
+        """Test parsing a response with reasoning (no id: in-band reasoning block)."""
         reasoning_item = MagicMock(spec=["type", "summary"])
         reasoning_item.type = "reasoning"
         reasoning_item.summary = "Let me think about this..."
@@ -245,14 +247,38 @@ class TestResponseParsing:
                 content=[MagicMock(type="output_text", text="The answer is 42")],
             ),
         ]
-        content, _tool_calls, reasoning = _parse_response_output(output)
+        blocks = _parse_response_output(output)
 
-        assert content == "The answer is 42"
-        assert reasoning is not None
-        assert reasoning.content == "Let me think about this..."
+        assert blocks == [
+            ReasoningBlock(content="Let me think about this..."),
+            TextBlock(text="The answer is 42"),
+        ]
 
-    def test_parse_mixed_output(self) -> None:
-        """Test parsing response with message and function calls."""
+    def test_parse_reasoning_output_with_id(self) -> None:
+        """A reasoning item with an id becomes a ReasoningRefBlock — the id is the passback handle."""
+        summary_part = MagicMock(spec=["text"])
+        summary_part.text = "Thinking..."
+        reasoning_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        reasoning_item.type = "reasoning"
+        reasoning_item.id = "rs_123"
+        reasoning_item.summary = [summary_part]
+        reasoning_item.encrypted_content = None
+
+        empty_reasoning_item = MagicMock(spec=["type", "id", "summary"])
+        empty_reasoning_item.type = "reasoning"
+        empty_reasoning_item.id = "rs_456"
+        empty_reasoning_item.summary = []
+
+        blocks = _parse_response_output([reasoning_item, empty_reasoning_item])
+
+        # id retained even when the summary is empty
+        assert blocks == [
+            ReasoningRefBlock(id="rs_123", content="Thinking..."),
+            ReasoningRefBlock(id="rs_456", content=""),
+        ]
+
+    def test_parse_mixed_output_preserves_order(self) -> None:
+        """Interleaved message/function_call items keep their emission order."""
         fn_call_1 = MagicMock()
         fn_call_1.type = "function_call"
         fn_call_1.call_id = "call_1"
@@ -271,14 +297,19 @@ class TestResponseParsing:
                 content=[MagicMock(type="output_text", text="I'll help you with that")],
             ),
             fn_call_1,
+            MagicMock(
+                type="message",
+                content=[MagicMock(type="output_text", text="And one more thing")],
+            ),
             fn_call_2,
         ]
-        content, tool_calls, _reasoning = _parse_response_output(output)
+        blocks = _parse_response_output(output)
 
-        assert content == "I'll help you with that"
-        assert len(tool_calls) == 2
-        assert tool_calls[0].name == "tool1"
-        assert tool_calls[1].name == "tool2"
+        assert [type(b) for b in blocks] == [TextBlock, ToolCall, TextBlock, ToolCall]
+        assert blocks[0] == TextBlock(text="I'll help you with that")
+        assert blocks[2] == TextBlock(text="And one more thing")
+        tool_names = [b.name for b in blocks if isinstance(b, ToolCall)]
+        assert tool_names == ["tool1", "tool2"]
 
 
 class TestOpenResponsesClient:

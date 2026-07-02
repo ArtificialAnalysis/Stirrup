@@ -21,6 +21,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
+    AssistantBlock,
     AssistantMessage,
     AudioContentBlock,
     ChatMessage,
@@ -28,8 +29,10 @@ from stirrup.core.models import (
     EmptyParams,
     ImageContentBlock,
     LLMClient,
-    Reasoning,
+    ReasoningBlock,
+    ReasoningRefBlock,
     SystemMessage,
+    TextBlock,
     TokenUsage,
     Tool,
     ToolCall,
@@ -149,32 +152,41 @@ def _to_open_responses_input(
                 }
             )
         elif isinstance(m, AssistantMessage):
-            # For assistant messages, we need to add them as response output items
-            # First add any text content as a message item
-            content_str = (
-                m.content
-                if isinstance(m.content, str)
-                else "\n".join(block if isinstance(block, str) else "" for block in m.content)
-            )
-            if content_str:
-                input_items.append(
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": content_str}],
-                    }
-                )
-
-            # Add tool calls as separate function_call items
-            input_items.extend(
-                {
-                    "type": "function_call",
-                    "call_id": tc.tool_call_id,
-                    "name": tc.name,
-                    "arguments": tc.arguments,
-                }
-                for tc in m.tool_calls
-            )
+            # Assistant turns replay as response output items, one item per block,
+            # in the model's true emission order (message / function_call / reasoning
+            # interleaved exactly as captured). Channel-synthesized (legacy) messages
+            # carry blocks in channel order, so they replay in the old
+            # message-then-calls order automatically.
+            for block in m.blocks:
+                if isinstance(block, TextBlock):
+                    input_items.append(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": block.text}],
+                        }
+                    )
+                elif isinstance(block, ToolCall):
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": block.tool_call_id,
+                            "name": block.name,
+                            "arguments": block.arguments,
+                        }
+                    )
+                elif isinstance(block, ReasoningRefBlock):
+                    # Passed back by reference: the id is the handle to the stored
+                    # reasoning item; encrypted_content carries the ZDR payload when
+                    # the provider returned one.
+                    reasoning_item: dict[str, Any] = {"type": "reasoning", "id": block.id, "summary": []}
+                    if block.content:
+                        reasoning_item["summary"] = [{"type": "summary_text", "text": block.content}]
+                    if block.encrypted_content is not None:
+                        reasoning_item["encrypted_content"] = block.encrypted_content
+                    input_items.append(reasoning_item)
+                # In-band/signed reasoning and media blocks have no Responses input
+                # representation; they are skipped, as before this change.
         elif isinstance(m, ToolMessage):
             # Tool results are function_call_output items
             content_str = m.content if isinstance(m.content, str) else str(m.content)
@@ -198,20 +210,15 @@ def _get_attr(obj: Any, name: str, default: Any = None) -> Any:  # noqa: ANN401
     return getattr(obj, name, default)
 
 
-def _parse_response_output(
-    output: list[Any],
-) -> tuple[str, list[ToolCall], Reasoning | None]:
-    """Parse response output items into content, tool_calls, and reasoning.
+def _parse_response_output(output: list[Any]) -> list[AssistantBlock]:
+    """Parse response output items into ordered assistant blocks.
 
-    Args:
-        output: List of output items from the response.
-
-    Returns:
-        Tuple of (content_text, tool_calls, reasoning).
+    One exhaustive pass in item order: each ``message`` item becomes its own
+    TextBlock, each ``function_call`` a ToolCall block, each ``reasoning`` item a
+    ReasoningRefBlock (id retained even when the summary is empty — it is the
+    passback handle). Unknown item types warn and are skipped.
     """
-    content_parts: list[str] = []
-    tool_calls: list[ToolCall] = []
-    reasoning: Reasoning | None = None
+    blocks: list[AssistantBlock] = []
 
     for item in output:
         item_type = _get_attr(item, "type")
@@ -219,17 +226,19 @@ def _parse_response_output(
         if item_type == "message":
             # Extract text content from message
             msg_content = _get_attr(item, "content", [])
-            for content_item in msg_content:
-                content_type = _get_attr(content_item, "type")
-                if content_type == "output_text":
-                    text = _get_attr(content_item, "text", "")
-                    content_parts.append(text)
+            text = "".join(
+                _get_attr(content_item, "text", "")
+                for content_item in msg_content
+                if _get_attr(content_item, "type") == "output_text"
+            )
+            if text:
+                blocks.append(TextBlock(text=text))
 
         elif item_type == "function_call":
             call_id = _get_attr(item, "call_id")
             name = _get_attr(item, "name")
             arguments = _get_attr(item, "arguments", "")
-            tool_calls.append(
+            blocks.append(
                 ToolCall(
                     tool_call_id=call_id,
                     name=name,
@@ -238,22 +247,31 @@ def _parse_response_output(
             )
 
         elif item_type == "reasoning":
-            # Extract reasoning/thinking content - try multiple possible attribute names
             # summary can be a list of Summary objects with .text attribute
             summary = _get_attr(item, "summary")
-            if summary:
-                if isinstance(summary, list):
-                    # Extract text from Summary objects
-                    thinking = "\n".join(_get_attr(s, "text", "") for s in summary if _get_attr(s, "text"))
-                else:
-                    thinking = str(summary)
+            if isinstance(summary, list):
+                thinking = "\n".join(_get_attr(s, "text", "") for s in summary if _get_attr(s, "text"))
+            elif summary:
+                thinking = str(summary)
             else:
                 thinking = _get_attr(item, "thinking") or ""
 
-            if thinking:
-                reasoning = Reasoning(content=thinking)
+            item_id = _get_attr(item, "id")
+            if item_id:
+                blocks.append(
+                    ReasoningRefBlock(
+                        id=item_id,
+                        content=thinking,
+                        encrypted_content=_get_attr(item, "encrypted_content"),
+                    )
+                )
+            elif thinking:
+                blocks.append(ReasoningBlock(content=thinking))
 
-    return "\n".join(content_parts), tool_calls, reasoning
+        else:
+            LOGGER.warning("Skipping unsupported response output item type: %r", item_type)
+
+    return blocks
 
 
 class OpenResponsesClient(LLMClient):
@@ -411,8 +429,8 @@ class OpenResponsesClient(LLMClient):
                 "Reduce max_tokens or message length and try again."
             )
 
-        # Parse response output
-        content, tool_calls, reasoning = _parse_response_output(response.output)
+        # Parse response output into ordered blocks
+        blocks = _parse_response_output(response.output)
 
         # Parse token usage
         usage = response.usage
@@ -427,9 +445,7 @@ class OpenResponsesClient(LLMClient):
         answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
-            reasoning=reasoning,
-            content=content,
-            tool_calls=tool_calls,
+            blocks=blocks,
             token_usage=TokenUsage(
                 input=input_tokens,
                 answer=answer_tokens,

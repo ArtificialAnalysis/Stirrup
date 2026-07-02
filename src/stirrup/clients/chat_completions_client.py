@@ -24,10 +24,12 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from stirrup.clients.utils import to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
+    AssistantBlock,
     AssistantMessage,
     ChatMessage,
     LLMClient,
-    Reasoning,
+    ReasoningBlock,
+    TextBlock,
     TokenUsage,
     Tool,
     ToolCall,
@@ -181,20 +183,27 @@ class ChatCompletionsClient(LLMClient):
 
         msg = choice.message
 
+        # Chat Completions is channel-shaped on the wire — no ordering to preserve —
+        # so blocks are built in canonical channel order: reasoning → text → tool calls.
+        blocks: list[AssistantBlock] = []
+
         # Parse reasoning content (for o1/o3 models with extended thinking)
-        reasoning: Reasoning | None = None
-        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
-            reasoning = Reasoning(content=msg.reasoning_content)
+        reasoning_content = getattr(msg, "reasoning_content", None)
+        if reasoning_content:
+            blocks.append(ReasoningBlock(content=reasoning_content))
+
+        if msg.content:
+            blocks.append(TextBlock(text=msg.content))
 
         # Parse tool calls
-        tool_calls = [
+        blocks.extend(
             ToolCall(
                 tool_call_id=tc.id,
                 name=tc.function.name,
                 arguments=tc.function.arguments or "",
             )
             for tc in (msg.tool_calls or [])
-        ]
+        )
 
         # Parse token usage
         usage = response.usage
@@ -209,9 +218,7 @@ class ChatCompletionsClient(LLMClient):
         answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
-            reasoning=reasoning,
-            content=msg.content or "",
-            tool_calls=tool_calls,
+            blocks=blocks,
             token_usage=TokenUsage(
                 input=input_tokens,
                 answer=answer_tokens,

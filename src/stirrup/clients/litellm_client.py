@@ -25,10 +25,14 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from stirrup.clients.utils import to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
+    AssistantBlock,
     AssistantMessage,
     ChatMessage,
     LLMClient,
-    Reasoning,
+    ReasoningBlock,
+    RedactedReasoningBlock,
+    SignedReasoningBlock,
+    TextBlock,
     TokenUsage,
     Tool,
     ToolCall,
@@ -41,6 +45,26 @@ __all__ = [
 LOGGER = logging.getLogger(__name__)
 
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "default"]
+
+
+def _parse_thinking_blocks(
+    thinking_blocks: list[dict[str, Any]] | None,
+) -> list[SignedReasoningBlock | RedactedReasoningBlock | ReasoningBlock]:
+    """Parse LiteLLM ``thinking_blocks`` into reasoning blocks, one per entry, in order."""
+    parsed: list[SignedReasoningBlock | RedactedReasoningBlock | ReasoningBlock] = []
+    for entry in thinking_blocks or []:
+        if entry.get("type") == "redacted_thinking":
+            parsed.append(RedactedReasoningBlock(data=entry["data"]))
+            continue
+        signature = entry.get("signature") or entry.get("thinking_signature")
+        content = entry.get("thinking")
+        if signature is not None:
+            parsed.append(SignedReasoningBlock(signature=signature, content=content or ""))
+        elif content is not None:
+            parsed.append(ReasoningBlock(content=content))
+        else:
+            raise ValueError(f"Signature and content not found in the thinking block response: {entry!r}")
+    return parsed
 
 
 class LiteLLMClient(LLMClient):
@@ -122,24 +146,18 @@ class LiteLLMClient(LLMClient):
             )
 
         msg = choice["message"]
-        reasoning: Reasoning | None = None
-        if getattr(msg, "reasoning_content", None) is not None:
-            reasoning = Reasoning(content=msg.reasoning_content)
-        if getattr(msg, "thinking_blocks", None) is not None and len(msg.thinking_blocks) > 0:
-            if len(msg.thinking_blocks) > 1:
-                raise ValueError("Found multiple thinking blocks in the response")
 
-            signature = msg.thinking_blocks[0].get("thinking_signature", None)
-            content = msg.thinking_blocks[0].get("thinking", None)
+        # Chat Completions is channel-shaped on the wire — no ordering to preserve —
+        # so blocks are built in canonical channel order: reasoning → text → tool calls.
+        blocks: list[AssistantBlock] = list(_parse_thinking_blocks(getattr(msg, "thinking_blocks", None)))
+        if not blocks and getattr(msg, "reasoning_content", None) is not None:
+            blocks.append(ReasoningBlock(content=msg.reasoning_content))
 
-            if signature is None and content is None:
-                raise ValueError("Signature and content not found in the thinking block response")
+        content = msg.get("content") or ""
+        if content:
+            blocks.append(TextBlock(text=content))
 
-            reasoning = Reasoning(signature=signature, content=content)
-
-        usage = r["usage"]
-
-        calls = [
+        blocks.extend(
             ToolCall(
                 tool_call_id=tc.get("id"),
                 name=tc["function"]["name"],
@@ -147,8 +165,9 @@ class LiteLLMClient(LLMClient):
                 signature=tc.get("provider_specific_fields", {}).get("thought_signature", None),
             )
             for tc in (msg.get("tool_calls") or [])
-        ]
+        )
 
+        usage = r["usage"]
         input_tokens = usage.prompt_tokens
         reasoning_tokens = 0
         if usage.completion_tokens_details:
@@ -157,9 +176,7 @@ class LiteLLMClient(LLMClient):
         answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
-            reasoning=reasoning,
-            content=msg.get("content") or "",
-            tool_calls=calls,
+            blocks=blocks,
             token_usage=TokenUsage(
                 input=input_tokens,
                 answer=answer_tokens,

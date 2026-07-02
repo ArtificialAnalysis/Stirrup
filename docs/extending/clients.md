@@ -152,6 +152,32 @@ class OpenAIClient:
 You can optionally populate `request_start_time` and `request_end_time` on `AssistantMessage`
 to track generation speed. The derived `e2e_otps` property computes output tokens per second.
 
+Channel-shaped construction as above works permanently — blocks are synthesized in
+reasoning → text → tool-calls order. If your provider emits ordered output (interleaved
+thinking, text, and tool calls), construct `AssistantMessage(blocks=[...])` instead to
+preserve the true emission order, and replay from `msg.blocks` when converting history
+back to your API format.
+
+## Integration contract
+
+Stirrup guarantees the following to client and integration authors:
+
+- **Stable identity.** `AssistantMessage.id` is assigned once at construction and survives
+  `model_dump`/`model_validate` round trips.
+- **Same object in history.** The exact object returned by `generate` is appended to
+  history and passed back on subsequent `generate` calls — the framework never copies or
+  rebuilds history messages outside summarization and context-overflow unwinding.
+- **Subclasses are preserved.** `generate` may return an `AssistantMessage` subclass; use
+  this as a typed in-memory carrier for integration state (mark extra fields
+  `exclude=True` to keep them out of serialized histories).
+- **`metadata` is opaque.** The framework never reads, writes, drops, or transmits message
+  metadata. Namespace your keys (e.g. `"myco/..."`); the un-namespaced space belongs to users.
+- **History events.** Pass `Agent(..., history_listener=...)` to observe per-message
+  appends (`on_message`) and history replacements (`on_history_replaced` with reason
+  `"summarization"` or `"context_overflow_unwind"`) — e.g. to keep an id-keyed side store
+  in sync. Listeners apply to that agent only (not sub-agents); exceptions are logged and
+  never propagated.
+
 ## Testing with Mock Client
 
 ```python

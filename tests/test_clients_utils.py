@@ -18,7 +18,8 @@ def test_assistant_message_generates_id() -> None:
     assert first.id != second.id
 
 
-def test_to_openai_messages_forwards_assistant_metadata() -> None:
+def test_to_openai_messages_never_sends_metadata() -> None:
+    """Message metadata is integrator/user state — opaque to the framework, never on the wire."""
     message = AssistantMessage(
         content="Hello",
         tool_calls=[],
@@ -32,6 +33,5 @@ def test_to_openai_messages_forwards_assistant_metadata() -> None:
         {
             "role": "assistant",
             "content": [{"type": "text", "text": "Hello"}],
-            "metadata": {"source": "cache", "attempt": 2},
         }
     ]
