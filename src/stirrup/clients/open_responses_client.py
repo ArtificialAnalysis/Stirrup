@@ -186,8 +186,8 @@ def _to_open_responses_input(
                     if block.encrypted_content is not None:
                         reasoning_item["encrypted_content"] = block.encrypted_content
                     input_items.append(reasoning_item)
-                # In-band/signed reasoning and media blocks have no Responses input
-                # representation; they are skipped, as before this change.
+                # In-band/signed reasoning, opaque provider blocks, and media blocks
+                # have no Responses input representation; they are skipped.
         elif isinstance(m, ToolMessage):
             # Tool results are function_call_output items
             content_str = m.content if isinstance(m.content, str) else str(m.content)

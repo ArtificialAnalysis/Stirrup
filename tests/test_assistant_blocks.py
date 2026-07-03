@@ -26,6 +26,7 @@ from stirrup.core.models import (
     HistoryReplacedReason,
     ImageContentBlock,
     LLMClient,
+    OpaqueBlock,
     Reasoning,
     ReasoningBlock,
     ReasoningRefBlock,
@@ -183,19 +184,75 @@ def test_mixing_blocks_with_channel_fields_raises() -> None:
 
 
 def test_mixing_guard_ignores_empty_channel_values() -> None:
-    # Empty lists and empty strings drop nothing — they don't conflict.
+    # Empty values ("", [], {}) drop nothing — they don't conflict.
     msg = AssistantMessage.model_validate({"blocks": [{"kind": "text", "text": "x"}], "content": "", "tool_calls": []})
     assert msg.blocks == [TextBlock(text="x")]
+    msg = AssistantMessage.model_validate({"blocks": [{"kind": "text", "text": "x"}], "content": [], "reasoning": {}})
+    assert msg.blocks == [TextBlock(text="x")]
+
+
+def test_falsy_channel_reasoning_synthesizes_no_block() -> None:
+    # v0.1 required Reasoning.content, so an empty dict was never a valid payload;
+    # it must not turn into a spurious empty ReasoningBlock.
+    msg = AssistantMessage.model_validate({"content": "hi", "reasoning": {}})
+    assert msg.blocks == [TextBlock(text="hi")]
 
 
 def test_channel_assignment_raises() -> None:
     msg = AssistantMessage(blocks=[TextBlock(text="x")])
-    with pytest.raises(AttributeError):
+    with pytest.raises(AttributeError, match="migration guide"):
         msg.content = "y"  # type: ignore
-    with pytest.raises(AttributeError):
+    with pytest.raises(AttributeError, match="migration guide"):
         msg.tool_calls = []  # type: ignore
-    with pytest.raises(AttributeError):
+    with pytest.raises(AttributeError, match="migration guide"):
         msg.reasoning = Reasoning(content="r")  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# Opaque provider blocks
+# ---------------------------------------------------------------------------
+
+
+OPAQUE_PAYLOAD = '{"type": "provider_marker", "detail": {"reason": "switch"}}'
+
+
+def test_opaque_block_round_trips_and_stays_out_of_projections() -> None:
+    msg = AssistantMessage(
+        blocks=[
+            SignedReasoningBlock(signature="sig-1", content="thinking"),
+            OpaqueBlock(data=OPAQUE_PAYLOAD),
+            TextBlock(text="answer"),
+        ]
+    )
+    reloaded = AssistantMessage.model_validate(msg.model_dump())
+    assert reloaded.blocks == msg.blocks
+    # Not reasoning: excluded from the reasoning family and the channel projections.
+    assert reasoning_blocks(msg.blocks) == [SignedReasoningBlock(signature="sig-1", content="thinking")]
+    assert msg.reasoning == Reasoning(signature="sig-1", content="thinking")
+    assert msg.content == "answer"
+    assert msg.tool_calls == []
+
+
+def test_opaque_block_skipped_on_openai_replay() -> None:
+    msg = AssistantMessage(
+        blocks=[
+            OpaqueBlock(data=OPAQUE_PAYLOAD),
+            TextBlock(text="answer"),
+        ]
+    )
+    [wire] = to_openai_messages([msg])
+    assert wire == {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}
+
+
+def test_opaque_block_skipped_on_responses_replay() -> None:
+    msg = AssistantMessage(
+        blocks=[
+            OpaqueBlock(data=OPAQUE_PAYLOAD),
+            TextBlock(text="answer"),
+        ]
+    )
+    _, items = _to_open_responses_input([msg])
+    assert [item["type"] for item in items] == ["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +649,40 @@ async def test_history_listener_summarization_event_and_replaced_ids() -> None:
     assert any(isinstance(m, AssistantMessage) and m.id == "turn-1" for m in removed)
     assert isinstance(replacement[0], SummaryMessage)
     assert replacement[0].replaced_ids == ["turn-1"]
+
+
+async def test_chained_summarization_carries_replaced_ids_transitively() -> None:
+    """A second summarization removes the first summary bridge; the new summary's
+    replaced_ids must still cover the turns the first summary stood for, so dumped
+    histories reconstruct lineage across rounds."""
+    listener = _RecordingListener()
+    heavy = TokenUsage(input=250, answer=100)  # total=350 >= 0.3*1000
+    responses = [
+        AssistantMessage(id="turn-1", content="Working on it", token_usage=heavy),
+        AssistantMessage(content="Summary one.", token_usage=TokenUsage(input=10, answer=5)),
+        AssistantMessage(id="turn-2", content="Still working", token_usage=heavy),
+        AssistantMessage(content="Summary two.", token_usage=TokenUsage(input=10, answer=5)),
+        _finish_message(),
+    ]
+    agent = Agent(
+        client=_ScriptedClient(responses, max_tokens=1000),
+        name="test-agent",
+        max_turns=10,
+        turns_remaining_warning_threshold=2,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+        history_listener=listener,
+    )
+    async with agent.session(cache_on_interrupt=False) as session:
+        await session.run([SystemMessage(content="System"), UserMessage(content="Task")])
+
+    summarizations = [r for r in listener.replacements if r[2] == "summarization"]
+    assert len(summarizations) == 2
+    _, second_replacement, _ = summarizations[1]
+    second_bridge = second_replacement[0]
+    assert isinstance(second_bridge, SummaryMessage)
+    assert second_bridge.replaced_ids == ["turn-1", "turn-2"]
 
 
 async def test_history_listener_context_overflow_unwind_event() -> None:

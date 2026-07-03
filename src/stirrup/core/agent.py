@@ -1365,9 +1365,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
                 removed = current_messages[len(task_context) :]
                 summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
+                # Chain lineage across summarization rounds: a removed prior summary
+                # contributes the ids it already stood for, so the final summary's
+                # replaced_ids transitively covers every collapsed assistant turn.
+                replaced_ids: list[str] = []
+                for m in removed:
+                    if isinstance(m, SummaryMessage):
+                        replaced_ids.extend(m.replaced_ids)
+                    elif isinstance(m, AssistantMessage):
+                        replaced_ids.append(m.id)
                 summary_bridge = SummaryMessage(
                     content=summary_bridge_prompt,
-                    replaced_ids=[m.id for m in removed if isinstance(m, AssistantMessage)],
+                    replaced_ids=replaced_ids,
                 )
                 # Use a user acknowledgement to avoid consecutive assistant messages with strict providers.
                 acknowledgement_msg = UserMessage(content="Got it, thanks!")

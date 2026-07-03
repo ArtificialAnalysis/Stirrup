@@ -36,6 +36,7 @@ __all__ = [
     "HistoryReplacedReason",
     "ImageContentBlock",
     "LLMClient",
+    "OpaqueBlock",
     "Reasoning",
     "ReasoningBlock",
     "ReasoningRefBlock",
@@ -732,6 +733,22 @@ class ReasoningRefBlock(BaseModel):
     encrypted_content: str | None = None
 
 
+class OpaqueBlock(BaseModel):
+    """Provider-native block the framework does not interpret, echoed back verbatim
+    in position on passback.
+
+    For provider-issued marker/control blocks that must round-trip untouched:
+    ``data`` holds the block's raw JSON (self-describing — the provider's own
+    ``type`` field travels inside it) and the provider's client re-emits it as-is.
+    Not reasoning: it never contributes to the ``reasoning`` projection or
+    reasoning accounting, and clients that cannot express it skip it on replay,
+    as with media.
+    """
+
+    kind: Literal["opaque"] = "opaque"
+    data: str
+
+
 type AnyReasoningBlock = ReasoningBlock | SignedReasoningBlock | RedactedReasoningBlock | ReasoningRefBlock
 """The reasoning family: one kind per passback mechanism."""
 
@@ -743,6 +760,7 @@ type AssistantBlock = Annotated[
     | SignedReasoningBlock
     | RedactedReasoningBlock
     | ReasoningRefBlock
+    | OpaqueBlock
     | ToolCall
     | ImageContentBlock
     | VideoContentBlock
@@ -808,6 +826,13 @@ def _reasoning_to_block(reasoning: object) -> object:
             return reasoning
         return SignedReasoningBlock(signature=signature, content=content if isinstance(content, str) else "")
     return ReasoningBlock(content=content if isinstance(content, str) else "")
+
+
+_CHANNEL_ASSIGNMENT_ERROR = (
+    "AssistantMessage.{channel} is a read-only projection of blocks; "
+    "use with_text()/with_blocks() or construct a new message. "
+    "See the v0.2 migration guide (CHANGELOG.md, BREAKING)."
+)
 
 
 class AssistantMessage(BaseModel):
@@ -881,16 +906,18 @@ class AssistantMessage(BaseModel):
         tool_calls = upgraded.pop("tool_calls", None)
 
         if "blocks" in upgraded:
-            if content not in (None, "") or reasoning is not None or tool_calls:
+            # Truthiness on purpose: empty values ("", [], {}) carry no data, so they
+            # don't conflict with blocks and are dropped without loss.
+            if content or reasoning or tool_calls:
                 raise ValueError(
                     "AssistantMessage cannot mix 'blocks' with channel fields "
                     "(content/reasoning/tool_calls); channel data would be silently dropped. "
-                    "Pass one representation."
+                    "Pass one representation. See the v0.2 migration guide (CHANGELOG.md, BREAKING)."
                 )
             return upgraded
 
         blocks: list[object] = []
-        if reasoning is not None:
+        if reasoning:
             blocks.append(_reasoning_to_block(reasoning))
         if isinstance(content, str):
             if content:
@@ -939,6 +966,18 @@ class AssistantMessage(BaseModel):
     def tool_calls(self) -> list[ToolCall]:
         """Tool calls in emission order."""
         return tool_call_blocks(self.blocks)
+
+    @content.setter
+    def content(self, _value: object) -> None:
+        raise AttributeError(_CHANNEL_ASSIGNMENT_ERROR.format(channel="content"))
+
+    @reasoning.setter
+    def reasoning(self, _value: object) -> None:
+        raise AttributeError(_CHANNEL_ASSIGNMENT_ERROR.format(channel="reasoning"))
+
+    @tool_calls.setter
+    def tool_calls(self, _value: object) -> None:
+        raise AttributeError(_CHANNEL_ASSIGNMENT_ERROR.format(channel="tool_calls"))
 
     def with_text(self, text: str) -> "AssistantMessage":
         """Copy with all text blocks replaced by one text block carrying ``text``.
