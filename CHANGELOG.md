@@ -21,6 +21,7 @@ actual emission order. `blocks` is the only stored content; the channel-era
 | Provide both `blocks` and non-empty channel kwargs | **raises `ValueError`** (new guard) | Pass one representation. |
 | `Reasoning` class used as a standalone type | deprecated — survives only as the `reasoning` projection carrier | Match on `ReasoningBlock` / `SignedReasoningBlock` / `RedactedReasoningBlock` / `ReasoningRefBlock`. |
 | `from stirrup import SummaryMessage` | **removed** from the top-level namespace (symmetry with `TurnWarningMessage`) | Import from `stirrup.core.models`. |
+| Validate a raw user-message dict without a `kind` key through `ChatMessage` | **breaks** — user-role messages now discriminate on `kind`, and the discriminator must be present | Include `"kind": "user"` (every dump since the field was introduced already carries it), or construct `UserMessage(...)` directly. |
 | Assistant `metadata` sent on the wire by OpenAI-compatible replay | **removed** — metadata is integrator/user state, never transmitted | None (was undocumented leakage). |
 | OpenAI Responses replay of tool-call turns | wire change — items now replay in true emission order (message/function_call/reasoning interleaved) instead of message-then-all-calls | Intentional fidelity fix. Channel-constructed messages still replay in the old order. |
 | LiteLLM replay of signed thinking | wire change — one `thinking_blocks` entry per signed block (was: merged single entry, first signature only) | Intentional fidelity fix for multi-block signed thinking. |
