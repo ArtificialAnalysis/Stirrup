@@ -199,11 +199,11 @@ def test_falsy_channel_reasoning_synthesizes_no_block() -> None:
 def test_channel_assignment_raises() -> None:
     msg = AssistantMessage(blocks=[TextBlock(text="x")])
     with pytest.raises(AttributeError, match="migration guide"):
-        msg.content = "y"  # type: ignore
+        msg.content = "y"
     with pytest.raises(AttributeError, match="migration guide"):
-        msg.tool_calls = []  # type: ignore
+        msg.tool_calls = []
     with pytest.raises(AttributeError, match="migration guide"):
-        msg.reasoning = Reasoning(content="r")  # type: ignore
+        msg.reasoning = Reasoning(content="r")
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +381,8 @@ def test_agent_injected_user_messages_round_trip_through_chat_message_union() ->
                 SummaryMessage(content="bridge", replaced_ids=["turn-1"]),
                 TurnWarningMessage(content="2 turns remaining"),
             ]
-        ]
+        ],
+        run_metadata={},
     )
     reloaded = SubAgentMetadata.model_validate_json(meta.model_dump_json())
     _user, _assistant, summary, warning = reloaded.message_history[0]
