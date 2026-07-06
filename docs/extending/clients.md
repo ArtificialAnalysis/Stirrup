@@ -172,11 +172,9 @@ Stirrup guarantees the following to client and integration authors:
   `exclude=True` to keep them out of serialized histories).
 - **`metadata` is opaque.** The framework never reads, writes, drops, or transmits message
   metadata. Namespace your keys (e.g. `"myco/..."`); the un-namespaced space belongs to users.
-- **History events.** Pass `Agent(..., history_listener=...)` to observe per-message
-  appends (`on_message`) and history replacements (`on_history_replaced` with reason
-  `"summarization"` or `"context_overflow_unwind"`) — e.g. to keep an id-keyed side store
-  in sync. Listeners apply to that agent only (not sub-agents); exceptions are logged and
-  never propagated.
+- **Summaries carry lineage.** When history is summarized, the `SummaryMessage` records the
+  ids of the assistant messages it replaced (`replaced_ids`, chained transitively across
+  summarization rounds), so dumped histories reconstruct which turns a summary stands for.
 
 ## Testing with Mock Client
 

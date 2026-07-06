@@ -26,8 +26,6 @@ from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    HistoryListener,
-    HistoryReplacedReason,
     ImageContentBlock,
     LLMClient,
     SubAgentMetadata,
@@ -290,7 +288,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
-        history_listener: HistoryListener | None = ...,
     ) -> None: ...
 
     @overload
@@ -311,7 +308,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
-        history_listener: HistoryListener | None = ...,
     ) -> None: ...
 
     @overload
@@ -332,7 +328,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         recover_from_context_overflow: bool = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
-        history_listener: HistoryListener | None = ...,
     ) -> None: ...
 
     def __init__(
@@ -355,8 +350,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         share_parent_exec_env: bool = False,
         # Logging
         logger: AgentLoggerBase | None = None,
-        # Integration hooks
-        history_listener: HistoryListener | None = None,
     ) -> None:
         """Initialize the agent with an LLM client and configuration.
 
@@ -388,10 +381,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                    the subagent to see all files in the parent's environment.
                                    Only effective when the agent is used as a subagent via to_tool().
             logger: Optional logger instance. If None, creates AgentLogger() internally.
-            history_listener: Optional observer notified of history changes on this agent
-                              (per-message appends, summarization/overflow replacements).
-                              Applies to this agent only, not to sub-agents. Callbacks are
-                              best-effort: exceptions are logged and never propagated.
 
         """
         # Validate agent name
@@ -418,9 +407,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Logger (can be passed in or created here)
         self._logger: AgentLoggerBase = logger if logger is not None else AgentLogger()
-
-        # History listener (integration hook; this agent only, not sub-agents)
-        self._history_listener: HistoryListener | None = history_listener
 
         # Session configuration (set during session(), used in __aenter__)
         self._pending_output_dir: Path | None = None
@@ -1202,30 +1188,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             tool_end_time=tool_end_time,
         )
 
-    def _notify_message(self, *messages: ChatMessage) -> None:
-        """Report appended messages to the history listener; best-effort, never raises."""
-        if self._history_listener is None:
-            return
-        for message in messages:
-            try:
-                self._history_listener.on_message(message)
-            except Exception:
-                LOGGER.exception("HistoryListener.on_message raised; ignoring")
-
-    def _notify_history_replaced(
-        self,
-        removed: list[ChatMessage],
-        replacement: list[ChatMessage],
-        reason: HistoryReplacedReason,
-    ) -> None:
-        """Report a history replacement to the history listener; best-effort, never raises."""
-        if self._history_listener is None:
-            return
-        try:
-            self._history_listener.on_history_replaced(removed, replacement, reason)
-        except Exception:
-            LOGGER.exception("HistoryListener.on_history_replaced raised; ignoring")
-
     def _unwind_context_overflow(self, messages: list[ChatMessage]) -> tuple[list[ChatMessage], str]:
         """Drop the latest completed turn, preserving the original task prompt."""
         if not self._recover_from_context_overflow:
@@ -1238,9 +1200,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         turn_start, assistant_message_id = turn
         if not self._has_prior_completed_turn(messages, turn_start):
             raise self._context_boundary_error(messages[:turn_start])
-        # Both call sites commit the trimmed history immediately, so the removal
-        # is reported here, once.
-        self._notify_history_replaced(messages[turn_start:], [], "context_overflow_unwind")
         return messages[:turn_start], assistant_message_id
 
     @staticmethod
@@ -1384,7 +1343,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
                 self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
 
-                self._notify_history_replaced(removed, [summary_bridge, acknowledgement_msg], "summarization")
                 return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
             except ContextOverflowError:
                 # Summarization can overflow too; drop the latest completed turn and retry.
@@ -1483,7 +1441,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 msgs.append(UserMessage(content=init_msgs))
             else:
                 msgs.extend(init_msgs)
-            self._notify_message(*msgs)
 
             full_msg_history: list[list[ChatMessage]] = []
 
@@ -1526,7 +1483,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if self._max_turns - turn <= self._turns_remaining_warning_threshold and turn != 0:
                 num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - turn)
                 msgs.append(num_turns_remaining_msg)
-                self._notify_message(num_turns_remaining_msg)
                 self._logger.user_message(num_turns_remaining_msg)
 
             while True:
@@ -1564,7 +1520,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.user_message(user_msg)
 
             msgs.extend([assistant_message, *tool_messages, *user_messages])
-            self._notify_message(assistant_message, *tool_messages, *user_messages)
 
             if finish_params:
                 break
@@ -1585,7 +1540,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             ):
                 continue_msg = UserMessage(content="Please continue the task")
                 msgs.append(continue_msg)
-                self._notify_message(continue_msg)
 
         if finish_params is None:
             LOGGER.error(

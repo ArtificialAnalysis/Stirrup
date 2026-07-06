@@ -32,8 +32,6 @@ __all__ = [
     "Content",
     "ContentBlock",
     "EmptyParams",
-    "HistoryListener",
-    "HistoryReplacedReason",
     "ImageContentBlock",
     "LLMClient",
     "OpaqueBlock",
@@ -734,15 +732,14 @@ class ReasoningRefBlock(BaseModel):
 
 
 class OpaqueBlock(BaseModel):
-    """Provider-native block the framework does not interpret, echoed back verbatim
-    in position on passback.
+    """Provider-native block the framework carries uninterpreted.
 
     For provider-issued marker/control blocks that must round-trip untouched:
     ``data`` holds the block's raw JSON (self-describing — the provider's own
-    ``type`` field travels inside it) and the provider's client re-emits it as-is.
-    Not reasoning: it never contributes to the ``reasoning`` projection or
-    reasoning accounting, and clients that cannot express it skip it on replay,
-    as with media.
+    ``type`` field travels inside it). The framework preserves it in position
+    through history, projections, and serialization so a client that
+    understands the payload can re-emit it verbatim on passback; the built-in
+    clients do not interpret it and skip it on replay.
     """
 
     kind: Literal["opaque"] = "opaque"
@@ -1038,33 +1035,6 @@ class ToolMessage(BaseModel):
 
 type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
 """Discriminated union of all message types, automatically parsed based on role field."""
-
-
-type HistoryReplacedReason = Literal["summarization", "context_overflow_unwind"]
-"""Why the agent replaced a span of history. Closed enum, extended additively."""
-
-
-@runtime_checkable
-class HistoryListener(Protocol):
-    """Observer for agent history changes; lets integrators keep out-of-band state in sync.
-
-    Callbacks are synchronous and best-effort: exceptions are caught and logged,
-    never propagated into the run. Callbacks MUST NOT mutate the messages they
-    receive. Applies to the agent it is attached to only (not sub-agents).
-    """
-
-    def on_message(self, message: "ChatMessage") -> None:
-        """Called once per message appended to the agent's history."""
-        ...
-
-    def on_history_replaced(
-        self,
-        removed: Sequence["ChatMessage"],
-        replacement: Sequence["ChatMessage"],
-        reason: HistoryReplacedReason,
-    ) -> None:
-        """Called when the agent replaces a span of history (summarization, overflow unwind)."""
-        ...
 
 
 class SubAgentMetadata(BaseModel):

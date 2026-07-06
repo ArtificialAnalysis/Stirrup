@@ -3,8 +3,7 @@
 Covers: block accessors, channel projections, channel-order synthesis, the
 mixing guard, serialization round trips (v0.1 goldens and v0.2 blocks),
 wire-format goldens for the OpenAI-compatible clients, and the §8 integration
-contract (id stability, metadata opacity, subclass preservation,
-HistoryListener events).
+contract (id stability, metadata opacity, subclass preservation).
 """
 
 from collections.abc import Sequence
@@ -19,11 +18,9 @@ from stirrup.clients.open_responses_client import _to_open_responses_input
 from stirrup.clients.utils import to_openai_messages
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
-from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
-    HistoryReplacedReason,
     ImageContentBlock,
     LLMClient,
     OpaqueBlock,
@@ -497,31 +494,14 @@ def test_responses_replay_skips_inband_and_signed_reasoning() -> None:
 
 
 # ---------------------------------------------------------------------------
-# §8 contract: identity, metadata opacity, subclass preservation, listener
+# §8 contract: identity, metadata opacity, subclass preservation
 # ---------------------------------------------------------------------------
 
 
 class _SubclassedAssistantMessage(AssistantMessage):
-    """Stand-in for an integrator's typed carrier (e.g. AA's call-log ref)."""
+    """Stand-in for an integrator's typed carrier (an out-of-band side-store reference)."""
 
     side_ref: str | None = None
-
-
-class _RecordingListener:
-    def __init__(self) -> None:
-        self.messages: list[ChatMessage] = []
-        self.replacements: list[tuple[list[ChatMessage], list[ChatMessage], HistoryReplacedReason]] = []
-
-    def on_message(self, message: ChatMessage) -> None:
-        self.messages.append(message)
-
-    def on_history_replaced(
-        self,
-        removed: Sequence[ChatMessage],
-        replacement: Sequence[ChatMessage],
-        reason: HistoryReplacedReason,
-    ) -> None:
-        self.replacements.append((list(removed), list(replacement), reason))
 
 
 class _ScriptedClient(LLMClient):
@@ -577,7 +557,7 @@ async def test_agent_preserves_subclass_and_metadata_and_id() -> None:
             ),
         ],
         token_usage=TokenUsage(input=10, answer=5),
-        metadata={"aa/ref": "entry-1"},
+        metadata={"integrator/ref": "entry-1"},
         side_ref="side-store-key",
     )
     agent = Agent(
@@ -595,67 +575,13 @@ async def test_agent_preserves_subclass_and_metadata_and_id() -> None:
     assert stored[0] is response  # same object, not a copy
     assert isinstance(stored[0], _SubclassedAssistantMessage)
     assert stored[0].side_ref == "side-store-key"
-    assert stored[0].metadata == {"aa/ref": "entry-1"}
-
-
-async def test_history_listener_receives_every_append() -> None:
-    listener = _RecordingListener()
-    finish = _finish_message(message_id="finish-id")
-    agent = Agent(
-        client=_ScriptedClient([finish]),
-        name="test-agent",
-        max_turns=3,
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        history_listener=listener,
-    )
-    async with agent.session(cache_on_interrupt=False) as session:
-        await session.run([UserMessage(content="Task")])
-
-    roles = [m.role for m in listener.messages]
-    # system prompt + task + assistant + finish-tool result
-    assert roles == ["system", "user", "assistant", "tool"]
-    assistant_msg = listener.messages[2]
-    assert isinstance(assistant_msg, AssistantMessage)
-    assert assistant_msg.id == "finish-id"
-    assert listener.replacements == []
-
-
-async def test_history_listener_summarization_event_and_replaced_ids() -> None:
-    listener = _RecordingListener()
-    turn_1 = AssistantMessage(
-        id="turn-1",
-        content="Working on it",
-        token_usage=TokenUsage(input=250, answer=100),  # total=350 >= 0.3*1000
-    )
-    summary_reply = AssistantMessage(content="Summary of progress.", token_usage=TokenUsage(input=10, answer=5))
-    responses = [turn_1, summary_reply, _finish_message()]
-    agent = Agent(
-        client=_ScriptedClient(responses, max_tokens=1000),
-        name="test-agent",
-        max_turns=10,
-        turns_remaining_warning_threshold=2,
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        context_summarization_cutoff=0.3,
-        history_listener=listener,
-    )
-    async with agent.session(cache_on_interrupt=False) as session:
-        await session.run([SystemMessage(content="System"), UserMessage(content="Task")])
-
-    assert len(listener.replacements) == 1
-    removed, replacement, reason = listener.replacements[0]
-    assert reason == "summarization"
-    assert any(isinstance(m, AssistantMessage) and m.id == "turn-1" for m in removed)
-    assert isinstance(replacement[0], SummaryMessage)
-    assert replacement[0].replaced_ids == ["turn-1"]
+    assert stored[0].metadata == {"integrator/ref": "entry-1"}
 
 
 async def test_chained_summarization_carries_replaced_ids_transitively() -> None:
     """A second summarization removes the first summary bridge; the new summary's
     replaced_ids must still cover the turns the first summary stood for, so dumped
     histories reconstruct lineage across rounds."""
-    listener = _RecordingListener()
     heavy = TokenUsage(input=250, answer=100)  # total=350 >= 0.3*1000
     responses = [
         AssistantMessage(id="turn-1", content="Working on it", token_usage=heavy),
@@ -672,62 +598,11 @@ async def test_chained_summarization_carries_replaced_ids_transitively() -> None
         tools=[],
         finish_tool=SIMPLE_FINISH_TOOL,
         context_summarization_cutoff=0.3,
-        history_listener=listener,
     )
     async with agent.session(cache_on_interrupt=False) as session:
-        await session.run([SystemMessage(content="System"), UserMessage(content="Task")])
+        _params, history, _meta = await session.run([SystemMessage(content="System"), UserMessage(content="Task")])
 
-    summarizations = [r for r in listener.replacements if r[2] == "summarization"]
-    assert len(summarizations) == 2
-    _, second_replacement, _ = summarizations[1]
-    second_bridge = second_replacement[0]
-    assert isinstance(second_bridge, SummaryMessage)
-    assert second_bridge.replaced_ids == ["turn-1", "turn-2"]
-
-
-async def test_history_listener_context_overflow_unwind_event() -> None:
-    listener = _RecordingListener()
-    responses = [
-        AssistantMessage(id="turn-1", content="Step one", token_usage=TokenUsage(input=10, answer=5)),
-        AssistantMessage(id="turn-2", content="Step two", token_usage=TokenUsage(input=10, answer=5)),
-        ContextOverflowError("too much context"),
-        _finish_message(),
-    ]
-    agent = Agent(
-        client=_ScriptedClient(responses),
-        name="test-agent",
-        max_turns=10,
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        block_successive_assistant_messages=False,
-        history_listener=listener,
-    )
-    async with agent.session(cache_on_interrupt=False) as session:
-        await session.run([UserMessage(content="Task")])
-
-    unwinds = [r for r in listener.replacements if r[2] == "context_overflow_unwind"]
-    assert len(unwinds) == 1
-    removed, replacement, _reason = unwinds[0]
-    assert replacement == []
-    assert any(isinstance(m, AssistantMessage) and m.id == "turn-2" for m in removed)
-
-
-async def test_history_listener_exceptions_are_swallowed() -> None:
-    class _ExplodingListener:
-        def on_message(self, message: ChatMessage) -> None:  # noqa: ARG002
-            raise RuntimeError("boom")
-
-        def on_history_replaced(self, removed: object, replacement: object, reason: object) -> None:  # noqa: ARG002
-            raise RuntimeError("boom")
-
-    agent = Agent(
-        client=_ScriptedClient([_finish_message()]),
-        name="test-agent",
-        max_turns=3,
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        history_listener=_ExplodingListener(),
-    )
-    async with agent.session(cache_on_interrupt=False) as session:
-        params, _history, _meta = await session.run([UserMessage(content="Task")])
-    assert params is not None  # run completed despite the listener raising
+    bridges = [m for group in history for m in group if isinstance(m, SummaryMessage)]
+    assert len(bridges) == 2
+    assert bridges[0].replaced_ids == ["turn-1"]
+    assert bridges[-1].replaced_ids == ["turn-1", "turn-2"]

@@ -16,6 +16,7 @@ actual emission order. `blocks` is the only stored content; the channel-era
 | Deserialize v0.1 histories (incl. `SubAgentMetadata`, cache files) | works — upgraded at validation | None. |
 | Assign `msg.content = …` / `.tool_calls = …` / `.reasoning = …` | **breaks** — projections have no setters; raises `AttributeError` | `msg = msg.with_text("…")`, `msg.with_blocks([…])`, or rebuild via the constructor. Grep: `rg "\.(content\|tool_calls\|reasoning)\s*="` |
 | External tools reading dumped histories by `content`/`tool_calls` key | **breaks** — dumps emit `blocks` only | Read `blocks` (kind-discriminated), or re-validate through `AssistantMessage` and use the projections. |
+| Dumped `ToolCall` payloads | wire change — now carry a `kind: "tool_call"` discriminator key (v0.1 dumps without it still validate; never sent on provider wire formats) | Ignore or read the new key. |
 | v0.2 dumps (incl. cache files) read by v0.1 | **breaks** | Upgrade readers to ≥ 0.2. |
 | Provide both `blocks` and non-empty channel kwargs | **raises `ValueError`** (new guard) | Pass one representation. |
 | `Reasoning` class used as a standalone type | deprecated — survives only as the `reasoning` projection carrier | Match on `ReasoningBlock` / `SignedReasoningBlock` / `RedactedReasoningBlock` / `ReasoningRefBlock`. |
@@ -28,12 +29,12 @@ actual emission order. `blocks` is the only stored content; the channel-era
 - Assistant block types, discriminated on `kind`: `TextBlock`, `ReasoningBlock`
   (in-band), `SignedReasoningBlock` (opaque signature passback),
   `RedactedReasoningBlock` (opaque withheld-reasoning payload), `ReasoningRefBlock`
-  (provider-side reference, with optional `encrypted_content` for ZDR), plus
-  `ToolCall` and the media blocks as union members (`AssistantBlock`).
+  (provider-side reference, with optional `encrypted_content` for ZDR),
+  `OpaqueBlock` (provider-native block carried uninterpreted, for marker/control
+  blocks that must survive passback), plus `ToolCall` and the media blocks as
+  union members (`AssistantBlock`).
 - Accessors `joined_text`, `final_text`, `tool_call_blocks`, `reasoning_blocks`,
   and message mutators `AssistantMessage.with_text` / `.with_blocks`.
-- `Agent(history_listener=...)`: `on_message` fires once per appended message;
-  `on_history_replaced` fires on summarization and context-overflow unwinding.
 - `SummaryMessage.replaced_ids`: ids of the assistant messages a summary replaced.
 - Documented integration contract: stable `AssistantMessage.id`, metadata opacity,
   `generate` may return an `AssistantMessage` subclass and the framework preserves it.
