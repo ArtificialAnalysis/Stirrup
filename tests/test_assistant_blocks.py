@@ -36,6 +36,7 @@ from stirrup.core.models import (
     TokenUsage,
     Tool,
     ToolCall,
+    TurnWarningMessage,
     UserMessage,
     final_text,
     joined_text,
@@ -366,6 +367,27 @@ def test_summary_message_replaced_ids_round_trips() -> None:
     # v0.1 summary dumps (no replaced_ids) still validate
     legacy = SummaryMessage.model_validate({"role": "user", "kind": "summary", "content": "bridge"})
     assert legacy.replaced_ids == []
+
+
+def test_agent_injected_user_messages_round_trip_through_chat_message_union() -> None:
+    """SummaryMessage/TurnWarningMessage rehydrate as their own types (not base
+    UserMessage) through the ChatMessage union — dumped histories keep summary
+    lineage via replaced_ids."""
+    meta = SubAgentMetadata(
+        message_history=[
+            [
+                UserMessage(content="task"),
+                AssistantMessage(id="turn-1", content="working"),
+                SummaryMessage(content="bridge", replaced_ids=["turn-1"]),
+                TurnWarningMessage(content="2 turns remaining"),
+            ]
+        ]
+    )
+    reloaded = SubAgentMetadata.model_validate_json(meta.model_dump_json())
+    _user, _assistant, summary, warning = reloaded.message_history[0]
+    assert isinstance(summary, SummaryMessage)
+    assert summary.replaced_ids == ["turn-1"]
+    assert isinstance(warning, TurnWarningMessage)
 
 
 # ---------------------------------------------------------------------------

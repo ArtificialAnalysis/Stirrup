@@ -339,7 +339,7 @@ async def test_cache_state_preserves_run_metadata_by_turn() -> None:
 async def test_cache_state_preserves_special_user_message_types() -> None:
     state = CacheState(
         msgs=[
-            SummaryMessage(content="Summary"),
+            SummaryMessage(content="Summary", replaced_ids=["turn-1", "turn-2"]),
             TurnWarningMessage(content="One turn left"),
             UserMessage(content="Regular user message"),
         ],
@@ -351,8 +351,42 @@ async def test_cache_state_preserves_special_user_message_types() -> None:
     restored = CacheState.from_dict(state.to_dict())
 
     assert isinstance(restored.msgs[0], SummaryMessage)
+    assert restored.msgs[0].replaced_ids == ["turn-1", "turn-2"]
     assert isinstance(restored.msgs[1], TurnWarningMessage)
     assert type(restored.msgs[2]) is UserMessage
+
+
+async def test_cache_round_trips_block_based_assistant_message() -> None:
+    """A blocks-native assistant turn — every reasoning kind, opaque, media, and a
+    signed tool call — survives cache serialize/deserialize bit-for-bit."""
+    from stirrup.core.cache import deserialize_message, serialize_message
+    from stirrup.core.models import (
+        OpaqueBlock,
+        ReasoningBlock,
+        ReasoningRefBlock,
+        RedactedReasoningBlock,
+        SignedReasoningBlock,
+        TextBlock,
+    )
+
+    message = AssistantMessage(
+        id="turn-1",
+        blocks=[
+            SignedReasoningBlock(signature="sig-1", content="signed thinking"),
+            RedactedReasoningBlock(data="redacted-token"),
+            ReasoningRefBlock(id="rs_1", content="summary", encrypted_content="zdr-payload"),
+            ReasoningBlock(content="in-band thinking"),
+            TextBlock(text="the answer"),
+            OpaqueBlock(data='{"type": "provider_marker"}'),
+            _sample_png_block(),
+            ToolCall(signature="tc-sig", name="search", arguments='{"q": 1}', tool_call_id="call-1"),
+        ],
+        token_usage=TokenUsage(input=10, answer=5),
+    )
+
+    restored = deserialize_message(serialize_message(message))
+
+    assert restored == message
 
 
 async def test_context_overflow_at_original_prompt_raises() -> None:

@@ -1033,7 +1033,17 @@ class ToolMessage(BaseModel):
         return duration
 
 
-type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
+type UserRoleMessage = Annotated[
+    UserMessage | SummaryMessage | TurnWarningMessage,
+    Field(discriminator="kind"),
+]
+"""User-role messages, discriminated on ``kind`` — the agent-injected ``UserMessage``
+subclasses share ``role="user"``, so dumped histories need the nested discriminator
+to rehydrate them as their own types (e.g. ``SummaryMessage.replaced_ids``)."""
+
+type ChatMessage = Annotated[
+    SystemMessage | UserRoleMessage | AssistantMessage | ToolMessage, Field(discriminator="role")
+]
 """Discriminated union of all message types, automatically parsed based on role field."""
 
 
