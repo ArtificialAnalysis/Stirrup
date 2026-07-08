@@ -23,6 +23,7 @@ import os
 from html import escape
 from types import TracebackType
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 import httpx
 import trafilatura
@@ -88,6 +89,16 @@ class WebFetchMetadata(BaseModel):
         )
 
 
+def _is_fetchable_web_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    # netloc check: a valid scheme alone isn't enough — strings like "http:///foo" or
+    # "https:relative/path" parse with an http(s) scheme but no host, and are unfetchable.
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[FetchWebPageParams, WebFetchMetadata]:
     """Create a web page fetching tool that extracts main content as markdown.
 
@@ -113,6 +124,15 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
     async def fetch_web_page_executor(params: FetchWebPageParams) -> ToolResult[WebFetchMetadata]:
         """Fetch web page and extract main content as markdown using trafilatura."""
         try:
+            if not _is_fetchable_web_url(params.url):
+                return ToolResult(
+                    content=f"<web_fetch><url>{params.url}</url><error>"
+                    "fetch_web_page only supports absolute http:// or https:// URLs."
+                    "</error></web_fetch>",
+                    success=False,
+                    metadata=WebFetchMetadata(pages_fetched=[params.url]),
+                )
+
             # Use provided client or create temporary one for backward compatibility
             if client is not None:
                 response = await _fetch(params.url, client)
