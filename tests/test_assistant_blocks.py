@@ -21,6 +21,7 @@ from stirrup.core.agent import Agent
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
+    EncryptedReasoningBlock,
     ImageContentBlock,
     LLMClient,
     OpaqueBlock,
@@ -337,8 +338,9 @@ def test_v02_dump_emits_blocks_only() -> None:
         ReasoningBlock(content="in-band"),
         SignedReasoningBlock(signature="sig", content="signed"),
         RedactedReasoningBlock(data="opaque"),
-        ReasoningRefBlock(id="rs_1", content="summary", encrypted_content="zdr-payload"),
+        ReasoningRefBlock(id="rs_1", content="summary"),
         ReasoningRefBlock(id="rs_2"),
+        EncryptedReasoningBlock(id="rs_3", encrypted_content="zdr-payload", summary=["part one", "part two"]),
     ],
 )
 def test_each_reasoning_kind_round_trips(block: ReasoningBlock) -> None:
@@ -485,10 +487,17 @@ def test_responses_replay_preserves_interleaved_order() -> None:
     assert items[3]["content"] == [{"type": "output_text", "text": "second"}]
 
 
-def test_responses_replay_reasoning_ref_with_encrypted_content() -> None:
-    msg = AssistantMessage(blocks=[ReasoningRefBlock(id="rs_9", encrypted_content="zdr")])
+def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:
+    msg = AssistantMessage(blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["a", "b"])])
     _instructions, items = _to_open_responses_input([msg])
-    assert items == [{"type": "reasoning", "id": "rs_9", "summary": [], "encrypted_content": "zdr"}]
+    assert items == [
+        {
+            "type": "reasoning",
+            "id": "rs_9",
+            "summary": [{"type": "summary_text", "text": "a"}, {"type": "summary_text", "text": "b"}],
+            "encrypted_content": "zdr",
+        }
+    ]
 
 
 def test_responses_replay_of_channel_constructed_message_keeps_v01_order() -> None:

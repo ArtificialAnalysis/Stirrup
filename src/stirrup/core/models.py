@@ -720,15 +720,36 @@ class RedactedReasoningBlock(BaseModel):
 class ReasoningRefBlock(BaseModel):
     """Reasoning held provider-side and passed back by reference.
 
-    OpenAI Responses reasoning items. ``encrypted_content`` carries the ZDR
-    (store=false) payload when the provider returns one.
+    E.g. OpenAI Responses reasoning items on stored (stateful) conversations:
+    the ``id`` is the handle to the server-held item.
     """
 
     kind: Literal["reasoning_ref"] = "reasoning_ref"
     id: str
     content: str = ""
     """Summary text, when the provider surfaces one."""
-    encrypted_content: str | None = None
+
+
+class EncryptedReasoningBlock(BaseModel):
+    """Reasoning returned as an opaque encrypted payload for stateless passback.
+
+    E.g. OpenAI Responses reasoning items requested with
+    ``include: ["reasoning.encrypted_content"]`` (``store=false`` /
+    zero-data-retention): the item — id, summary parts, and encrypted payload —
+    is re-emitted verbatim in position on passback. The payload is opaque and
+    non-inspectable.
+    """
+
+    kind: Literal["encrypted_reasoning"] = "encrypted_reasoning"
+    id: str
+    encrypted_content: str
+    summary: list[str] = Field(default_factory=list)
+    """Summary parts, when the provider surfaces them; kept split for faithful echo."""
+
+    @property
+    def content(self) -> str:
+        """Readable summary text for channel projections; parts newline-joined."""
+        return _TEXT_BLOCK_SEPARATOR.join(self.summary)
 
 
 class OpaqueBlock(BaseModel):
@@ -746,7 +767,9 @@ class OpaqueBlock(BaseModel):
     data: str
 
 
-type AnyReasoningBlock = ReasoningBlock | SignedReasoningBlock | RedactedReasoningBlock | ReasoningRefBlock
+type AnyReasoningBlock = (
+    ReasoningBlock | SignedReasoningBlock | RedactedReasoningBlock | ReasoningRefBlock | EncryptedReasoningBlock
+)
 """The reasoning family: one kind per passback mechanism."""
 
 # No current provider signs *and* references the same reasoning payload; if one
@@ -757,6 +780,7 @@ type AssistantBlock = Annotated[
     | SignedReasoningBlock
     | RedactedReasoningBlock
     | ReasoningRefBlock
+    | EncryptedReasoningBlock
     | OpaqueBlock
     | ToolCall
     | ImageContentBlock

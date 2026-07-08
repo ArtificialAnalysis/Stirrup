@@ -31,7 +31,8 @@ actual emission order. `blocks` is the only stored content; the channel-era
 - Assistant block types, discriminated on `kind`: `TextBlock`, `ReasoningBlock`
   (in-band), `SignedReasoningBlock` (opaque signature passback),
   `RedactedReasoningBlock` (opaque withheld-reasoning payload), `ReasoningRefBlock`
-  (provider-side reference, with optional `encrypted_content` for ZDR),
+  (provider-side reference), `EncryptedReasoningBlock` (encrypted reasoning payload
+  for stateless / zero-data-retention passback, echoed verbatim in position),
   `OpaqueBlock` (provider-native block carried uninterpreted, for marker/control
   blocks that must survive passback), plus `ToolCall` and the media blocks as
   union members (`AssistantBlock`).
@@ -41,8 +42,12 @@ actual emission order. `blocks` is the only stored content; the channel-era
 - Documented integration contract: stable `AssistantMessage.id`, metadata opacity,
   `generate` may return an `AssistantMessage` subclass and the framework preserves it.
 - OpenAI Responses client now captures reasoning items as `ReasoningRefBlock`
-  (id + summary + `encrypted_content` when requested) and re-emits them on replay;
-  previously reasoning was reduced to summary text and dropped on replay.
+  (id + summary) — or `EncryptedReasoningBlock` when the provider returns
+  `encrypted_content` — and re-emits them on replay; previously reasoning was
+  reduced to summary text and dropped on replay.
+- `OpenResponsesClient(encrypted_reasoning=True)`: stateless mode — sends
+  `store: false` + `include: ["reasoning.encrypted_content"]` and carries
+  reasoning state client-side, for zero-data-retention setups.
 - LiteLLM client captures multiple `thinking_blocks` per turn (previously raised
   `ValueError`) including `redacted_thinking`.
 

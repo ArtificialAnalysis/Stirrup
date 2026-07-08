@@ -14,6 +14,7 @@ from stirrup.clients.open_responses_client import (
 )
 from stirrup.core.models import (
     AssistantMessage,
+    EncryptedReasoningBlock,
     ReasoningBlock,
     ReasoningRefBlock,
     SystemMessage,
@@ -277,6 +278,34 @@ class TestResponseParsing:
             ReasoningRefBlock(id="rs_456", content=""),
         ]
 
+    def test_parse_reasoning_output_with_encrypted_content(self) -> None:
+        """A reasoning item carrying encrypted_content becomes an EncryptedReasoningBlock,
+        with summary parts kept split for verbatim re-emission."""
+        part_1 = MagicMock(spec=["text"])
+        part_1.text = "First thought."
+        part_2 = MagicMock(spec=["text"])
+        part_2.text = "Second thought."
+        encrypted_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        encrypted_item.type = "reasoning"
+        encrypted_item.id = "rs_789"
+        encrypted_item.summary = [part_1, part_2]
+        encrypted_item.encrypted_content = "opaque-zdr-payload"
+
+        bare_encrypted_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        bare_encrypted_item.type = "reasoning"
+        bare_encrypted_item.id = "rs_790"
+        bare_encrypted_item.summary = []
+        bare_encrypted_item.encrypted_content = "opaque-zdr-payload-2"
+
+        blocks = _parse_response_output([encrypted_item, bare_encrypted_item])
+
+        assert blocks == [
+            EncryptedReasoningBlock(
+                id="rs_789", encrypted_content="opaque-zdr-payload", summary=["First thought.", "Second thought."]
+            ),
+            EncryptedReasoningBlock(id="rs_790", encrypted_content="opaque-zdr-payload-2", summary=[]),
+        ]
+
     def test_parse_mixed_output_preserves_order(self) -> None:
         """Interleaved message/function_call items keep their emission order."""
         fn_call_1 = MagicMock()
@@ -359,6 +388,34 @@ class TestOpenResponsesClient:
         assert result.content == "Hello!"
         assert result.token_usage.input == 10
         assert result.token_usage.answer == 5
+
+    @pytest.mark.asyncio
+    async def test_generate_encrypted_reasoning_sends_stateless_params(self) -> None:
+        """encrypted_reasoning=True sends store=false + the encrypted-content include."""
+        client = OpenResponsesClient(
+            model="gpt-4o",
+            api_key="test-key",
+            encrypted_reasoning=True,
+        )
+
+        mock_response = MagicMock()
+        mock_response.status = "completed"
+        mock_response.output = [
+            MagicMock(
+                type="message",
+                content=[MagicMock(type="output_text", text="Hello!")],
+            )
+        ]
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=5, output_tokens_details=None)
+
+        create_mock = AsyncMock(return_value=mock_response)
+        client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
+
+        await client.generate(messages=[UserMessage(content="Hi")], tools={})
+
+        request_kwargs = create_mock.call_args.kwargs
+        assert request_kwargs["store"] is False
+        assert request_kwargs["include"] == ["reasoning.encrypted_content"]
 
     @pytest.mark.asyncio
     async def test_generate_with_tools(self) -> None:

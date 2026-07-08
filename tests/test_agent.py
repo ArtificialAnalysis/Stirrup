@@ -361,6 +361,7 @@ async def test_cache_round_trips_block_based_assistant_message() -> None:
     signed tool call — survives cache serialize/deserialize bit-for-bit."""
     from stirrup.core.cache import deserialize_message, serialize_message
     from stirrup.core.models import (
+        EncryptedReasoningBlock,
         OpaqueBlock,
         ReasoningBlock,
         ReasoningRefBlock,
@@ -374,7 +375,8 @@ async def test_cache_round_trips_block_based_assistant_message() -> None:
         blocks=[
             SignedReasoningBlock(signature="sig-1", content="signed thinking"),
             RedactedReasoningBlock(data="redacted-token"),
-            ReasoningRefBlock(id="rs_1", content="summary", encrypted_content="zdr-payload"),
+            ReasoningRefBlock(id="rs_1", content="summary"),
+            EncryptedReasoningBlock(id="rs_2", encrypted_content="zdr-payload", summary=["summary"]),
             ReasoningBlock(content="in-band thinking"),
             TextBlock(text="the answer"),
             OpaqueBlock(data='{"type": "provider_marker"}'),

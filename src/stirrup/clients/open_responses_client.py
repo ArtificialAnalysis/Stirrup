@@ -28,6 +28,7 @@ from stirrup.core.models import (
     ChatMessage,
     Content,
     EmptyParams,
+    EncryptedReasoningBlock,
     ImageContentBlock,
     LLMClient,
     ReasoningBlock,
@@ -178,14 +179,22 @@ def _to_open_responses_input(
                     )
                 elif isinstance(block, ReasoningRefBlock):
                     # Passed back by reference: the id is the handle to the stored
-                    # reasoning item; encrypted_content carries the ZDR payload when
-                    # the provider returned one.
+                    # reasoning item.
                     reasoning_item: dict[str, Any] = {"type": "reasoning", "id": block.id, "summary": []}
                     if block.content:
                         reasoning_item["summary"] = [{"type": "summary_text", "text": block.content}]
-                    if block.encrypted_content is not None:
-                        reasoning_item["encrypted_content"] = block.encrypted_content
                     input_items.append(reasoning_item)
+                elif isinstance(block, EncryptedReasoningBlock):
+                    # Stateless passback: the whole item — id, summary parts, and
+                    # encrypted payload — is re-emitted verbatim in position.
+                    input_items.append(
+                        {
+                            "type": "reasoning",
+                            "id": block.id,
+                            "summary": [{"type": "summary_text", "text": part} for part in block.summary],
+                            "encrypted_content": block.encrypted_content,
+                        }
+                    )
                 # In-band/signed reasoning, opaque provider blocks, and media blocks
                 # have no Responses input representation; they are skipped.
         elif isinstance(m, ToolMessage):
@@ -251,23 +260,24 @@ def _parse_response_output(output: list[Any]) -> list[AssistantBlock]:
             # summary can be a list of Summary objects with .text attribute
             summary = _get_attr(item, "summary")
             if isinstance(summary, list):
-                thinking = "\n".join(_get_attr(s, "text", "") for s in summary if _get_attr(s, "text"))
+                summary_parts = [text for s in summary if (text := _get_attr(s, "text"))]
             elif summary:
-                thinking = str(summary)
+                summary_parts = [str(summary)]
             else:
-                thinking = _get_attr(item, "thinking") or ""
+                thinking = _get_attr(item, "thinking")
+                summary_parts = [thinking] if thinking else []
 
             item_id = _get_attr(item, "id")
-            if item_id:
+            encrypted_content = _get_attr(item, "encrypted_content")
+            if item_id and encrypted_content:
+                # Stateless (store=false / ZDR) item: carried whole for verbatim re-emission.
                 blocks.append(
-                    ReasoningRefBlock(
-                        id=item_id,
-                        content=thinking,
-                        encrypted_content=_get_attr(item, "encrypted_content"),
-                    )
+                    EncryptedReasoningBlock(id=item_id, encrypted_content=encrypted_content, summary=summary_parts)
                 )
-            elif thinking:
-                blocks.append(ReasoningBlock(content=thinking))
+            elif item_id:
+                blocks.append(ReasoningRefBlock(id=item_id, content="\n".join(summary_parts)))
+            elif summary_parts:
+                blocks.append(ReasoningBlock(content="\n".join(summary_parts)))
 
         else:
             LOGGER.warning("Skipping unsupported response output item type: %r", item_type)
@@ -304,6 +314,7 @@ class OpenResponsesClient(LLMClient):
         base_url: str | None = None,
         api_key: str | None = None,
         reasoning_effort: str | None = None,
+        encrypted_reasoning: bool = False,
         timeout: float | None = None,
         max_retries: int = 2,
         instructions: str | None = None,
@@ -320,6 +331,11 @@ class OpenResponsesClient(LLMClient):
                 environment variable.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
+            encrypted_reasoning: Run stateless (``store=false``) and request
+                ``include: ["reasoning.encrypted_content"]`` so reasoning items are
+                captured as EncryptedReasoningBlock and re-emitted verbatim in
+                position on passback. Required for zero-data-retention setups where
+                the provider holds no conversation state.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
             max_retries: Number of retries for transient errors. Defaults to 2.
             instructions: Default system-level instructions. Can be overridden by
@@ -329,6 +345,7 @@ class OpenResponsesClient(LLMClient):
         self._model = model
         self._max_tokens = max_tokens
         self._reasoning_effort = reasoning_effort
+        self._encrypted_reasoning = encrypted_reasoning
         self._default_instructions = instructions
         self._kwargs = kwargs or {}
 
@@ -416,6 +433,12 @@ class OpenResponsesClient(LLMClient):
         # Add reasoning effort if configured (for o1/o3 models)
         if self._reasoning_effort:
             request_kwargs["reasoning"] = {"effort": self._reasoning_effort}
+
+        # Stateless mode: nothing is stored provider-side, so ask for the encrypted
+        # reasoning payload and carry it client-side across turns.
+        if self._encrypted_reasoning:
+            request_kwargs["store"] = False
+            request_kwargs["include"] = ["reasoning.encrypted_content"]
 
         # Make API call
         request_start_time = perf_counter()
