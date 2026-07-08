@@ -487,6 +487,16 @@ def test_responses_replay_preserves_interleaved_order() -> None:
     assert items[3]["content"] == [{"type": "output_text", "text": "second"}]
 
 
+def test_encrypted_reasoning_feeds_channel_projections() -> None:
+    """The reasoning projection and CC replay see encrypted summaries as readable content."""
+    msg = AssistantMessage(
+        blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["alpha", "beta"])]
+    )
+    assert msg.reasoning is not None
+    assert msg.reasoning.content == "alpha\nbeta"
+    assert msg.reasoning.signature is None
+
+
 def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:
     msg = AssistantMessage(blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["a", "b"])])
     _instructions, items = _to_open_responses_input([msg])

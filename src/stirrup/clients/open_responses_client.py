@@ -435,10 +435,14 @@ class OpenResponsesClient(LLMClient):
             request_kwargs["reasoning"] = {"effort": self._reasoning_effort}
 
         # Stateless mode: nothing is stored provider-side, so ask for the encrypted
-        # reasoning payload and carry it client-side across turns.
+        # reasoning payload and carry it client-side across turns. A caller-supplied
+        # include list (via kwargs) is extended, not clobbered.
         if self._encrypted_reasoning:
             request_kwargs["store"] = False
-            request_kwargs["include"] = ["reasoning.encrypted_content"]
+            include = list(request_kwargs.get("include") or [])
+            if "reasoning.encrypted_content" not in include:
+                include.append("reasoning.encrypted_content")
+            request_kwargs["include"] = include
 
         # Make API call
         request_start_time = perf_counter()

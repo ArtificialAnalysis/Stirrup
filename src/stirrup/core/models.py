@@ -32,6 +32,7 @@ __all__ = [
     "Content",
     "ContentBlock",
     "EmptyParams",
+    "EncryptedReasoningBlock",
     "ImageContentBlock",
     "LLMClient",
     "OpaqueBlock",
@@ -825,7 +826,14 @@ def reasoning_blocks(blocks: Sequence[AssistantBlock]) -> list[AnyReasoningBlock
     return [
         block
         for block in blocks
-        if isinstance(block, ReasoningBlock | SignedReasoningBlock | RedactedReasoningBlock | ReasoningRefBlock)
+        if isinstance(
+            block,
+            ReasoningBlock
+            | SignedReasoningBlock
+            | RedactedReasoningBlock
+            | ReasoningRefBlock
+            | EncryptedReasoningBlock,
+        )
     ]
 
 
