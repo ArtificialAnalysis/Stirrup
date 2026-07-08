@@ -127,8 +127,7 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
             if not _is_fetchable_web_url(params.url):
                 return ToolResult(
                     content=f"<web_fetch><url>{params.url}</url><error>"
-                    "fetch_web_page only supports absolute http:// or https:// URLs. "
-                    "For local files, use the file, image, or code execution tools instead."
+                    "fetch_web_page only supports absolute http:// or https:// URLs."
                     "</error></web_fetch>",
                     success=False,
                     metadata=WebFetchMetadata(pages_fetched=[params.url]),
