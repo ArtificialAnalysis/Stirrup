@@ -94,9 +94,8 @@ def _is_fetchable_web_url(url: str) -> bool:
         parsed = urlparse(url)
     except ValueError:
         return False
-    # Models sometimes pass local file paths (e.g. "/home/user/file.png") which httpx
-    # rejects with an unhandled ValueError. Only absolute http(s) URLs with a host are
-    # fetchable, so reject everything else upfront as a tool error the model can recover from.
+    # netloc check: a valid scheme alone isn't enough — strings like "http:///foo" or
+    # "https:relative/path" parse with an http(s) scheme but no host, and are unfetchable.
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
