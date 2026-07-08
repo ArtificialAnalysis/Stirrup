@@ -94,6 +94,8 @@ def _is_fetchable_web_url(url: str) -> bool:
         parsed = urlparse(url)
     except ValueError:
         return False
+    # Match the URLs httpx can fetch without a base_url; everything else already
+    # fails today, so invalid inputs can become tool errors without changing valid fetches.
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
