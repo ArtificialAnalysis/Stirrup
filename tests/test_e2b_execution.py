@@ -22,6 +22,9 @@ def mock_sandbox() -> MagicMock:
     """Create a mock E2B AsyncSandbox."""
     sandbox = MagicMock()
     sandbox.kill = AsyncMock()
+    sandbox.pause = AsyncMock()
+    sandbox.beta_pause = AsyncMock()
+    sandbox.connect = AsyncMock(return_value=sandbox)
 
     # Mock commands API
     sandbox.commands = MagicMock()
@@ -78,6 +81,48 @@ class TestE2BCodeExecToolProvider:
                 assert result.stderr == ""
                 assert result.error_kind is None
                 mock_sandbox.commands.run.assert_called()
+                mock_sandbox.pause.assert_not_called()
+                mock_sandbox.connect.assert_not_called()
+
+    async def test_pause_between_calls_reconnects_before_next_command(self, mock_sandbox: MagicMock) -> None:
+        """Pause after commands and reconnect before using the sandbox again."""
+        provider = E2BCodeExecToolProvider(pause_between_calls=True)
+
+        with patch(
+            "stirrup.tools.code_backends.e2b.AsyncSandbox.create",
+            new=AsyncMock(return_value=mock_sandbox),
+        ):
+            async with provider as _:
+                first = await provider.run_command("echo first")
+                assert first.exit_code == 0
+                assert provider._paused is True  # noqa: SLF001
+                mock_sandbox.pause.assert_called_once()
+                mock_sandbox.connect.assert_not_called()
+
+                second = await provider.run_command("echo second")
+                assert second.exit_code == 0
+                assert provider._paused is True  # noqa: SLF001
+                mock_sandbox.connect.assert_called_once_with(timeout=provider._timeout)  # noqa: SLF001
+                assert mock_sandbox.pause.call_count == 2
+
+    async def test_pause_between_calls_wraps_file_operations(self, mock_sandbox: MagicMock) -> None:
+        """File APIs also resume before use and pause when idle."""
+        provider = E2BCodeExecToolProvider(pause_between_calls=True)
+
+        with patch(
+            "stirrup.tools.code_backends.e2b.AsyncSandbox.create",
+            new=AsyncMock(return_value=mock_sandbox),
+        ):
+            async with provider as _:
+                content = await provider.read_file_bytes("/home/user/output.txt")
+                assert content == b"file content"
+                assert provider._paused is True  # noqa: SLF001
+                mock_sandbox.pause.assert_called_once()
+
+                exists = await provider.file_exists("/home/user/output.txt")
+                assert exists is True
+                mock_sandbox.connect.assert_called_once_with(timeout=provider._timeout)  # noqa: SLF001
+                assert mock_sandbox.pause.call_count == 2
 
     async def test_run_command_exceptions(self, mock_sandbox: MagicMock) -> None:
         """Test handling of E2B-specific exceptions."""

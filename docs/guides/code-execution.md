@@ -150,6 +150,31 @@ provider = E2BCodeExecToolProvider(
 )
 ```
 
+### Pause Between Calls
+
+For agent workflows, E2B sandboxes can be paused after each command or file operation:
+
+```python
+from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
+
+provider = E2BCodeExecToolProvider(
+    pause_between_calls=True,
+    timeout=300,
+)
+```
+
+This is useful because agents spend a lot of time outside the sandbox while the model thinks. Pausing preserves the sandbox's filesystem, running processes, and in-memory state, but paused time does not count against the sandbox running timeout. When the next tool call happens, Stirrup reconnects to the sandbox with a fresh timeout window.
+
+Benefits:
+
+- Saves cost by avoiding idle running sandboxes between tool calls.
+- Gives the agent precise control over when sandbox runtime is consumed.
+- Keeps state available across tool calls while avoiding timeout burn during model thinking.
+
+Limitation:
+
+Pausing freezes the whole sandbox. Background processes, downloads, and servers do not make progress while paused. For example, a background `curl` download resumes only after the next tool call wakes the sandbox, and the remote connection may need retry/resume support. Foreground downloads or commands that complete within a single tool call are unaffected.
+
 ## File Operations
 
 ### Uploading Files

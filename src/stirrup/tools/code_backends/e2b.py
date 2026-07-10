@@ -1,7 +1,10 @@
 """E2B cloud execution environment backend for code execution."""
 
+import asyncio
+import logging
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -13,8 +16,6 @@ except ImportError as e:
     raise ImportError(
         "Requires installation of the e2b extra. Install with (for example): `uv pip install stirrup[e2b]` or `uv add stirrup[e2b]`",
     ) from e
-
-import logging
 
 from stirrup.constants import SANDBOX_REQUEST_TIMEOUT, SANDBOX_TIMEOUT
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
@@ -52,7 +53,7 @@ def make_create_gate(max_rate: float, time_period: float = 1) -> AbstractAsyncCo
 
     """
     try:
-        from aiolimiter import AsyncLimiter
+        from aiolimiter import AsyncLimiter  # ty: ignore[unresolved-import]
     except ImportError as e:
         raise ImportError(
             "Sandbox creation throttling requires the `aiolimiter` package, which is not installed. "
@@ -88,6 +89,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         template: str | None = None,
         allowed_commands: list[str] | None = None,
         create_gate: AbstractAsyncContextManager[object] | None = None,
+        pause_between_calls: bool = False,
         sandbox_kwargs: dict | None = None,
         shell_timeout: int = SHELL_TIMEOUT,
     ) -> None:
@@ -112,6 +114,9 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                          ``AbstractAsyncContextManager`` of your choice.
                          ``make_create_gate`` requires the ``e2b-throttle`` extra
                          (``pip install stirrup[e2b-throttle]``).
+            pause_between_calls: Pause the E2B sandbox after each command or file
+                operation, then reconnect before the next operation. This reduces
+                idle runtime cost at the expense of extra latency.
             shell_timeout: Per-command wall-clock timeout (seconds) for every
                 ``code_exec`` invocation, and the default for direct
                 ``run_command`` calls that pass ``timeout=None``. Defaults to
@@ -126,6 +131,9 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         self._sandbox_kwargs = sandbox_kwargs or {}
         self._sbx: AsyncSandbox | None = None
         self._create_gate = create_gate
+        self._pause_between_calls = pause_between_calls
+        self._paused = False
+        self._operation_lock = asyncio.Lock()
 
     async def __aenter__(self) -> Tool[CodeExecutionParams, ToolUseCountMetadata]:
         """Initialize the E2B sandbox environment and return the code_exec tool."""
@@ -138,6 +146,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                 self._sbx = await AsyncSandbox.create(**kwargs)
         else:
             self._sbx = await AsyncSandbox.create(**kwargs)
+        self._paused = False
 
         return self.get_code_exec_tool()
 
@@ -151,6 +160,27 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         if self._sbx:
             await self._sbx.kill()  # ty: ignore[no-matching-overload]
             self._sbx = None
+            self._paused = False
+
+    async def _ensure_running(self) -> AsyncSandbox:
+        """Return a running sandbox, reconnecting if this provider paused it."""
+        if self._sbx is None:
+            raise RuntimeError("ExecutionEnvironment not started.")
+
+        if self._paused:
+            self._sbx = await self._sbx.connect(timeout=self._timeout)  # ty: ignore[invalid-argument-type]
+            self._paused = False
+
+        return self._sbx
+
+    async def _pause_when_idle(self) -> None:
+        if self._pause_between_calls and self._sbx is not None and not self._paused:
+            try:
+                pause = cast(Any, getattr(self._sbx, "pause", None) or self._sbx.beta_pause)
+                await pause()
+                self._paused = True
+            except Exception:
+                logger.exception("Failed to pause E2B sandbox after operation")
 
     async def read_file_bytes(self, path: str) -> bytes:
         """Read file content as bytes from the E2B sandbox.
@@ -166,14 +196,17 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             FileNotFoundError: If file does not exist.
 
         """
-        if self._sbx is None:
-            raise RuntimeError("ExecutionEnvironment not started.")
+        async with self._operation_lock:
+            sbx = await self._ensure_running()
 
-        if not await self._sbx.files.exists(path):
-            raise FileNotFoundError(f"File not found: {path}")
+            try:
+                if not await sbx.files.exists(path):
+                    raise FileNotFoundError(f"File not found: {path}")
 
-        file_bytes = await self._sbx.files.read(path, format="bytes", request_timeout=self._request_timeout)
-        return bytes(file_bytes)
+                file_bytes = await sbx.files.read(path, format="bytes", request_timeout=self._request_timeout)
+                return bytes(file_bytes)
+            finally:
+                await self._pause_when_idle()
 
     async def write_file_bytes(self, path: str, content: bytes) -> None:
         """Write bytes to a file in the E2B sandbox.
@@ -186,10 +219,13 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             RuntimeError: If environment not started.
 
         """
-        if self._sbx is None:
-            raise RuntimeError("ExecutionEnvironment not started.")
+        async with self._operation_lock:
+            sbx = await self._ensure_running()
 
-        await self._sbx.files.write(path, content, request_timeout=self._request_timeout)
+            try:
+                await sbx.files.write(path, content, request_timeout=self._request_timeout)
+            finally:
+                await self._pause_when_idle()
 
     async def file_exists(self, path: str) -> bool:
         """Check if a file exists in the E2B sandbox.
@@ -204,10 +240,13 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             RuntimeError: If environment not started.
 
         """
-        if self._sbx is None:
-            raise RuntimeError("ExecutionEnvironment not started.")
+        async with self._operation_lock:
+            sbx = await self._ensure_running()
 
-        return await self._sbx.files.exists(path)
+            try:
+                return await sbx.files.exists(path)
+            finally:
+                await self._pause_when_idle()
 
     async def is_directory(self, path: str) -> bool:
         """Check if a path is a directory in the E2B sandbox.
@@ -222,14 +261,17 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             RuntimeError: If environment not started.
 
         """
-        if self._sbx is None:
-            raise RuntimeError("ExecutionEnvironment not started.")
+        async with self._operation_lock:
+            sbx = await self._ensure_running()
 
-        if not await self._sbx.files.exists(path):
-            return False
+            try:
+                if not await sbx.files.exists(path):
+                    return False
 
-        info = await self._sbx.files.get_info(path)
-        return info.type == FileType.DIR
+                info = await sbx.files.get_info(path)
+                return info.type == FileType.DIR
+            finally:
+                await self._pause_when_idle()
 
     async def list_files(self, path: str) -> list[str]:
         """List all files recursively in a directory within the E2B sandbox.
@@ -245,20 +287,22 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             RuntimeError: If environment not started.
 
         """
-        if self._sbx is None:
-            raise RuntimeError("ExecutionEnvironment not started.")
+        async with self._operation_lock:
+            sbx = await self._ensure_running()
 
-        if not await self._sbx.files.exists(path):
-            return []
+            try:
+                if not await sbx.files.exists(path):
+                    return []
 
-        info = await self._sbx.files.get_info(path)
-        if info.type != FileType.DIR:
-            return []
+                info = await sbx.files.get_info(path)
+                if info.type != FileType.DIR:
+                    return []
 
-        # Use find command to list all files recursively
-        result = await self.run_command(f"find {path} -type f")
-        if result.exit_code != 0:
-            return []
+                result = await self._run_command_unlocked(f"find {path} -type f")
+                if result.exit_code != 0:
+                    return []
+            finally:
+                await self._pause_when_idle()
 
         files = []
         for line in result.stdout.strip().split("\n"):
@@ -296,8 +340,19 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
                 advice="Only commands matching the allowlist patterns are permitted.",
             )
 
+        async with self._operation_lock:
+            try:
+                return await self._run_command_unlocked(cmd, timeout=timeout)
+            finally:
+                await self._pause_when_idle()
+
+    async def _run_command_unlocked(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
+        sbx = await self._ensure_running()
+        if timeout is None:
+            timeout = self._shell_timeout
+
         try:
-            r = await self._sbx.commands.run(cmd, timeout=timeout, request_timeout=self._request_timeout)
+            r = await sbx.commands.run(cmd, timeout=timeout, request_timeout=self._request_timeout)
 
             return CommandResult(
                 exit_code=getattr(r, "exit_code", 0),
@@ -351,60 +406,62 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             SaveOutputFilesResult containing lists of saved files and any failures.
 
         """
-        if self._sbx is None:
-            raise RuntimeError(
-                "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
-            )
-
         # If dest_env is provided, use the base class implementation (cross-env transfer)
         if dest_env is not None:
             return await super().save_output_files(paths, output_dir, dest_env)
 
-        # Local filesystem - use optimized E2B API
-        output_dir_path = Path(output_dir)
-        output_dir_path.mkdir(parents=True, exist_ok=True)
+        async with self._operation_lock:
+            sbx = await self._ensure_running()
 
-        result = SaveOutputFilesResult()
-
-        for env_path in paths:
             try:
-                # Check if file exists
-                if not await self._sbx.files.exists(env_path):
-                    result.failed[env_path] = "File does not exist"
-                    logger.warning("Execution environment file does not exist: %s", env_path)
-                    continue
+                # Local filesystem - use optimized E2B API
+                output_dir_path = Path(output_dir)
+                output_dir_path.mkdir(parents=True, exist_ok=True)
 
-                # Get file info to verify it's a file (not a directory)
-                info = await self._sbx.files.get_info(env_path)
-                if info.type != FileType.FILE:
-                    result.failed[env_path] = f"Path is not a file (type: {info.type})"
-                    logger.warning("Execution environment path is not a file: %s (type: %s)", env_path, info.type)
-                    continue
+                result = SaveOutputFilesResult()
 
-                # Read file content from execution environment
-                file_bytes = await self._sbx.files.read(env_path, format="bytes", request_timeout=self._request_timeout)
-                content = bytes(file_bytes)
+                for env_path in paths:
+                    try:
+                        # Check if file exists
+                        if not await sbx.files.exists(env_path):
+                            result.failed[env_path] = "File does not exist"
+                            logger.warning("Execution environment file does not exist: %s", env_path)
+                            continue
 
-                # Save with original filename directly in output_dir
-                local_path = output_dir_path / Path(env_path).name
+                        # Get file info to verify it's a file (not a directory)
+                        info = await sbx.files.get_info(env_path)
+                        if info.type != FileType.FILE:
+                            result.failed[env_path] = f"Path is not a file (type: {info.type})"
+                            logger.warning(
+                                "Execution environment path is not a file: %s (type: %s)",
+                                env_path,
+                                info.type,
+                            )
+                            continue
 
-                # Write file
-                local_path.write_bytes(content)
+                        file_bytes = await sbx.files.read(
+                            env_path, format="bytes", request_timeout=self._request_timeout
+                        )
+                        content = bytes(file_bytes)
+                        local_path = output_dir_path / Path(env_path).name
+                        local_path.write_bytes(content)
 
-                result.saved.append(
-                    SavedFile(
-                        source_path=env_path,
-                        output_path=local_path,
-                        size=len(content),
-                    ),
-                )
-                logger.debug("Saved file: %s -> %s (%d bytes)", env_path, local_path, len(content))
+                        result.saved.append(
+                            SavedFile(
+                                source_path=env_path,
+                                output_path=local_path,
+                                size=len(content),
+                            ),
+                        )
+                        logger.debug("Saved file: %s -> %s (%d bytes)", env_path, local_path, len(content))
 
-            except Exception as exc:
-                result.failed[env_path] = str(exc)
-                logger.exception("Failed to save execution environment file: %s", env_path)
+                    except Exception as exc:
+                        result.failed[env_path] = str(exc)
+                        logger.exception("Failed to save execution environment file: %s", env_path)
 
-        return result
+                return result
+            finally:
+                await self._pause_when_idle()
 
     async def upload_files(
         self,
@@ -434,70 +491,73 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
             UploadFilesResult containing lists of uploaded files and any failures.
 
         """
-        if self._sbx is None:
-            raise RuntimeError(
-                "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
-            )
-
         # If source_env is provided, use the base class implementation (cross-env transfer)
         if source_env is not None:
             return await super().upload_files(*paths, source_env=source_env, dest_dir=dest_dir)
 
-        # Local filesystem - use optimized E2B API
-        dest_base = dest_dir or "/home/user"
-        result = UploadFilesResult()
-
-        for source in paths:
-            original_name = Path(source).name  # Get name BEFORE resolve
-            source = Path(source).resolve()
-
-            if not source.exists():
-                result.failed[str(source)] = "File or directory does not exist"
-                logger.warning("Upload source does not exist: %s", source)
-                continue
+        async with self._operation_lock:
+            sbx = await self._ensure_running()
 
             try:
-                if source.is_file():
-                    source = Path(source).resolve()
-                    dest = f"{dest_base}/{original_name}"
-                    content = source.read_bytes()
-                    await self._sbx.files.write(dest, content, request_timeout=self._request_timeout)
-                    result.uploaded.append(
-                        UploadedFile(
-                            source_path=source,
-                            dest_path=dest,
-                            size=len(content),
-                        ),
-                    )
-                    logger.debug("Uploaded file: %s -> %s", source, dest)
+                # Local filesystem - use optimized E2B API
+                dest_base = dest_dir or "/home/user"
+                result = UploadFilesResult()
 
-                elif source.is_dir():
-                    # Upload all files in directory recursively
-                    # If dest_dir was explicitly provided, copy contents directly to dest_base
-                    # Otherwise, create a subdirectory with the source's name
-                    for file_path in source.rglob("*"):
-                        if file_path.is_file():
-                            relative = file_path.relative_to(source)
-                            dest = f"{dest_base}/{relative}" if dest_dir else f"{dest_base}/{source.name}/{relative}"
-                            content = file_path.read_bytes()
-                            await self._sbx.files.write(dest, content, request_timeout=self._request_timeout)
+                for source in paths:
+                    original_name = Path(source).name  # Get name BEFORE resolve
+                    source = Path(source).resolve()
+
+                    if not source.exists():
+                        result.failed[str(source)] = "File or directory does not exist"
+                        logger.warning("Upload source does not exist: %s", source)
+                        continue
+
+                    try:
+                        if source.is_file():
+                            source = Path(source).resolve()
+                            dest = f"{dest_base}/{original_name}"
+                            content = source.read_bytes()
+                            await sbx.files.write(dest, content, request_timeout=self._request_timeout)
                             result.uploaded.append(
                                 UploadedFile(
-                                    source_path=file_path,
+                                    source_path=source,
                                     dest_path=dest,
                                     size=len(content),
                                 ),
                             )
-                    if dest_dir:
-                        logger.debug("Uploaded directory contents: %s -> %s", source, dest_base)
-                    else:
-                        logger.debug("Uploaded directory: %s -> %s/%s", source, dest_base, source.name)
+                            logger.debug("Uploaded file: %s -> %s", source, dest)
 
-            except Exception as exc:
-                result.failed[str(source)] = str(exc)
-                logger.exception("Failed to upload: %s", source)
+                        elif source.is_dir():
+                            # If dest_dir is explicit, copy contents directly; otherwise include the source dir name.
+                            for file_path in source.rglob("*"):
+                                if file_path.is_file():
+                                    relative = file_path.relative_to(source)
+                                    dest = (
+                                        f"{dest_base}/{relative}"
+                                        if dest_dir
+                                        else f"{dest_base}/{source.name}/{relative}"
+                                    )
+                                    content = file_path.read_bytes()
+                                    await sbx.files.write(dest, content, request_timeout=self._request_timeout)
+                                    result.uploaded.append(
+                                        UploadedFile(
+                                            source_path=file_path,
+                                            dest_path=dest,
+                                            size=len(content),
+                                        ),
+                                    )
+                            if dest_dir:
+                                logger.debug("Uploaded directory contents: %s -> %s", source, dest_base)
+                            else:
+                                logger.debug("Uploaded directory: %s -> %s/%s", source, dest_base, source.name)
 
-        return result
+                    except Exception as exc:
+                        result.failed[str(source)] = str(exc)
+                        logger.exception("Failed to upload: %s", source)
+
+                return result
+            finally:
+                await self._pause_when_idle()
 
     async def view_image(self, path: str) -> ImageContentBlock:
         """Read and return an image file from the E2B execution environment.
