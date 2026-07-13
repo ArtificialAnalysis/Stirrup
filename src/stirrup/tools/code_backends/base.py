@@ -17,6 +17,190 @@ logger = logging.getLogger(__name__)
 MAX_LENGTH_SHELL_STDOUT = 20_000
 MAX_LENGTH_SHELL_STDERR = 20_000
 SHELL_TIMEOUT = 60 * 5
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _remove_shell_line_continuations(cmd: str) -> str:
+    """Remove the unescaped backslash-newline pairs Bash removes before parsing."""
+    result: list[str] = []
+    quote: str | None = None
+    index = 0
+
+    while index < len(cmd):
+        char = cmd[index]
+        if quote == "'":
+            result.append(char)
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+
+        if quote == "ansi_c":
+            result.append(char)
+            if char == "\\" and index + 1 < len(cmd):
+                result.append(cmd[index + 1])
+                index += 2
+                continue
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+
+        if char == "\\" and index + 1 < len(cmd):
+            next_char = cmd[index + 1]
+            if next_char == "\n":
+                index += 2
+                continue
+            result.extend((char, next_char))
+            index += 2
+            continue
+
+        if quote is None and char == "$" and cmd[index + 1 : index + 2] == "'":
+            result.extend((char, "'"))
+            quote = "ansi_c"
+            index += 2
+            continue
+        if char == "'" and quote is None:
+            quote = char
+        elif char == '"':
+            quote = None if quote == char else char
+        result.append(char)
+        index += 1
+
+    return "".join(result)
+
+
+def _shell_array_subscript_end(cmd: str, start: int) -> int | None:
+    """Return the end of a balanced array subscript in an assignment word."""
+    quote: str | None = None
+    depth = 0
+    index = start
+
+    while index < len(cmd):
+        char = cmd[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+
+        if quote == "ansi_c":
+            if char == "\\" and index + 1 < len(cmd):
+                index += 2
+                continue
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+
+        if char == "\\":
+            index += 2
+            continue
+        if quote is None and char == "$" and cmd[index + 1 : index + 2] == "'":
+            quote = "ansi_c"
+            index += 2
+            continue
+        if char == "'" and quote is None:
+            quote = char
+        elif char == '"':
+            quote = None if quote == char else char
+        elif quote is None and char == "[":
+            depth += 1
+        elif quote is None and char == "]":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+
+    return None
+
+
+def _starts_with_shell_assignment(cmd: str) -> bool:
+    """Return whether the first shell word is a Bash assignment."""
+    index = 0
+    while index < len(cmd) and cmd[index] in " \t":
+        index += 1
+
+    name = _SHELL_NAME.match(cmd, index)
+    if name is None:
+        return False
+    index = name.end()
+
+    if index < len(cmd) and cmd[index] == "[":
+        subscript_end = _shell_array_subscript_end(cmd, index)
+        if subscript_end is None:
+            return False
+        index = subscript_end
+    if index < len(cmd) and cmd[index] == "+":
+        index += 1
+    return cmd[index : index + 1] == "="
+
+
+def _contains_disallowed_shell_syntax(cmd: str) -> bool:
+    """Return whether a command uses syntax that can change what Bash executes."""
+    quote: str | None = None
+    escaped = False
+    index = 0
+
+    while index < len(cmd):
+        char = cmd[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+
+        if quote == "ansi_c":
+            if char == "\\" and index + 1 < len(cmd):
+                index += 2
+                continue
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+
+        if quote is None and char == "$" and cmd[index + 1 : index + 2] == "'":
+            quote = "ansi_c"
+            index += 2
+            continue
+
+        if char == "'" and quote is None:
+            quote = char
+            index += 1
+            continue
+        if char == '"':
+            quote = None if quote == char else char
+            index += 1
+            continue
+
+        next_char = cmd[index + 1 : index + 2]
+        if char == "`" or (char == "$" and next_char in ("(", "[")):
+            return True
+        if (
+            char == "$"
+            and next_char
+            and (
+                next_char == "{"
+                or next_char.isdigit()
+                or next_char in "@*#?$!-"
+                or _SHELL_NAME.match(cmd, index + 1) is not None
+            )
+        ):
+            return True
+        if quote is None and char in ";&|<>\n":
+            return True
+        index += 1
+
+    return False
 
 
 class CodeExecutionParams(BaseModel):
@@ -185,7 +369,10 @@ class CodeExecToolProvider(ToolProvider, ABC):
         """
         if self._compiled_allowed is None:
             return True  # No allowlist = allow all
-        return any(p.search(cmd) for p in self._compiled_allowed)
+        cmd = _remove_shell_line_continuations(cmd)
+        if _starts_with_shell_assignment(cmd) or _contains_disallowed_shell_syntax(cmd):
+            return False
+        return any(p.match(cmd) for p in self._compiled_allowed)
 
     @abstractmethod
     async def __aenter__(self) -> Tool[CodeExecutionParams, ToolUseCountMetadata]:

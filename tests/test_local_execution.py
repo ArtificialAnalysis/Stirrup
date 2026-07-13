@@ -1,12 +1,31 @@
 """Tests for LocalCodeExecToolProvider backend."""
 
+import os
 import subprocess
 from pathlib import Path
 
 import anyio
+import pytest
 from anyio.to_thread import run_sync
 
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+
+def _bash_recursively_expands_array_index(probe_dir: Path) -> bool:
+    marker = probe_dir / "array-expansion-marker"
+    env = os.environ.copy()
+    env["STIRRUP_TEST_INDEX"] = "$(touch array-expansion-marker)"
+    subprocess.run(
+        ["bash", "-c", 'printf %s "${VALUES[STIRRUP_TEST_INDEX]}"'],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=probe_dir,
+        env=env,
+    )
+    supported = marker.exists()
+    marker.unlink(missing_ok=True)
+    return supported
 
 
 class TestLocalCodeExecToolProvider:
@@ -102,6 +121,127 @@ class TestLocalCodeExecToolProvider:
             result = await provider.run_command("cat /etc/passwd")
             assert result.error_kind == "command_not_allowed"
             assert "not allowed" in result.stderr.lower()
+
+    async def test_run_command_allowlist_does_not_execute_chained_command(self) -> None:
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
+
+        async with provider:
+            result = await provider.run_command("echo allowed; printf bypassed > forbidden.txt")
+            forbidden_file_exists = await provider.file_exists("forbidden.txt")
+
+        assert result.error_kind == "command_not_allowed"
+        assert forbidden_file_exists is False
+
+    async def test_run_command_allowlist_does_not_execute_ansi_c_quoted_array_assignment(
+        self,
+    ) -> None:
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
+
+        async with provider:
+            result = await provider.run_command(r"echo[$'a\'b']=x touch forbidden.txt")
+            forbidden_file_exists = await provider.file_exists("forbidden.txt")
+
+        assert result.error_kind == "command_not_allowed"
+        assert forbidden_file_exists is False
+
+    @pytest.mark.parametrize(
+        ("allowed_pattern", "command"),
+        [
+            (r".*", "MODE=test echo allowed"),
+            (r"^echo", "echo=x touch forbidden.txt"),
+            (r"^echo", "echo[0]=x touch forbidden.txt"),
+            (r"^echo", "echo[1 + 1]=x touch forbidden.txt"),
+            (r"^echo", "echo allowed && printf bypassed"),
+            (r"^echo", "echo allowed || printf bypassed"),
+            (r"^echo", "echo allowed | cat"),
+            (r"^echo", "echo allowed > output.txt"),
+            (r"^echo", "echo allowed < input.txt"),
+            (r"^echo", "echo allowed\nprintf bypassed"),
+            (r"^echo", "echo $(printf bypassed)"),
+            (r"^echo", "echo `printf bypassed`"),
+            (r"^echo", 'echo "$STIRRUP_TEST_VALUE"'),
+            (r"^echo", 'echo "${VALUES[STIRRUP_TEST_INDEX]}"'),
+            (r"^echo", "echo $?"),
+            (r"^echo", "echo $[VALUES[STIRRUP_TEST_INDEX]]"),
+            (r"^echo", r"echo $'it\'s safe'; touch forbidden.txt"),
+            (r"^echo", 'echo "it\'s safe"; touch forbidden.txt'),
+            (r"^echo", "echo $\\\n(touch forbidden.txt)"),
+            (r"echo.*", "bash -c 'echo allowed; touch forbidden.txt'"),
+        ],
+    )
+    async def test_run_command_allowlist_rejects_shell_features(
+        self,
+        allowed_pattern: str,
+        command: str,
+    ) -> None:
+        provider = LocalCodeExecToolProvider(allowed_commands=[allowed_pattern])
+
+        async with provider:
+            result = await provider.run_command(command)
+
+        assert result.error_kind == "command_not_allowed"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'echo["1"]=x touch forbidden.txt',
+            "echo['1']=x touch forbidden.txt",
+            r"echo[1\+1]=x touch forbidden.txt",
+        ],
+    )
+    async def test_run_command_allowlist_rejects_quoted_or_escaped_array_assignments(
+        self,
+        command: str,
+    ) -> None:
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
+
+        async with provider:
+            result = await provider.run_command(command)
+            side_effect_exists = await provider.file_exists("forbidden.txt")
+
+        assert result.error_kind == "command_not_allowed"
+        assert side_effect_exists is False
+
+    @pytest.mark.parametrize(
+        ("command", "expected_stdout"),
+        [
+            ("echo 'a;b && c || d | e > f < g\n$() `x`'", "a;b && c || d | e > f < g\n$() `x`\n"),
+            ('echo "it\'s ; literal"', "it's ; literal\n"),
+            (r"echo $'it\'s; literal'", "it's; literal\n"),
+            (r"echo a\;b \$VALUE \${VALUE}", "a;b $VALUE ${VALUE}\n"),
+            ("ec\\\nho allowed", "allowed\n"),
+        ],
+    )
+    async def test_run_command_allowlist_allows_literal_shell_characters(
+        self,
+        command: str,
+        expected_stdout: str,
+    ) -> None:
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
+
+        async with provider:
+            result = await provider.run_command(command)
+
+        assert result.error_kind is None
+        assert result.stdout == expected_stdout
+
+    async def test_run_command_allowlist_blocks_recursive_array_expansion_side_effect(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        if not await run_sync(_bash_recursively_expands_array_index, tmp_path):
+            pytest.skip("installed Bash does not recursively expand array index values")
+
+        monkeypatch.setenv("STIRRUP_TEST_INDEX", "$(touch forbidden.txt)")
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
+
+        async with provider:
+            result = await provider.run_command('echo "${VALUES[STIRRUP_TEST_INDEX]}"')
+            side_effect_exists = await provider.file_exists("forbidden.txt")
+
+        assert result.error_kind == "command_not_allowed"
+        assert side_effect_exists is False
 
     async def test_save_output_files(self, temp_output_dir: Path) -> None:
         """Test saving files from the execution environment."""

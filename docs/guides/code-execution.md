@@ -64,6 +64,20 @@ provider = LocalCodeExecToolProvider(
 )
 ```
 
+When `allowed_commands` is configured, each invocation must be one simple shell
+command. Regex patterns match from the start of the command, and the command is
+rejected if it contains:
+
+- control syntax such as separators, pipes, redirects, or newlines
+- command, parameter, or legacy `$[...]` arithmetic expansions
+- a leading shell assignment such as `MODE=test command`
+
+Quoted and escaped characters remain ordinary arguments, so `echo 'a;b'` and
+`echo \$NAME` are allowed when `echo` is allowlisted. Commands such as `env`,
+`sh`, and `bash` must themselves be allowlisted; doing so also delegates control
+of the commands they launch. Use an allowlisted script when environment setup is
+needed. Setting `allowed_commands=None` allows unrestricted Bash syntax.
+
 ## DockerCodeExecToolProvider
 
 Executes code in a Docker container for better isolation.
