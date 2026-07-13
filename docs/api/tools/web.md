@@ -16,6 +16,11 @@ The `WebToolProvider` provides web fetching and search capabilities.
 
 Fetches a web page and returns its content as markdown.
 
+!!! note "Fetch security"
+    Web fetch resolves and validates every destination and redirect, rejects non-public
+    addresses, and ignores environment proxy settings. Search and fetch use separate
+    clients so cookies and transport state are not shared across those operations.
+
 ::: stirrup.tools.web.FetchWebPageParams
 
 ## Web Search Tool
