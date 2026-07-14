@@ -31,8 +31,11 @@ from stirrup.core.models import (
     EncryptedReasoningBlock,
     ImageContentBlock,
     LLMClient,
+    OpaqueBlock,
     ReasoningBlock,
     ReasoningRefBlock,
+    RedactedReasoningBlock,
+    SignedReasoningBlock,
     SystemMessage,
     TextBlock,
     TokenUsage,
@@ -160,43 +163,61 @@ def _to_open_responses_input(
             # carry blocks in channel order, so they replay in the old
             # message-then-calls order automatically.
             for block in m.blocks:
-                if isinstance(block, TextBlock):
-                    input_items.append(
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": block.text}],
-                        }
-                    )
-                elif isinstance(block, ToolCall):
-                    input_items.append(
-                        {
-                            "type": "function_call",
-                            "call_id": block.tool_call_id,
-                            "name": block.name,
-                            "arguments": block.arguments,
-                        }
-                    )
-                elif isinstance(block, ReasoningRefBlock):
-                    # Passed back by reference: the id is the handle to the stored
-                    # reasoning item.
-                    reasoning_item: dict[str, Any] = {"type": "reasoning", "id": block.id, "summary": []}
-                    if block.content:
-                        reasoning_item["summary"] = [{"type": "summary_text", "text": block.content}]
-                    input_items.append(reasoning_item)
-                elif isinstance(block, EncryptedReasoningBlock):
-                    # Stateless passback: the whole item — id, summary parts, and
-                    # encrypted payload — is re-emitted verbatim in position.
-                    input_items.append(
-                        {
-                            "type": "reasoning",
-                            "id": block.id,
-                            "summary": [{"type": "summary_text", "text": part} for part in block.summary],
-                            "encrypted_content": block.encrypted_content,
-                        }
-                    )
-                # In-band/signed reasoning, opaque provider blocks, and media blocks
-                # have no Responses input representation; they are skipped.
+                match block:
+                    case TextBlock(text=text):
+                        input_items.append(
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": text}],
+                            }
+                        )
+                    case ToolCall(tool_call_id=call_id, name=name, arguments=arguments):
+                        input_items.append(
+                            {
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": arguments,
+                            }
+                        )
+                    case ReasoningRefBlock(id=reasoning_id, content=content):
+                        # Passed back by reference: the id is the handle to the stored
+                        # reasoning item.
+                        reasoning_item: dict[str, Any] = {"type": "reasoning", "id": reasoning_id, "summary": []}
+                        if content:
+                            reasoning_item["summary"] = [{"type": "summary_text", "text": content}]
+                        input_items.append(reasoning_item)
+                    case EncryptedReasoningBlock(
+                        id=reasoning_id,
+                        summary=summary,
+                        encrypted_content=encrypted_content,
+                    ):
+                        # Stateless passback: the whole item — id, summary parts, and
+                        # encrypted payload — is re-emitted verbatim in position.
+                        input_items.append(
+                            {
+                                "type": "reasoning",
+                                "id": reasoning_id,
+                                "summary": [{"type": "summary_text", "text": part} for part in summary],
+                                "encrypted_content": encrypted_content,
+                            }
+                        )
+                    case (
+                        ReasoningBlock()
+                        | SignedReasoningBlock()
+                        | RedactedReasoningBlock()
+                        | OpaqueBlock()
+                        | ImageContentBlock()
+                        | VideoContentBlock()
+                        | AudioContentBlock()
+                    ):
+                        # These blocks have no Responses input representation.
+                        continue
+                    case _:
+                        raise NotImplementedError(
+                            f"Unsupported assistant block type for OpenAI Responses replay: {type(block).__name__}"
+                        )
         elif isinstance(m, ToolMessage):
             # Tool results are function_call_output items
             content_str = m.content if isinstance(m.content, str) else str(m.content)

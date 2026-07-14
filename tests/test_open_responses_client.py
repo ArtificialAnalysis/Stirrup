@@ -1,5 +1,6 @@
 """Tests for OpenResponsesClient."""
 
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from stirrup.clients.open_responses_client import (
     _to_open_responses_tools,
 )
 from stirrup.core.models import (
+    AssistantBlock,
     AssistantMessage,
     EncryptedReasoningBlock,
     ReasoningBlock,
@@ -77,6 +79,16 @@ class TestMessageConversion:
             "role": "user",
             "content": [{"type": "input_text", "text": "Hello"}],
         }
+
+    def test_unexpected_assistant_block_raises(self) -> None:
+        unexpected = cast(AssistantBlock, object())
+        message = AssistantMessage.model_construct(blocks=[unexpected])
+
+        with pytest.raises(
+            NotImplementedError,
+            match="Unsupported assistant block type for OpenAI Responses replay: object",
+        ):
+            _to_open_responses_input([message])
 
     def test_assistant_message_conversion(self) -> None:
         """Test AssistantMessage conversion to input format."""
