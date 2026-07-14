@@ -392,10 +392,15 @@ def test_each_reasoning_kind_round_trips(block: ReasoningBlock) -> None:
 
 
 def test_interleaved_round_trip_is_lossless_and_id_stable() -> None:
-    msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS, token_usage=TokenUsage(input=1, answer=2, reasoning=3))
+    msg = AssistantMessage(
+        provider_response_id="resp_123",
+        blocks=INTERLEAVED_BLOCKS,
+        token_usage=TokenUsage(input=1, answer=2, reasoning=3),
+    )
     restored = AssistantMessage.model_validate(msg.model_dump(mode="json"))
     assert restored.blocks == msg.blocks
     assert restored.id == msg.id
+    assert restored.provider_response_id == "resp_123"
     assert restored.token_usage == msg.token_usage
 
 

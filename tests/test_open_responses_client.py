@@ -11,6 +11,7 @@ from stirrup.clients.open_responses_client import (
     _content_to_open_responses_output,
     _parse_response_output,
     _to_open_responses_input,
+    _to_open_responses_request,
     _to_open_responses_tools,
 )
 from stirrup.core.models import (
@@ -180,6 +181,55 @@ class TestMessageConversion:
 
         assert instructions == "You are a search assistant"
         assert len(input_items) == 5  # user, assistant, function_call, function_call_output, assistant
+
+    def test_provider_response_id_slices_stored_history_but_keeps_instructions(self) -> None:
+        messages = [
+            SystemMessage(content="Keep this instruction"),
+            UserMessage(content="old input"),
+            AssistantMessage(
+                provider_response_id="resp_123",
+                blocks=[
+                    ReasoningRefBlock(id="rs_123", content="summary"),
+                    ToolCall(tool_call_id="call_123", name="lookup", arguments="{}"),
+                ],
+            ),
+            ToolMessage(content="tool output", tool_call_id="call_123"),
+            UserMessage(content="new input"),
+        ]
+
+        instructions, previous_response_id, input_items = _to_open_responses_request(
+            messages,
+            use_provider_response_id=True,
+        )
+
+        assert instructions == "Keep this instruction"
+        assert previous_response_id == "resp_123"
+        assert input_items == [
+            {"type": "function_call_output", "call_id": "call_123", "output": "tool output"},
+            {"role": "user", "content": [{"type": "input_text", "text": "new input"}]},
+        ]
+
+    def test_stateless_request_replays_items_instead_of_using_response_id(self) -> None:
+        messages = [
+            AssistantMessage(
+                provider_response_id="resp_123",
+                blocks=[ReasoningRefBlock(id="rs_123", content="summary")],
+            )
+        ]
+
+        _instructions, previous_response_id, input_items = _to_open_responses_request(
+            messages,
+            use_provider_response_id=False,
+        )
+
+        assert previous_response_id is None
+        assert input_items == [
+            {
+                "type": "reasoning",
+                "id": "rs_123",
+                "summary": [{"type": "summary_text", "text": "summary"}],
+            }
+        ]
 
 
 class TestToolConversion:
@@ -367,6 +417,16 @@ class TestResponseParsing:
         tool_names = [b.name for b in blocks if isinstance(b, ToolCall)]
         assert tool_names == ["tool1", "tool2"]
 
+    def test_unexpected_output_item_raises(self) -> None:
+        with pytest.raises(NotImplementedError, match="Unsupported OpenAI Responses output item type"):
+            _parse_response_output([MagicMock(type="computer_call")])
+
+    def test_unexpected_message_content_raises(self) -> None:
+        output = [MagicMock(type="message", content=[MagicMock(type="refusal", refusal="no")])]
+
+        with pytest.raises(NotImplementedError, match="Unsupported OpenAI Responses message content type"):
+            _parse_response_output(output)
+
 
 class TestOpenResponsesClient:
     """Tests for OpenResponsesClient class."""
@@ -391,6 +451,7 @@ class TestOpenResponsesClient:
 
         # Mock the responses.create method
         mock_response = MagicMock()
+        mock_response.id = "resp_basic"
         mock_response.status = "completed"
         mock_response.output = [
             MagicMock(
@@ -412,6 +473,7 @@ class TestOpenResponsesClient:
         )
 
         assert isinstance(result, AssistantMessage)
+        assert result.provider_response_id == "resp_basic"
         assert joined_text(result.blocks) == "Hello!"
         assert result.token_usage.input == 10
         assert result.token_usage.answer == 5
@@ -426,6 +488,7 @@ class TestOpenResponsesClient:
         )
 
         mock_response = MagicMock()
+        mock_response.id = "resp_stateless"
         mock_response.status = "completed"
         mock_response.output = [
             MagicMock(
@@ -438,11 +501,40 @@ class TestOpenResponsesClient:
         create_mock = AsyncMock(return_value=mock_response)
         client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
 
-        await client.generate(messages=[UserMessage(content="Hi")], tools={})
+        result = await client.generate(messages=[UserMessage(content="Hi")], tools={})
 
         request_kwargs = create_mock.call_args.kwargs
         assert request_kwargs["store"] is False
         assert request_kwargs["include"] == ["reasoning.encrypted_content"]
+        assert result.provider_response_id is None
+
+    @pytest.mark.asyncio
+    async def test_generate_uses_previous_response_id(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        mock_response = MagicMock(
+            id="resp_next",
+            status="completed",
+            output=[MagicMock(type="message", content=[MagicMock(type="output_text", text="next")])],
+            usage=MagicMock(input_tokens=3, output_tokens=2, output_tokens_details=None),
+        )
+        create_mock = AsyncMock(return_value=mock_response)
+        client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
+
+        result = await client.generate(
+            messages=[
+                SystemMessage(content="Always be concise"),
+                UserMessage(content="old"),
+                AssistantMessage(provider_response_id="resp_previous", blocks=[TextBlock(text="old answer")]),
+                UserMessage(content="new"),
+            ],
+            tools={},
+        )
+
+        request_kwargs = create_mock.call_args.kwargs
+        assert request_kwargs["previous_response_id"] == "resp_previous"
+        assert request_kwargs["instructions"] == "Always be concise"
+        assert request_kwargs["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "new"}]}]
+        assert result.provider_response_id == "resp_next"
 
     @pytest.mark.asyncio
     async def test_generate_with_tools(self) -> None:

@@ -5,7 +5,6 @@ supporting both OpenAI's API and any OpenAI-compatible endpoint that implements
 the Responses API via the `base_url` parameter.
 """
 
-import logging
 import os
 from collections.abc import Sequence
 from time import perf_counter
@@ -49,8 +48,6 @@ from stirrup.core.models import (
 __all__ = [
     "OpenResponsesClient",
 ]
-
-LOGGER = logging.getLogger(__name__)
 
 
 def _content_to_open_responses_input(content: Content) -> list[dict[str, Any]]:
@@ -234,6 +231,33 @@ def _to_open_responses_input(
     return instructions, input_items
 
 
+def _to_open_responses_request(
+    msgs: Sequence[ChatMessage],
+    *,
+    use_provider_response_id: bool,
+) -> tuple[str | None, str | None, list[dict[str, Any]]]:
+    """Build one Responses request while preserving response-level continuation state.
+
+    ``previous_response_id`` replaces only the earlier input items. System instructions
+    are extracted from the complete local history because the Responses API does not
+    carry a previous response's ``instructions`` into the next request.
+    """
+    instructions, _ = _to_open_responses_input([msg for msg in msgs if isinstance(msg, SystemMessage)])
+    previous_response_id: str | None = None
+    messages_to_process = msgs
+
+    if use_provider_response_id:
+        for index in range(len(msgs) - 1, -1, -1):
+            msg = msgs[index]
+            if isinstance(msg, AssistantMessage) and msg.provider_response_id is not None:
+                previous_response_id = msg.provider_response_id
+                messages_to_process = msgs[index + 1 :]
+                break
+
+    _, input_items = _to_open_responses_input(messages_to_process)
+    return instructions, previous_response_id, input_items
+
+
 def _get_attr(obj: Any, name: str, default: Any = None) -> Any:  # noqa: ANN401
     """Get attribute from object or dict, with fallback default."""
     if isinstance(obj, dict):
@@ -254,58 +278,60 @@ def _parse_response_output(output: list[Any]) -> list[AssistantBlock]:
     for item in output:
         item_type = _get_attr(item, "type")
 
-        if item_type == "message":
-            # Extract text content from message
-            msg_content = _get_attr(item, "content", [])
-            text = "".join(
-                _get_attr(content_item, "text", "")
-                for content_item in msg_content
-                if _get_attr(content_item, "type") == "output_text"
-            )
-            if text:
-                blocks.append(TextBlock(text=text))
+        match item_type:
+            case "message":
+                text_parts: list[str] = []
+                for content_item in _get_attr(item, "content", []):
+                    content_type = _get_attr(content_item, "type")
+                    if content_type != "output_text":
+                        raise NotImplementedError(
+                            f"Unsupported OpenAI Responses message content type: {content_type!r}"
+                        )
+                    text = _get_attr(content_item, "text")
+                    if not isinstance(text, str):
+                        raise ValueError(f"OpenAI Responses output_text is not a string: {text!r}")
+                    text_parts.append(text)
+                if text_parts:
+                    blocks.append(TextBlock(text="".join(text_parts)))
 
-        elif item_type == "function_call":
-            call_id = _get_attr(item, "call_id")
-            name = _get_attr(item, "name")
-            arguments = _get_attr(item, "arguments", "")
-            blocks.append(
-                ToolCall(
-                    tool_call_id=call_id,
-                    name=name,
-                    arguments=arguments,
-                )
-            )
-
-        elif item_type == "reasoning":
-            # summary can be a list of Summary objects with .text attribute
-            summary = _get_attr(item, "summary")
-            if isinstance(summary, list):
-                summary_parts = [text for s in summary if (text := _get_attr(s, "text"))]
-            elif summary:
-                summary_parts = [str(summary)]
-            else:
-                thinking = _get_attr(item, "thinking")
-                summary_parts = [thinking] if thinking else []
-
-            item_id = _get_attr(item, "id")
-            encrypted_content = _get_attr(item, "encrypted_content")
-            if item_id and encrypted_content:
-                # Stateless (store=false / ZDR) item: carried whole for verbatim re-emission.
+            case "function_call":
                 blocks.append(
-                    EncryptedReasoningBlock(
-                        id=item_id,
-                        encrypted_content=encrypted_content,
-                        summary=tuple(summary_parts),
+                    ToolCall(
+                        tool_call_id=_get_attr(item, "call_id"),
+                        name=_get_attr(item, "name"),
+                        arguments=_get_attr(item, "arguments", ""),
                     )
                 )
-            elif item_id:
-                blocks.append(ReasoningRefBlock(id=item_id, content="\n".join(summary_parts)))
-            elif summary_parts:
-                blocks.append(ReasoningBlock(content="\n".join(summary_parts)))
 
-        else:
-            LOGGER.warning("Skipping unsupported response output item type: %r", item_type)
+            case "reasoning":
+                # summary can be a list of Summary objects with .text attribute
+                summary = _get_attr(item, "summary")
+                if isinstance(summary, list):
+                    summary_parts = [text for s in summary if (text := _get_attr(s, "text"))]
+                elif summary:
+                    summary_parts = [str(summary)]
+                else:
+                    thinking = _get_attr(item, "thinking")
+                    summary_parts = [thinking] if thinking else []
+
+                item_id = _get_attr(item, "id")
+                encrypted_content = _get_attr(item, "encrypted_content")
+                if item_id and encrypted_content:
+                    # Stateless (store=false / ZDR) item: carried whole for verbatim re-emission.
+                    blocks.append(
+                        EncryptedReasoningBlock(
+                            id=item_id,
+                            encrypted_content=encrypted_content,
+                            summary=tuple(summary_parts),
+                        )
+                    )
+                elif item_id:
+                    blocks.append(ReasoningRefBlock(id=item_id, content="\n".join(summary_parts)))
+                elif summary_parts:
+                    blocks.append(ReasoningBlock(content="\n".join(summary_parts)))
+
+            case _:
+                raise NotImplementedError(f"Unsupported OpenAI Responses output item type: {item_type!r}")
 
     return blocks
 
@@ -432,8 +458,14 @@ class OpenResponsesClient(LLMClient):
         Raises:
             ContextOverflowError: If the response is incomplete due to token limits.
         """
-        # Convert messages to OpenResponses format
-        instructions, input_items = _to_open_responses_input(messages)
+        stateful = not self._encrypted_reasoning and self._kwargs.get("store", True) is not False
+
+        # Convert messages to OpenResponses format. Stateful calls continue from the
+        # latest provider response; stateless/ZDR calls replay encrypted reasoning items.
+        instructions, previous_response_id, input_items = _to_open_responses_request(
+            messages,
+            use_provider_response_id=stateful,
+        )
 
         # Use provided instructions or fall back to default
         final_instructions = instructions or self._default_instructions
@@ -445,6 +477,13 @@ class OpenResponsesClient(LLMClient):
             "max_output_tokens": self._max_tokens,
             **self._kwargs,
         }
+        if previous_response_id is not None:
+            configured_previous_id = request_kwargs.get("previous_response_id")
+            if configured_previous_id not in (None, previous_response_id):
+                raise ValueError(
+                    "Configured previous_response_id conflicts with the latest AssistantMessage.provider_response_id"
+                )
+            request_kwargs["previous_response_id"] = previous_response_id
 
         # Add instructions if present
         if final_instructions:
@@ -498,6 +537,7 @@ class OpenResponsesClient(LLMClient):
         answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
+            provider_response_id=str(response.id) if stateful else None,
             blocks=blocks,
             token_usage=TokenUsage(
                 input=input_tokens,

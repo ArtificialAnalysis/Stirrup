@@ -893,6 +893,14 @@ class AssistantMessage(BaseModel):
     """
 
     id: str = Field(default_factory=lambda: uuid4().hex)
+    provider_response_id: str | None = None
+    """Provider-attached continuation state, e.g. an OpenAI Responses ``resp_...`` id.
+
+    This is turn metadata rather than emitted assistant content, so it lives beside
+    ``blocks`` instead of inside their emission order. It is distinct from ``id``
+    (Stirrup's message identity) and ``ReasoningRefBlock.id`` (an emitted reasoning
+    item handle).
+    """
     role: Literal["assistant"] = "assistant"
     blocks: list[AssistantBlock] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
