@@ -627,6 +627,7 @@ class ToolCall(BaseModel, frozen=True):
 
     kind: Literal["tool_call"] = "tool_call"
     signature: str | None = None
+    """Opaque passback state attached to this exact block, e.g. a Google thought signature."""
     name: str
     arguments: str
     tool_call_id: str | None = None
