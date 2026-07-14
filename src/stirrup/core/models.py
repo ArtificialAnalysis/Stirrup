@@ -93,7 +93,7 @@ def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple
 
 
 # Content
-class BinaryContentBlock(BaseModel, ABC):
+class BinaryContentBlock(BaseModel, ABC, frozen=True):
     """Base class for binary content (images, video, audio) with MIME type validation."""
 
     data: Base64Bytes
@@ -128,7 +128,7 @@ class BinaryContentBlock(BaseModel, ABC):
         """Verify content can be opened and read; subclasses implement format-specific checks."""
 
 
-class ImageContentBlock(BinaryContentBlock):
+class ImageContentBlock(BinaryContentBlock, frozen=True):
     """Image content supporting PNG, JPEG, WebP, PSD formats with automatic downscaling."""
 
     kind: Literal["image_content_block"] = "image_content_block"
@@ -160,7 +160,7 @@ class ImageContentBlock(BinaryContentBlock):
         return f"data:image/png;base64,{b64encode(buf.getvalue()).decode()}"
 
 
-class VideoContentBlock(BinaryContentBlock):
+class VideoContentBlock(BinaryContentBlock, frozen=True):
     """MP4 video content with automatic transcoding and resolution downscaling."""
 
     kind: Literal["video_content_block"] = "video_content_block"
@@ -210,7 +210,7 @@ class VideoContentBlock(BinaryContentBlock):
                 return f"data:video/mp4;base64,{b64encode(fout.read()).decode()}"
 
 
-class AudioContentBlock(BinaryContentBlock):
+class AudioContentBlock(BinaryContentBlock, frozen=True):
     """Audio content supporting MPEG, WAV, AAC, and other common audio formats."""
 
     kind: Literal["audio_content_block"] = "audio_content_block"
@@ -612,7 +612,7 @@ class LLMClient(Protocol):
     def max_tokens(self) -> int: ...
 
 
-class ToolCall(BaseModel):
+class ToolCall(BaseModel, frozen=True):
     """Represents a tool invocation request from the LLM.
 
     Also a member of the ``AssistantBlock`` union: the ``kind`` discriminator is
@@ -678,7 +678,7 @@ class Reasoning(BaseModel):
 
 # Assistant blocks: one assistant turn is an ordered sequence of blocks, in the
 # model's actual emission order (thinking → text → thinking → tool call, ...).
-class TextBlock(BaseModel):
+class TextBlock(BaseModel, frozen=True):
     """One contiguous run of answer text in an assistant turn.
 
     ``signature`` carries opaque passback state attached to this exact block,
@@ -690,7 +690,7 @@ class TextBlock(BaseModel):
     signature: str | None = None
 
 
-class ReasoningBlock(BaseModel):
+class ReasoningBlock(BaseModel, frozen=True):
     """In-band reasoning text with no passback token.
 
     E.g. ``reasoning_content`` on Chat Completions-compatible hosts, or
@@ -701,7 +701,7 @@ class ReasoningBlock(BaseModel):
     content: str
 
 
-class SignedReasoningBlock(BaseModel):
+class SignedReasoningBlock(BaseModel, frozen=True):
     """Reasoning bound to an opaque provider signature re-emitted verbatim on passback.
 
     E.g. Anthropic signed thinking blocks.
@@ -712,7 +712,7 @@ class SignedReasoningBlock(BaseModel):
     content: str = ""
 
 
-class RedactedReasoningBlock(BaseModel):
+class RedactedReasoningBlock(BaseModel, frozen=True):
     """Reasoning the provider withheld, replaced by an opaque payload.
 
     E.g. Anthropic ``redacted_thinking``: ``data`` must be re-emitted verbatim as a
@@ -723,7 +723,7 @@ class RedactedReasoningBlock(BaseModel):
     data: str
 
 
-class ReasoningRefBlock(BaseModel):
+class ReasoningRefBlock(BaseModel, frozen=True):
     """Reasoning held provider-side and passed back by reference.
 
     E.g. OpenAI Responses reasoning items on stored (stateful) conversations:
@@ -736,7 +736,7 @@ class ReasoningRefBlock(BaseModel):
     """Summary text, when the provider surfaces one."""
 
 
-class EncryptedReasoningBlock(BaseModel):
+class EncryptedReasoningBlock(BaseModel, frozen=True):
     """Reasoning returned as an opaque encrypted payload for stateless passback.
 
     E.g. OpenAI Responses reasoning items requested with
@@ -749,7 +749,7 @@ class EncryptedReasoningBlock(BaseModel):
     kind: Literal["encrypted_reasoning"] = "encrypted_reasoning"
     id: str
     encrypted_content: str
-    summary: list[str] = Field(default_factory=list)
+    summary: tuple[str, ...] = ()
     """Summary parts, when the provider surfaces them; kept split for faithful echo."""
 
     @property
@@ -758,7 +758,7 @@ class EncryptedReasoningBlock(BaseModel):
         return _TEXT_BLOCK_SEPARATOR.join(self.summary)
 
 
-class OpaqueBlock(BaseModel):
+class OpaqueBlock(BaseModel, frozen=True):
     """Provider-native block the framework carries uninterpreted.
 
     For provider-issued marker/control blocks that must round-trip untouched:

@@ -277,6 +277,28 @@ def test_text_block_signature_round_trips_and_blocks_rewriting() -> None:
         message.with_text("rewritten")
 
 
+def test_assistant_blocks_are_frozen_and_encrypted_summaries_are_deeply_immutable() -> None:
+    block_types = (
+        TextBlock,
+        ReasoningBlock,
+        SignedReasoningBlock,
+        RedactedReasoningBlock,
+        ReasoningRefBlock,
+        EncryptedReasoningBlock,
+        OpaqueBlock,
+        ToolCall,
+        ImageContentBlock,
+    )
+    assert all(block_type.model_config.get("frozen") is True for block_type in block_types)
+
+    text = TextBlock(text="original")
+    with pytest.raises(ValidationError, match="frozen"):
+        text.text = "changed"
+
+    encrypted = EncryptedReasoningBlock(id="rs_1", encrypted_content="opaque", summary=["one"])
+    assert encrypted.summary == ("one",)
+
+
 def test_with_blocks_replaces_block_list() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
     stripped = msg.with_blocks([b for b in msg.blocks if b.kind != "tool_call"])
