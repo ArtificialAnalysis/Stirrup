@@ -10,7 +10,7 @@ from io import BytesIO
 from math import isinf, isnan, sqrt
 from tempfile import NamedTemporaryFile
 from types import TracebackType
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Protocol, Self, cast, overload, runtime_checkable
+from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, cast, overload, runtime_checkable
 from uuid import uuid4
 
 import filetype
@@ -895,26 +895,10 @@ class AssistantMessage(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
     role: Literal["assistant"] = "assistant"
     blocks: list[AssistantBlock] = Field(default_factory=list)
-    token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
     metadata: dict[str, Any] = Field(default_factory=dict)
     request_start_time: float | None = None
     request_end_time: float | None = None
-
-    if TYPE_CHECKING:
-        # Keep the public constructor block-only. The before-validator still reads
-        # serialized v0.1 channel payloads, but that compatibility path is deliberately
-        # not exposed as a constructor overload.
-        def __init__(
-            self,
-            *,
-            id: str = ...,
-            role: Literal["assistant"] = ...,
-            blocks: Sequence[AssistantBlock] = ...,
-            token_usage: TokenUsage = ...,
-            metadata: dict[str, Any] = ...,
-            request_start_time: float | None = ...,
-            request_end_time: float | None = ...,
-        ) -> None: ...
 
     @model_validator(mode="before")
     @classmethod

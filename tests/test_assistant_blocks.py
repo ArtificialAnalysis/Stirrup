@@ -19,6 +19,7 @@ from stirrup.clients.utils import to_openai_messages
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
 from stirrup.core.models import (
+    AssistantBlock,
     AssistantMessage,
     ChatMessage,
     EncryptedReasoningBlock,
@@ -54,7 +55,7 @@ def _png_block() -> ImageContentBlock:
     return ImageContentBlock(data=buffer.getvalue())
 
 
-INTERLEAVED_BLOCKS = [
+INTERLEAVED_BLOCKS: list[AssistantBlock] = [
     SignedReasoningBlock(signature="sig-1", content="first thought"),
     TextBlock(text="Let me look."),
     SignedReasoningBlock(signature="sig-2", content="second thought"),
