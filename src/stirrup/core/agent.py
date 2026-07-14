@@ -40,6 +40,8 @@ from stirrup.core.models import (
     ToolUseCountMetadata,
     TurnWarningMessage,
     UserMessage,
+    joined_text,
+    tool_call_blocks,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
@@ -1263,15 +1265,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         finish_params: FinishParams | None = None
         tool_messages: list[ToolMessage] = []
-        if assistant_message.tool_calls:
+        tool_calls = tool_call_blocks(assistant_message.blocks)
+        if tool_calls:
             # If multiple finish tools were called in one turn, refuse all of them without
             # executing — silently picking one would discard the model's other intent and
             # may swap in contradictory params. Force the model to retry with a single call.
-            finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
+            finish_call_names = [tc.name for tc in tool_calls if tc.name in self._finish_tools]
             reject_all_finish_calls = len(finish_call_names) > 1
 
             tool_messages = []
-            for tool_call in assistant_message.tool_calls:
+            for tool_call in tool_calls:
                 if reject_all_finish_calls and tool_call.name in self._finish_tools:
                     now = perf_counter()
                     tool_message = ToolMessage(
@@ -1323,7 +1326,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 summary = await self._client.generate(summary_prompt, self._active_tools)
 
                 removed = current_messages[len(task_context) :]
-                summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
+                summary_content = joined_text(summary.blocks) or ""
+                summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_content)
                 # Chain lineage across summarization rounds: a removed prior summary
                 # contributes the ids it already stood for, so the final summary's
                 # replaced_ids transitively covers every collapsed assistant turn.
@@ -1340,7 +1344,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Use a user acknowledgement to avoid consecutive assistant messages with strict providers.
                 acknowledgement_msg = UserMessage(content="Got it, thanks!")
 
-                summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
                 self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
 
                 return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
@@ -1380,7 +1383,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             # Multiple messages
             await agent.run([
                 UserMessage(content="First, read the data"),
-                AssistantMessage(content="I've read the data file..."),
+                AssistantMessage(blocks=[TextBlock(text="I've read the data file...")]),
                 UserMessage(content="Now analyze it"),
             ])
 
@@ -1450,7 +1453,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Log the task at run start (only if not resuming)
         if not resumed:
-            self._logger.task_message(msgs[-1].content)
+            last_message = msgs[-1]
+            task_content = (
+                joined_text(last_message.blocks) or ""
+                if isinstance(last_message, AssistantMessage)
+                else last_message.content
+            )
+            self._logger.task_message(task_content)
 
         # Show warnings (top-level only, if logger supports it)
         if self._logger.depth == 0 and isinstance(self._logger, AgentLogger):
@@ -1636,17 +1645,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 last_assistant_msg: AssistantMessage | None = None
                 for msg_group in reversed(msg_history):
                     for msg in reversed(msg_group):
-                        if isinstance(msg, AssistantMessage) and msg.content:
+                        if isinstance(msg, AssistantMessage) and joined_text(msg.blocks):
                             last_assistant_msg = msg
                             break
                     if last_assistant_msg:
                         break
 
                 content_parts: list[str] = []
-                if last_assistant_msg and last_assistant_msg.content:
-                    content = last_assistant_msg.content
-                    if isinstance(content, list):
-                        content = "\n".join(str(block) for block in content)
+                if last_assistant_msg and (content := joined_text(last_assistant_msg.blocks)):
                     content_parts.append(content)
 
                 if finish_params is not None:

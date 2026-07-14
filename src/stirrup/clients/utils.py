@@ -8,6 +8,7 @@ formats, these utilities are shared between both client implementations.
 from typing import Any
 
 from stirrup.core.models import (
+    AssistantBlock,
     AssistantMessage,
     AudioContentBlock,
     ChatMessage,
@@ -17,11 +18,14 @@ from stirrup.core.models import (
     RedactedReasoningBlock,
     SignedReasoningBlock,
     SystemMessage,
+    TextBlock,
     Tool,
     ToolMessage,
     UserMessage,
     VideoContentBlock,
+    joined_text,
     reasoning_blocks,
+    tool_call_blocks,
 )
 
 __all__ = [
@@ -109,6 +113,18 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
     return out
 
 
+def _assistant_content(blocks: list[AssistantBlock]) -> Content:
+    """Project answer/media blocks without using the deprecated message accessor."""
+    media_types = ImageContentBlock | VideoContentBlock | AudioContentBlock
+    if any(isinstance(block, media_types) for block in blocks):
+        return [
+            block.text if isinstance(block, TextBlock) else block
+            for block in blocks
+            if isinstance(block, TextBlock | media_types)
+        ]
+    return joined_text(blocks) or ""
+
+
 def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
     """Convert ChatMessage list to OpenAI-compatible message dictionaries.
 
@@ -134,7 +150,7 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
         elif isinstance(m, AssistantMessage):
             # Note: message metadata is deliberately NOT sent on the wire — it is
             # integrator/user state, opaque to the framework.
-            msg: dict[str, Any] = {"role": "assistant", "content": content_to_openai(m.content)}
+            msg: dict[str, Any] = {"role": "assistant", "content": content_to_openai(_assistant_content(m.blocks))}
 
             rblocks = reasoning_blocks(m.blocks)
             reasoning_content = "".join(
@@ -156,9 +172,10 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
             if thinking_payload:
                 msg["thinking_blocks"] = thinking_payload
 
-            if m.tool_calls:
+            tool_calls = tool_call_blocks(m.blocks)
+            if tool_calls:
                 msg["tool_calls"] = []
-                for tool in m.tool_calls:
+                for tool in tool_calls:
                     tool_dict = tool.model_dump(exclude={"kind"})
                     tool_dict["id"] = tool.tool_call_id
                     tool_dict["type"] = "function"

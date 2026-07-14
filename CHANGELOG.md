@@ -11,8 +11,8 @@ actual emission order. `blocks` is the only stored content; the channel-era
 
 | Operation | v0.2 | Migration |
 | --- | --- | --- |
-| Read `msg.content` / `.reasoning` / `.tool_calls` | works — read-only projections of blocks | None. Prefer `msg.blocks` / `final_text(msg.blocks)` in new code. |
-| Construct `AssistantMessage(content=…, reasoning=…, tool_calls=…)` | works — blocks synthesized in channel order (reasoning → text → tool calls); permanent path | None. Custom `LLMClient`s keep working unmodified. |
+| Read `msg.content` / `.reasoning` / `.tool_calls` | works with a `DeprecationWarning` — read-only projections of blocks | Migrate to `msg.blocks` plus `joined_text`, `reasoning_blocks`, or `tool_call_blocks`. |
+| Construct `AssistantMessage(content=…, reasoning=…, tool_calls=…)` | **removed from the typed public API** | Construct `AssistantMessage(blocks=[...])`. Legacy channel-shaped data remains accepted through validation for persisted-history compatibility. |
 | Deserialize v0.1 histories (incl. `SubAgentMetadata`, cache files) | works — upgraded at validation | None. |
 | Assign `msg.content = …` / `.tool_calls = …` / `.reasoning = …` | **breaks** — projections have no setters; raises `AttributeError` | `msg = msg.with_text("…")`, `msg.with_blocks([…])`, or rebuild via the constructor. Grep: `rg "\.(content\|tool_calls\|reasoning)\s*="` |
 | External tools reading dumped histories by `content`/`tool_calls` key | **breaks** — dumps emit `blocks` only | Read `blocks` (kind-discriminated), or re-validate through `AssistantMessage` and use the projections. |

@@ -23,6 +23,9 @@ from stirrup.core.models import (
     ToolCall,
     ToolMessage,
     UserMessage,
+    joined_text,
+    reasoning_blocks,
+    tool_call_blocks,
 )
 
 
@@ -78,7 +81,12 @@ class TestMessageConversion:
     def test_assistant_message_conversion(self) -> None:
         """Test AssistantMessage conversion to input format."""
         messages = [
-            AssistantMessage(content="I can help with that", tool_calls=[], token_usage=TokenUsage()),
+            AssistantMessage(
+                blocks=[
+                    TextBlock(text="I can help with that"),
+                ],
+                token_usage=TokenUsage(),
+            ),
         ]
         instructions, input_items = _to_open_responses_input(messages)
 
@@ -94,13 +102,13 @@ class TestMessageConversion:
         """Test AssistantMessage with tool calls adds function_call items."""
         messages = [
             AssistantMessage(
-                content="Let me search for that",
-                tool_calls=[
+                blocks=[
+                    TextBlock(text="Let me search for that"),
                     ToolCall(
                         tool_call_id="call_123",
                         name="search",
                         arguments='{"query": "test"}',
-                    )
+                    ),
                 ],
                 token_usage=TokenUsage(),
             ),
@@ -142,12 +150,19 @@ class TestMessageConversion:
             SystemMessage(content="You are a search assistant"),
             UserMessage(content="Find information about Python"),
             AssistantMessage(
-                content="I'll search for that",
-                tool_calls=[ToolCall(tool_call_id="call_1", name="search", arguments='{"q": "Python"}')],
+                blocks=[
+                    TextBlock(text="I'll search for that"),
+                    ToolCall(tool_call_id="call_1", name="search", arguments='{"q": "Python"}'),
+                ],
                 token_usage=TokenUsage(),
             ),
             ToolMessage(content="Python is a programming language", tool_call_id="call_1", name="search"),
-            AssistantMessage(content="Python is a programming language", tool_calls=[], token_usage=TokenUsage()),
+            AssistantMessage(
+                blocks=[
+                    TextBlock(text="Python is a programming language"),
+                ],
+                token_usage=TokenUsage(),
+            ),
         ]
         instructions, input_items = _to_open_responses_input(messages)
 
@@ -385,7 +400,7 @@ class TestOpenResponsesClient:
         )
 
         assert isinstance(result, AssistantMessage)
-        assert result.content == "Hello!"
+        assert joined_text(result.blocks) == "Hello!"
         assert result.token_usage.input == 10
         assert result.token_usage.answer == 5
 
@@ -456,9 +471,10 @@ class TestOpenResponsesClient:
             tools={"get_time": test_tool},
         )
 
-        assert len(result.tool_calls) == 1
-        assert result.tool_calls[0].name == "get_time"
-        assert result.tool_calls[0].tool_call_id == "call_xyz"
+        tool_calls = tool_call_blocks(result.blocks)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "get_time"
+        assert tool_calls[0].tool_call_id == "call_xyz"
 
     @pytest.mark.asyncio
     async def test_generate_with_reasoning_tokens(self) -> None:
@@ -495,8 +511,7 @@ class TestOpenResponsesClient:
             tools={},
         )
 
-        assert result.reasoning is not None
-        assert result.reasoning.content == "Thinking step by step..."
+        assert reasoning_blocks(result.blocks) == [ReasoningBlock(content="Thinking step by step...")]
         assert result.token_usage.reasoning == 80
         assert result.token_usage.answer == 20  # 100 - 80
 

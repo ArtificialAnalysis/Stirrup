@@ -100,12 +100,13 @@ history = [
 ]
 ```
 
-The channel-era attributes `content`, `reasoning`, and `tool_calls` remain available as
-read-only projections of `blocks` (`content` joins text blocks; `tool_calls` filters
-tool-call blocks), and channel-shaped construction
-(`AssistantMessage(content=..., reasoning=..., tool_calls=...)`) is a permanently
-supported path that synthesizes blocks in reasoning → text → tool-calls order. Assigning
-to a projection raises; use `msg.with_text(...)` / `msg.with_blocks(...)` instead.
+The channel-era attributes `content`, `reasoning`, and `tool_calls` remain temporarily
+available as deprecated, read-only projections of `blocks`; reading them emits a
+`DeprecationWarning`. Use `joined_text`, `reasoning_blocks`, or `tool_call_blocks`
+instead. New messages must be constructed from `blocks`; channel-shaped v0.1 data is
+accepted only as a legacy deserialization format and is synthesized in reasoning → text
+→ tool-call order. Assigning to a projection raises; use `msg.with_text(...)` /
+`msg.with_blocks(...)` instead.
 Convenience accessors `joined_text`, `final_text`, `tool_call_blocks`, and
 `reasoning_blocks` operate on any block list.
 

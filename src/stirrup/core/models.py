@@ -867,6 +867,18 @@ _CHANNEL_ASSIGNMENT_ERROR = (
     "use with_text()/with_blocks() or construct a new message. "
     "See the v0.2 migration guide (CHANGELOG.md, BREAKING)."
 )
+_CHANNEL_PROJECTION_DEPRECATION = (
+    "AssistantMessage.{channel} is deprecated; {replacement}. "
+    "The compatibility projection will be removed in a future release."
+)
+
+
+def _warn_channel_projection(channel: str, replacement: str) -> None:
+    warnings.warn(
+        _CHANNEL_PROJECTION_DEPRECATION.format(channel=channel, replacement=replacement),
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 class AssistantMessage(BaseModel):
@@ -874,10 +886,10 @@ class AssistantMessage(BaseModel):
 
     ``blocks`` is the only stored content; the channel-era ``content`` /
     ``reasoning`` / ``tool_calls`` attributes are read-only projections of it.
-    Channel-shaped construction and v0.1 serialized payloads upgrade to blocks
-    at validation (permanent path, not deprecated); mixing ``blocks`` with
-    non-empty channel keys raises. Use ``with_text`` / ``with_blocks`` instead
-    of channel assignment.
+    Serialized v0.1 payloads upgrade to blocks during validation. Channel-shaped
+    construction is not part of the v0.2 API; new code constructs blocks directly.
+    Mixing ``blocks`` with non-empty legacy channel keys raises. Use
+    ``with_text`` / ``with_blocks`` instead of channel assignment.
     """
 
     id: str = Field(default_factory=lambda: uuid4().hex)
@@ -889,11 +901,9 @@ class AssistantMessage(BaseModel):
     request_end_time: float | None = None
 
     if TYPE_CHECKING:
-        # Channel-shaped construction (content/reasoning/tool_calls) is a permanent
-        # supported path, upgraded to blocks by the before-validator; declare both
-        # shapes for type checkers. The overloads also express the no-mixing rule
-        # (enforced at runtime by the validator) statically.
-        @overload
+        # Keep the public constructor block-only. The before-validator still reads
+        # serialized v0.1 channel payloads, but that compatibility path is deliberately
+        # not exposed as a constructor overload.
         def __init__(
             self,
             *,
@@ -906,27 +916,10 @@ class AssistantMessage(BaseModel):
             request_end_time: float | None = ...,
         ) -> None: ...
 
-        @overload
-        def __init__(
-            self,
-            *,
-            id: str = ...,
-            role: Literal["assistant"] = ...,
-            content: Content = ...,
-            reasoning: Reasoning | None = ...,
-            tool_calls: Sequence[ToolCall] = ...,
-            token_usage: TokenUsage = ...,
-            metadata: dict[str, Any] = ...,
-            request_start_time: float | None = ...,
-            request_end_time: float | None = ...,
-        ) -> None: ...
-
-        def __init__(self, **data: Any) -> None: ...
-
     @model_validator(mode="before")
     @classmethod
     def _upgrade_channel_fields(cls, data: object) -> object:
-        """Convert channel-shaped input (v0.1 constructor calls and dumps) into blocks.
+        """Convert serialized v0.1 channel payloads into blocks.
 
         Channel-shaped payloads carry no ordering, so blocks are synthesized in
         the order flat messages have always been replayed: reasoning → text →
@@ -971,6 +964,7 @@ class AssistantMessage(BaseModel):
     @property
     def content(self) -> Content:
         """Joined text of all text blocks ("" when none); mixed list when media blocks are present."""
+        _warn_channel_projection("content", "inspect blocks or use joined_text(message.blocks)")
         if any(isinstance(block, ImageContentBlock | VideoContentBlock | AudioContentBlock) for block in self.blocks):
             return [
                 block.text if isinstance(block, TextBlock) else block
@@ -986,6 +980,7 @@ class AssistantMessage(BaseModel):
         Redacted blocks carry no readable content and no channel-era equivalent;
         they contribute nothing here.
         """
+        _warn_channel_projection("reasoning", "use reasoning_blocks(message.blocks)")
         rblocks = reasoning_blocks(self.blocks)
         if not rblocks:
             return None
@@ -999,6 +994,7 @@ class AssistantMessage(BaseModel):
     @property
     def tool_calls(self) -> list[ToolCall]:
         """Tool calls in emission order."""
+        _warn_channel_projection("tool_calls", "use tool_call_blocks(message.blocks)")
         return tool_call_blocks(self.blocks)
 
     @content.setter

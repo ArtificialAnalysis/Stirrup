@@ -96,7 +96,7 @@ Stirrup message types use OpenAI-compatible field names (`role`, `content`, `too
 
 ```python
 import openai
-from stirrup import AssistantMessage, ChatMessage, Tool, ToolCall, ToolMessage, TokenUsage
+from stirrup import AssistantMessage, ChatMessage, TextBlock, Tool, ToolCall, ToolMessage, TokenUsage
 
 
 class OpenAIClient:
@@ -143,8 +143,13 @@ class OpenAIClient:
         message = response.choices[0].message
 
         return AssistantMessage(
-            content=message.content or "",
-            tool_calls=[ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id) for tc in (message.tool_calls or [])],
+            blocks=[
+                TextBlock(text=message.content or ""),
+                *[
+                    ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id)
+                    for tc in (message.tool_calls or [])
+                ],
+            ],
             token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
         )
 ```
@@ -152,11 +157,10 @@ class OpenAIClient:
 You can optionally populate `request_start_time` and `request_end_time` on `AssistantMessage`
 to track generation speed. The derived `e2e_otps` property computes output tokens per second.
 
-Channel-shaped construction as above works permanently — blocks are synthesized in
-reasoning → text → tool-calls order. If your provider emits ordered output (interleaved
-thinking, text, and tool calls), construct `AssistantMessage(blocks=[...])` instead to
-preserve the true emission order, and replay from `msg.blocks` when converting history
-back to your API format.
+Construct `AssistantMessage` from blocks and replay from `msg.blocks` when converting
+history back to your API format. This preserves ordered provider output, including
+interleaved thinking, text, and tool calls. Channel-shaped v0.1 data is supported only
+when reading persisted histories.
 
 ## Integration contract
 
@@ -202,7 +206,7 @@ class MockClient:
 
 # Use in tests
 mock = MockClient([
-    AssistantMessage(content="Hello!", tool_calls=[], token_usage=TokenUsage()),
+    AssistantMessage(blocks=[TextBlock(text="Hello!")], token_usage=TokenUsage()),
 ])
 
 agent = Agent(client=mock, name="test")

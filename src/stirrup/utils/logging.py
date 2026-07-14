@@ -22,7 +22,15 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-from stirrup.core.models import AssistantMessage, ToolMessage, UserMessage, _aggregate_list, aggregate_metadata
+from stirrup.core.models import (
+    AssistantMessage,
+    ToolMessage,
+    UserMessage,
+    _aggregate_list,
+    aggregate_metadata,
+    joined_text,
+    tool_call_blocks,
+)
 from stirrup.utils.text import truncate_msg
 
 __all__ = [
@@ -854,21 +862,20 @@ class AgentLogger(AgentLoggerBase):
         content = Text()
 
         # Add assistant content if present
-        if assistant_message.content:
-            text = assistant_message.content
-            if isinstance(text, list):
-                text = "\n".join(str(block) for block in text)
+        text = joined_text(assistant_message.blocks)
+        if text:
             # Truncate long content
             if len(text) > 500:
                 text = text[:500] + "..."
             content.append(text, style="white")
 
         # Add tool calls if present
-        if assistant_message.tool_calls:
-            if assistant_message.content:
+        tool_calls = tool_call_blocks(assistant_message.blocks)
+        if tool_calls:
+            if text:
                 content.append("\n\n")
             content.append("Tool Calls:\n", style="bold magenta")
-            for tc in assistant_message.tool_calls:
+            for tc in tool_calls:
                 content.append(f"  🔧 {tc.name}", style="magenta")
                 if tc.arguments and tc.arguments.strip():
                     args_parsed = json.loads(tc.arguments)

@@ -85,35 +85,41 @@ def test_tool_call_and_reasoning_accessors_preserve_order() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Channel projections (read-only, derived from blocks)
+# Channel projections (deprecated, read-only, derived from blocks)
 # ---------------------------------------------------------------------------
 
 
 def test_content_projection_joins_text_blocks() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
-    assert msg.content == "Let me look.\nFound it."
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
+        assert msg.content == "Let me look.\nFound it."
 
 
 def test_content_projection_empty_string_when_no_text_blocks() -> None:
     msg = AssistantMessage(blocks=[ToolCall(name="t", arguments="{}")])
-    assert msg.content == ""
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
+        assert msg.content == ""
 
 
 def test_content_projection_media_list_in_block_order() -> None:
     image = _png_block()
     msg = AssistantMessage(blocks=[TextBlock(text="see:"), image, TextBlock(text="above")])
-    assert msg.content == ["see:", image, "above"]
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
+        assert msg.content == ["see:", image, "above"]
 
 
 def test_reasoning_projection_concatenates_without_separator_and_takes_first_signature() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
-    assert msg.reasoning is not None
-    assert msg.reasoning.signature == "sig-1"
-    assert msg.reasoning.content == "first thoughtsecond thought"
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
+        reasoning = msg.reasoning
+    assert reasoning is not None
+    assert reasoning.signature == "sig-1"
+    assert reasoning.content == "first thoughtsecond thought"
 
 
 def test_reasoning_projection_none_without_reasoning_blocks() -> None:
-    assert AssistantMessage(blocks=[TextBlock(text="hi")]).reasoning is None
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
+        assert AssistantMessage(blocks=[TextBlock(text="hi")]).reasoning is None
 
 
 def test_reasoning_projection_redacted_blocks_contribute_nothing() -> None:
@@ -123,49 +129,58 @@ def test_reasoning_projection_redacted_blocks_contribute_nothing() -> None:
             SignedReasoningBlock(signature="sig", content="visible"),
         ]
     )
-    assert msg.reasoning is not None
-    assert msg.reasoning.content == "visible"
-    assert msg.reasoning.signature == "sig"
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
+        reasoning = msg.reasoning
+    assert reasoning is not None
+    assert reasoning.content == "visible"
+    assert reasoning.signature == "sig"
 
 
 def test_tool_calls_projection() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
-    assert [tc.name for tc in msg.tool_calls] == ["grep"]
-    assert AssistantMessage(blocks=[TextBlock(text="x")]).tool_calls == []
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.tool_calls is deprecated"):
+        assert [tc.name for tc in msg.tool_calls] == ["grep"]
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.tool_calls is deprecated"):
+        assert AssistantMessage(blocks=[TextBlock(text="x")]).tool_calls == []
 
 
 # ---------------------------------------------------------------------------
-# Channel-order synthesis (permanent legacy-upgrade path)
+# Legacy v0.1 reader conversion
 # ---------------------------------------------------------------------------
 
 
-def test_channel_construction_synthesizes_blocks_in_channel_order() -> None:
-    msg = AssistantMessage(
-        content="answer",
-        reasoning=Reasoning(content="thinking"),
-        tool_calls=[ToolCall(name="t", arguments="{}", tool_call_id="c1")],
+def test_legacy_channel_payload_synthesizes_blocks_in_channel_order() -> None:
+    msg = AssistantMessage.model_validate(
+        {
+            "content": "answer",
+            "reasoning": {"content": "thinking"},
+            "tool_calls": [{"name": "t", "arguments": "{}", "tool_call_id": "c1"}],
+        }
     )
     assert [b.kind for b in msg.blocks] == ["reasoning", "text", "tool_call"]
 
 
 def test_flat_reasoning_splits_by_signature_presence() -> None:
-    signed = AssistantMessage(content="", reasoning=Reasoning(signature="sig", content="deep"))
+    signed = AssistantMessage.model_validate({"content": "", "reasoning": {"signature": "sig", "content": "deep"}})
     assert signed.blocks == [SignedReasoningBlock(signature="sig", content="deep")]
 
-    in_band = AssistantMessage(content="", reasoning=Reasoning(content="deep"))
+    in_band = AssistantMessage.model_validate({"content": "", "reasoning": {"content": "deep"}})
     assert in_band.blocks == [ReasoningBlock(content="deep")]
 
 
 def test_media_content_list_passes_through_in_place() -> None:
     image = _png_block()
-    msg = AssistantMessage(content=["before", image, "after"])
+    msg = AssistantMessage.model_validate({"content": ["before", image, "after"]})
     assert msg.blocks == [TextBlock(text="before"), image, TextBlock(text="after")]
 
 
 def test_empty_content_synthesizes_no_text_block() -> None:
-    msg = AssistantMessage(content="", tool_calls=[ToolCall(name="t", arguments="{}")])
+    msg = AssistantMessage.model_validate(
+        {"content": "", "tool_calls": [{"name": "t", "arguments": "{}", "tool_call_id": None}]}
+    )
     assert [b.kind for b in msg.blocks] == ["tool_call"]
-    assert msg.content == ""
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
+        assert msg.content == ""
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +190,11 @@ def test_empty_content_synthesizes_no_text_block() -> None:
 
 def test_mixing_blocks_with_channel_fields_raises() -> None:
     with pytest.raises(ValidationError, match="cannot mix"):
-        AssistantMessage(blocks=[TextBlock(text="x")], content="y")  # type: ignore
+        AssistantMessage.model_validate({"blocks": [{"kind": "text", "text": "x"}], "content": "y"})
     with pytest.raises(ValidationError, match="cannot mix"):
-        AssistantMessage(blocks=[], tool_calls=[ToolCall(name="t", arguments="{}")])  # type: ignore
+        AssistantMessage.model_validate({"blocks": [], "tool_calls": [{"name": "t", "arguments": "{}"}]})
     with pytest.raises(ValidationError, match="cannot mix"):
-        AssistantMessage(blocks=[], reasoning=Reasoning(content="r"))  # type: ignore
+        AssistantMessage.model_validate({"blocks": [], "reasoning": {"content": "r"}})
 
 
 def test_mixing_guard_ignores_empty_channel_values() -> None:
@@ -227,9 +242,8 @@ def test_opaque_block_round_trips_and_stays_out_of_projections() -> None:
     assert reloaded.blocks == msg.blocks
     # Not reasoning: excluded from the reasoning family and the channel projections.
     assert reasoning_blocks(msg.blocks) == [SignedReasoningBlock(signature="sig-1", content="thinking")]
-    assert msg.reasoning == Reasoning(signature="sig-1", content="thinking")
-    assert msg.content == "answer"
-    assert msg.tool_calls == []
+    assert joined_text(msg.blocks) == "answer"
+    assert tool_call_blocks(msg.blocks) == []
 
 
 def test_opaque_block_skipped_on_openai_replay() -> None:
@@ -298,7 +312,7 @@ def test_assistant_blocks_are_frozen_and_encrypted_summaries_are_deeply_immutabl
 def test_with_blocks_replaces_block_list() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
     stripped = msg.with_blocks([b for b in msg.blocks if b.kind != "tool_call"])
-    assert stripped.tool_calls == []
+    assert tool_call_blocks(stripped.blocks) == []
     assert stripped.id == msg.id
 
 
@@ -327,9 +341,9 @@ def test_v01_golden_dump_upgrades_to_blocks() -> None:
         TextBlock(text="hello"),
         ToolCall(name="t", arguments="{}", tool_call_id="c1"),
     ]
-    # projections round-trip the channel view
-    assert msg.content == "hello"
-    assert msg.reasoning == Reasoning(signature="sig", content="thought")
+    # The block helpers expose the same information without the deprecated projections.
+    assert joined_text(msg.blocks) == "hello"
+    assert reasoning_blocks(msg.blocks) == [SignedReasoningBlock(signature="sig", content="thought")]
     assert msg.metadata == {"user_key": 1}
 
 
@@ -406,7 +420,7 @@ def test_agent_injected_user_messages_round_trip_through_chat_message_union() ->
         message_history=[
             [
                 UserMessage(content="task"),
-                AssistantMessage(id="turn-1", content="working"),
+                AssistantMessage(id="turn-1", blocks=[TextBlock(text="working")]),
                 SummaryMessage(content="bridge", replaced_ids=["turn-1"]),
                 TurnWarningMessage(content="2 turns remaining"),
             ]
@@ -426,11 +440,13 @@ def test_agent_injected_user_messages_round_trip_through_chat_message_union() ->
 
 
 def test_chat_wire_byte_identical_for_non_signed_turns() -> None:
-    """Channel-constructed (v0.1-shaped) messages produce the exact v0.1.11 payload."""
-    msg = AssistantMessage(
-        content="hi",
-        reasoning=Reasoning(content="think"),
-        tool_calls=[ToolCall(name="t", arguments="{}", tool_call_id="c1")],
+    """A v0.1-shaped payload still produces the exact v0.1.11 wire format."""
+    msg = AssistantMessage.model_validate(
+        {
+            "content": "hi",
+            "reasoning": {"content": "think"},
+            "tool_calls": [{"name": "t", "arguments": "{}", "tool_call_id": "c1"}],
+        }
     )
     assert to_openai_messages([msg]) == [
         {
@@ -453,7 +469,7 @@ def test_chat_wire_byte_identical_for_non_signed_turns() -> None:
 
 
 def test_chat_wire_single_signed_turn_matches_v01_shape() -> None:
-    msg = AssistantMessage(content="hi", reasoning=Reasoning(signature="sig", content="think"))
+    msg = AssistantMessage.model_validate({"content": "hi", "reasoning": {"signature": "sig", "content": "think"}})
     assert to_openai_messages([msg]) == [
         {
             "role": "assistant",
@@ -519,9 +535,11 @@ def test_encrypted_reasoning_feeds_channel_projections() -> None:
     msg = AssistantMessage(
         blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=("alpha", "beta"))]
     )
-    assert msg.reasoning is not None
-    assert msg.reasoning.content == "alpha\nbeta"
-    assert msg.reasoning.signature is None
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
+        reasoning = msg.reasoning
+    assert reasoning is not None
+    assert reasoning.content == "alpha\nbeta"
+    assert reasoning.signature is None
 
 
 def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:
@@ -537,14 +555,16 @@ def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:
     ]
 
 
-def test_responses_replay_of_channel_constructed_message_keeps_v01_order() -> None:
-    """Legacy flat construction replays message-then-calls, as v0.1.11 emitted."""
-    msg = AssistantMessage(
-        content="hi",
-        tool_calls=[
-            ToolCall(name="a", arguments="{}", tool_call_id="c1"),
-            ToolCall(name="b", arguments="{}", tool_call_id="c2"),
-        ],
+def test_responses_replay_of_legacy_channel_payload_keeps_v01_order() -> None:
+    """A legacy flat payload replays message-then-calls, as v0.1.11 emitted."""
+    msg = AssistantMessage.model_validate(
+        {
+            "content": "hi",
+            "tool_calls": [
+                {"name": "a", "arguments": "{}", "tool_call_id": "c1"},
+                {"name": "b", "arguments": "{}", "tool_call_id": "c2"},
+            ],
+        }
     )
     _instructions, items = _to_open_responses_input([msg])
     assert [item["type"] for item in items] == ["message", "function_call", "function_call"]
@@ -600,13 +620,13 @@ def _finish_message(*, token_usage: TokenUsage | None = None, message_id: str | 
     if message_id is not None:
         kwargs["id"] = message_id
     return AssistantMessage(
-        content="Done",
-        tool_calls=[
+        blocks=[
+            TextBlock(text="Done"),
             ToolCall(
                 name=DEFAULT_FINISH_TOOL_NAME,
                 arguments='{"reason": "Completed", "paths": []}',
                 tool_call_id="call-finish",
-            )
+            ),
         ],
         token_usage=token_usage or TokenUsage(input=10, answer=5),
         **kwargs,
@@ -653,10 +673,10 @@ async def test_chained_summarization_carries_replaced_ids_transitively() -> None
     histories reconstruct lineage across rounds."""
     heavy = TokenUsage(input=250, answer=100)  # total=350 >= 0.3*1000
     responses = [
-        AssistantMessage(id="turn-1", content="Working on it", token_usage=heavy),
-        AssistantMessage(content="Summary one.", token_usage=TokenUsage(input=10, answer=5)),
-        AssistantMessage(id="turn-2", content="Still working", token_usage=heavy),
-        AssistantMessage(content="Summary two.", token_usage=TokenUsage(input=10, answer=5)),
+        AssistantMessage(id="turn-1", blocks=[TextBlock(text="Working on it")], token_usage=heavy),
+        AssistantMessage(blocks=[TextBlock(text="Summary one.")], token_usage=TokenUsage(input=10, answer=5)),
+        AssistantMessage(id="turn-2", blocks=[TextBlock(text="Still working")], token_usage=heavy),
+        AssistantMessage(blocks=[TextBlock(text="Summary two.")], token_usage=TokenUsage(input=10, answer=5)),
         _finish_message(),
     ]
     agent = Agent(

@@ -32,6 +32,8 @@ from stirrup.core.models import (
     ToolProvider,
     UserMessage,
     aggregate_metadata,
+    joined_text,
+    tool_call_blocks,
 )
 from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider
 from stirrup.tools.web import WebToolProvider
@@ -149,14 +151,9 @@ class SlackLogger(AgentLoggerBase):
         )
 
     def assistant_message(self, turn: int, max_turns: int, assistant_message: AssistantMessage) -> None:
-        tool_names = [tc.name for tc in assistant_message.tool_calls]
+        tool_names = [tc.name for tc in tool_call_blocks(assistant_message.blocks)]
         content_preview = ""
-        if assistant_message.content:
-            text = (
-                assistant_message.content
-                if isinstance(assistant_message.content, str)
-                else str(assistant_message.content)
-            )
+        if text := joined_text(assistant_message.blocks):
             content_preview = text[:200] + "..." if len(text) > 200 else text
         if tool_names:
             logger.info("[%s] Turn %d/%d | Tools: %s", self.name, turn, max_turns, ", ".join(tool_names))
