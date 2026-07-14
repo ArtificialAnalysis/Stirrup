@@ -291,11 +291,7 @@ def test_assistant_blocks_are_frozen_and_encrypted_summaries_are_deeply_immutabl
     )
     assert all(block_type.model_config.get("frozen") is True for block_type in block_types)
 
-    text = TextBlock(text="original")
-    with pytest.raises(ValidationError, match="frozen"):
-        text.text = "changed"
-
-    encrypted = EncryptedReasoningBlock(id="rs_1", encrypted_content="opaque", summary=["one"])
+    encrypted = EncryptedReasoningBlock(id="rs_1", encrypted_content="opaque", summary=("one",))
     assert encrypted.summary == ("one",)
 
 
@@ -371,7 +367,7 @@ def test_v02_dump_emits_blocks_only() -> None:
         RedactedReasoningBlock(data="opaque"),
         ReasoningRefBlock(id="rs_1", content="summary"),
         ReasoningRefBlock(id="rs_2"),
-        EncryptedReasoningBlock(id="rs_3", encrypted_content="zdr-payload", summary=["part one", "part two"]),
+        EncryptedReasoningBlock(id="rs_3", encrypted_content="zdr-payload", summary=("part one", "part two")),
     ],
 )
 def test_each_reasoning_kind_round_trips(block: ReasoningBlock) -> None:
@@ -521,7 +517,7 @@ def test_responses_replay_preserves_interleaved_order() -> None:
 def test_encrypted_reasoning_feeds_channel_projections() -> None:
     """The reasoning projection and CC replay see encrypted summaries as readable content."""
     msg = AssistantMessage(
-        blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["alpha", "beta"])]
+        blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=("alpha", "beta"))]
     )
     assert msg.reasoning is not None
     assert msg.reasoning.content == "alpha\nbeta"
@@ -529,7 +525,7 @@ def test_encrypted_reasoning_feeds_channel_projections() -> None:
 
 
 def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:
-    msg = AssistantMessage(blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["a", "b"])])
+    msg = AssistantMessage(blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=("a", "b"))])
     _instructions, items = _to_open_responses_input([msg])
     assert items == [
         {

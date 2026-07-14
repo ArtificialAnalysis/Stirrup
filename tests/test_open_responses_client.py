@@ -301,9 +301,9 @@ class TestResponseParsing:
 
         assert blocks == [
             EncryptedReasoningBlock(
-                id="rs_789", encrypted_content="opaque-zdr-payload", summary=["First thought.", "Second thought."]
+                id="rs_789", encrypted_content="opaque-zdr-payload", summary=("First thought.", "Second thought.")
             ),
-            EncryptedReasoningBlock(id="rs_790", encrypted_content="opaque-zdr-payload-2", summary=[]),
+            EncryptedReasoningBlock(id="rs_790", encrypted_content="opaque-zdr-payload-2"),
         ]
 
     def test_parse_mixed_output_preserves_order(self) -> None:

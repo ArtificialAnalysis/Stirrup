@@ -376,7 +376,7 @@ async def test_cache_round_trips_block_based_assistant_message() -> None:
             SignedReasoningBlock(signature="sig-1", content="signed thinking"),
             RedactedReasoningBlock(data="redacted-token"),
             ReasoningRefBlock(id="rs_1", content="summary"),
-            EncryptedReasoningBlock(id="rs_2", encrypted_content="zdr-payload", summary=["summary"]),
+            EncryptedReasoningBlock(id="rs_2", encrypted_content="zdr-payload", summary=("summary",)),
             ReasoningBlock(content="in-band thinking"),
             TextBlock(text="the answer"),
             OpaqueBlock(data='{"type": "provider_marker"}'),

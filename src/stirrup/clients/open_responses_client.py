@@ -272,7 +272,11 @@ def _parse_response_output(output: list[Any]) -> list[AssistantBlock]:
             if item_id and encrypted_content:
                 # Stateless (store=false / ZDR) item: carried whole for verbatim re-emission.
                 blocks.append(
-                    EncryptedReasoningBlock(id=item_id, encrypted_content=encrypted_content, summary=summary_parts)
+                    EncryptedReasoningBlock(
+                        id=item_id,
+                        encrypted_content=encrypted_content,
+                        summary=tuple(summary_parts),
+                    )
                 )
             elif item_id:
                 blocks.append(ReasoningRefBlock(id=item_id, content="\n".join(summary_parts)))
