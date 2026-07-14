@@ -679,10 +679,15 @@ class Reasoning(BaseModel):
 # Assistant blocks: one assistant turn is an ordered sequence of blocks, in the
 # model's actual emission order (thinking → text → thinking → tool call, ...).
 class TextBlock(BaseModel):
-    """One contiguous run of answer text in an assistant turn."""
+    """One contiguous run of answer text in an assistant turn.
+
+    ``signature`` carries opaque passback state attached to this exact block,
+    e.g. a Google thought signature emitted on a visible text part.
+    """
 
     kind: Literal["text"] = "text"
     text: str
+    signature: str | None = None
 
 
 class ReasoningBlock(BaseModel):
@@ -1012,7 +1017,10 @@ class AssistantMessage(BaseModel):
         """Copy with all text blocks replaced by one text block carrying ``text``.
 
         The replacement sits where channel-era text sat: after reasoning, before tool calls.
+        Signed text cannot be rewritten because its signature is bound to the exact block.
         """
+        if any(isinstance(block, TextBlock) and block.signature is not None for block in self.blocks):
+            raise ValueError("Cannot replace signed text blocks; their signatures are bound to the original text")
         replaced: list[AssistantBlock] = [block for block in self.blocks if not isinstance(block, TextBlock)]
         insert_at = next((i for i, block in enumerate(replaced) if isinstance(block, ToolCall)), len(replaced))
         replaced.insert(insert_at, TextBlock(text=text))

@@ -268,6 +268,15 @@ def test_with_text_replaces_text_blocks_before_tool_calls() -> None:
     assert joined_text(msg.blocks) == "Let me look.\nFound it."
 
 
+def test_text_block_signature_round_trips_and_blocks_rewriting() -> None:
+    block = TextBlock(text="provider-bound", signature="sig-1")
+    message = AssistantMessage.model_validate(AssistantMessage(blocks=[block]).model_dump(mode="json"))
+
+    assert message.blocks == [block]
+    with pytest.raises(ValueError, match="Cannot replace signed text blocks"):
+        message.with_text("rewritten")
+
+
 def test_with_blocks_replaces_block_list() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
     stripped = msg.with_blocks([b for b in msg.blocks if b.kind != "tool_call"])
