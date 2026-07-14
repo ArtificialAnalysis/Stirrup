@@ -355,6 +355,16 @@ class TestResponseParsing:
             ReasoningRefBlock(id="rs_456", content=""),
         ]
 
+    def test_stateless_parse_rejects_reference_only_reasoning(self) -> None:
+        reasoning_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        reasoning_item.type = "reasoning"
+        reasoning_item.id = "rs_123"
+        reasoning_item.summary = []
+        reasoning_item.encrypted_content = None
+
+        with pytest.raises(NotImplementedError, match="reference-only reasoning"):
+            _parse_response_output([reasoning_item], allow_reference_reasoning=False)
+
     def test_parse_reasoning_output_with_encrypted_content(self) -> None:
         """A reasoning item carrying encrypted_content becomes an EncryptedReasoningBlock,
         with summary parts kept split for verbatim re-emission."""

@@ -265,13 +265,18 @@ def _get_attr(obj: Any, name: str, default: Any = None) -> Any:  # noqa: ANN401
     return getattr(obj, name, default)
 
 
-def _parse_response_output(output: list[Any]) -> list[AssistantBlock]:
+def _parse_response_output(
+    output: list[Any],
+    *,
+    allow_reference_reasoning: bool = True,
+) -> list[AssistantBlock]:
     """Parse response output items into ordered assistant blocks.
 
     One exhaustive pass in item order: each ``message`` item becomes its own
     TextBlock, each ``function_call`` a ToolCall block, each ``reasoning`` item a
     ReasoningRefBlock (id retained even when the summary is empty — it is the
-    passback handle). Unknown item types warn and are skipped.
+    passback handle). Unknown item and content types raise until their semantics
+    and passback behavior are explicitly implemented.
     """
     blocks: list[AssistantBlock] = []
 
@@ -326,6 +331,11 @@ def _parse_response_output(output: list[Any]) -> list[AssistantBlock]:
                         )
                     )
                 elif item_id:
+                    if not allow_reference_reasoning:
+                        raise NotImplementedError(
+                            "A stateless OpenAI Responses call returned reference-only reasoning; "
+                            "enable encrypted_reasoning so it can be passed back"
+                        )
                     blocks.append(ReasoningRefBlock(id=item_id, content="\n".join(summary_parts)))
                 elif summary_parts:
                     blocks.append(ReasoningBlock(content="\n".join(summary_parts)))
@@ -522,7 +532,7 @@ class OpenResponsesClient(LLMClient):
             )
 
         # Parse response output into ordered blocks
-        blocks = _parse_response_output(response.output)
+        blocks = _parse_response_output(response.output, allow_reference_reasoning=stateful)
 
         # Parse token usage
         usage = response.usage
