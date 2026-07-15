@@ -3,7 +3,7 @@ import mimetypes
 import warnings
 from abc import ABC, abstractmethod
 from base64 import b64encode
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -17,7 +17,7 @@ import filetype
 from moviepy import AudioFileClip, VideoFileClip
 from moviepy.video.fx import Resize
 from PIL import Image
-from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, field_validator, model_validator
+from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, TypeAdapter, field_validator, model_validator
 
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
 
@@ -844,6 +844,8 @@ type AssistantBlock = Annotated[
 ]
 """One block of an assistant turn, discriminated on ``kind``."""
 
+_ASSISTANT_BLOCKS_ADAPTER = TypeAdapter(list[AssistantBlock])
+
 _REASONING_SUMMARY_SEPARATOR = "\n"
 
 type _MediaBlock = ImageContentBlock | VideoContentBlock | AudioContentBlock
@@ -945,6 +947,16 @@ class AssistantMessage(BaseModel):
     @classmethod
     def _freeze_blocks(cls, blocks: Sequence[AssistantBlock]) -> tuple[AssistantBlock, ...]:
         return tuple(blocks)
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        """Copy safely when replacing blocks, which Pydantic otherwise leaves unvalidated."""
+        if update is not None and "blocks" in update:
+            update = {
+                **update,
+                "blocks": tuple(_ASSISTANT_BLOCKS_ADAPTER.validate_python(update["blocks"])),
+                "provider_response_id": None,
+            }
+        return super().model_copy(update=update, deep=deep)
 
     @model_validator(mode="before")
     @classmethod
@@ -1054,11 +1066,11 @@ class AssistantMessage(BaseModel):
         replaced: list[AssistantBlock] = [block for block in self.blocks if not isinstance(block, TextBlock)]
         insert_at = next((i for i, block in enumerate(replaced) if isinstance(block, ToolCall)), len(replaced))
         replaced.insert(insert_at, TextBlock(text=text))
-        return self.model_copy(update={"blocks": tuple(replaced), "provider_response_id": None})
+        return self.model_copy(update={"blocks": replaced})
 
     def with_blocks(self, blocks: Sequence[AssistantBlock]) -> "AssistantMessage":
         """Copy with ``blocks`` as a frozen sequence; clears ``provider_response_id`` (see ``with_text``)."""
-        return self.model_copy(update={"blocks": tuple(blocks), "provider_response_id": None})
+        return self.model_copy(update={"blocks": blocks})
 
     @property
     def e2e_otps(self) -> float | None:

@@ -338,6 +338,9 @@ def test_mutators_clear_provider_response_id() -> None:
 
     assert msg.with_text("edited").provider_response_id is None
     assert msg.with_blocks([TextBlock(text="other")]).provider_response_id is None
+    copied = msg.model_copy(update={"blocks": [TextBlock(text="copied")]})
+    assert copied.blocks == (TextBlock(text="copied"),)
+    assert copied.provider_response_id is None
     # original untouched
     assert msg.provider_response_id == "resp_1"
 
