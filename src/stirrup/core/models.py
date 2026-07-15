@@ -19,6 +19,7 @@ from moviepy.video.fx import Resize
 from PIL import Image
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     PlainSerializer,
     PlainValidator,
@@ -710,7 +711,7 @@ class TurnWarningMessage(UserMessage):
 
 
 class Reasoning(BaseModel):
-    """Channel-era reasoning shape; survives as the ``AssistantMessage.reasoning`` projection carrier.
+    """Channel-era reasoning shape accepted only while reading serialized v0.1 messages.
 
     Deprecated as a standalone type: match on the ``AnyReasoningBlock`` kinds
     (ReasoningBlock / SignedReasoningBlock / RedactedReasoningBlock /
@@ -950,12 +951,12 @@ def _upgrade_legacy_assistant_message(data: object) -> object:
 class AssistantMessage(BaseModel):
     """LLM response message: an ordered sequence of assistant blocks.
 
-    ``blocks`` is the only stored content; the channel-era ``content`` /
-    ``reasoning`` / ``tool_calls`` attributes are read-only projections of it.
+    ``blocks`` is the only stored content. The channel-era ``content`` and
+    ``tool_calls`` attributes remain deprecated views; ``reasoning`` raises because
+    an ordered reasoning block sequence has no faithful channel-shaped projection.
     Serialized v0.1 payloads upgrade to blocks during validation. Channel-shaped
     construction is not part of the v0.2 API; new code constructs blocks directly.
-    Mixing ``blocks`` with non-empty legacy channel keys raises. Use ``with_blocks``
-    or construct a new message instead of channel assignment.
+    Mixing ``blocks`` with non-empty legacy channel keys raises.
     """
 
     id: str = Field(default_factory=lambda: uuid4().hex)
@@ -979,54 +980,31 @@ class AssistantMessage(BaseModel):
     def _upgrade_channel_fields(cls, data: object) -> object:
         return _upgrade_legacy_assistant_message(data)
 
-    # Channel-era projections — read-only, derived from blocks.
+    # Channel-era compatibility accessors.
     @property
-    def content(self) -> Content:
-        """Joined text of all text blocks ("" when none); mixed list when media blocks are present."""
+    def content(self) -> list[AssistantBlock] | str:
+        """Bare text for one text block, empty text for no blocks, or the block list."""
         _warn_channel_projection("content", "inspect blocks or use joined_text(message.blocks)")
-        if any(isinstance(block, ImageContentBlock | VideoContentBlock | AudioContentBlock) for block in self.blocks):
-            return [
-                block.text if isinstance(block, TextBlock) else block
-                for block in self.blocks
-                if isinstance(block, TextBlock | ImageContentBlock | VideoContentBlock | AudioContentBlock)
-            ]
-        return joined_text(self.blocks) or ""
+        match self.blocks:
+            case []:
+                return ""
+            case [TextBlock(text=text)]:
+                return text
+            case blocks:
+                return blocks
 
     @property
     def reasoning(self) -> Reasoning | None:
-        """Lossless channel-era reasoning view.
-
-        Redacted blocks carry no readable content and no channel-era equivalent;
-        they contribute nothing here. Multiple signed blocks, or signed reasoning
-        mixed with another readable reasoning kind, cannot fit the legacy shape and
-        raise instead of manufacturing a mismatched signature/content pair.
-        """
-        _warn_channel_projection("reasoning", "use reasoning_blocks(message.blocks)")
-        rblocks = reasoning_blocks(self.blocks)
-        readable = [block for block in rblocks if not isinstance(block, RedactedReasoningBlock)]
-        if not readable:
-            return None
-        signed = [block for block in readable if isinstance(block, SignedReasoningBlock)]
-        other_readable = [block for block in readable if not isinstance(block, SignedReasoningBlock)]
-        if len(signed) > 1 or (signed and other_readable):
-            raise NotImplementedError(
-                "AssistantMessage.reasoning cannot represent multiple signed blocks or signed reasoning mixed "
-                "with another readable reasoning kind; use reasoning_blocks(message.blocks)"
-            )
-        if signed:
-            return Reasoning(signature=signed[0].signature, content=signed[0].content)
-        content = "".join(block.content for block in readable)
-        return Reasoning(content=content)
+        """Deprecated channel accessor retained only to fail with migration guidance."""
+        raise NotImplementedError(
+            "AssistantMessage.reasoning is deprecated and no longer available; use reasoning_blocks(message.blocks)"
+        )
 
     @property
     def tool_calls(self) -> list[ToolCall]:
         """Tool calls in emission order."""
         _warn_channel_projection("tool_calls", "use tool_call_blocks(message.blocks)")
         return tool_call_blocks(self.blocks)
-
-    def with_blocks(self, blocks: Sequence[AssistantBlock]) -> "AssistantMessage":
-        """Copy with replacement blocks and clear continuation state bound to the old blocks."""
-        return self.model_copy(update={"blocks": list(blocks), "provider_response_id": None})
 
     @property
     def e2e_otps(self) -> float | None:
@@ -1071,9 +1049,20 @@ class ToolMessage(BaseModel):
         return duration
 
 
+def _reject_untagged_user_message(data: object) -> object:
+    if isinstance(data, dict) and "kind" not in data:
+        raise ValueError(
+            "Cannot load a cached user message without the required 'kind' discriminator. "
+            "This cache predates typed user-message kinds and cannot be resumed safely; "
+            "delete the old Stirrup cache and restart the run."
+        )
+    return data
+
+
 type UserRoleMessage = Annotated[
     UserMessage | SummaryMessage | TurnWarningMessage,
     Field(discriminator="kind"),
+    BeforeValidator(_reject_untagged_user_message),
 ]
 """User-role messages, discriminated on ``kind`` — the agent-injected ``UserMessage``
 subclasses share ``role="user"``, so dumped histories need the nested discriminator
@@ -1150,7 +1139,6 @@ def _upgrade_legacy_message_sequence(messages: object) -> object:
 
             case "user":
                 pending_calls.clear()
-                upgraded.setdefault("kind", "user")
 
             case _:
                 pending_calls.clear()

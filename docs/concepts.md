@@ -109,13 +109,13 @@ history = [
 ]
 ```
 
-The channel-era attributes `content`, `reasoning`, and `tool_calls` remain temporarily
-available as deprecated, read-only projections of `blocks`; reading them emits a
-`DeprecationWarning`. Use `joined_text`, `reasoning_blocks`, or `tool_call_blocks`
-instead. New messages must be constructed from `blocks`; channel-shaped v0.1 data is
-accepted only as a legacy deserialization format and is synthesized in reasoning → text
-→ tool-call order. Assigning to a projection raises; use `msg.with_blocks(...)` or
-construct a replacement message instead.
+The channel-era `content` and `tool_calls` attributes remain temporarily available as
+deprecated views of `blocks`; reading them emits a `DeprecationWarning`. `content` is a
+bare string only for an empty response or a single text block and otherwise exposes the
+block list directly. The deprecated `reasoning` attribute raises with guidance to use
+`reasoning_blocks`. New messages must be constructed from `blocks`; channel-shaped v0.1
+data is accepted only as a legacy deserialization format and is synthesized in reasoning
+→ text → tool-call order. Construct a replacement message instead of assigning channels.
 Convenience accessors `joined_text`, `final_text`, `tool_call_blocks`, and
 `reasoning_blocks` operate on any block list.
 

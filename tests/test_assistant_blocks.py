@@ -26,7 +26,6 @@ from stirrup.core.models import (
     ImageContentBlock,
     LLMClient,
     OpaqueBlock,
-    Reasoning,
     ReasoningBlock,
     ReasoningRefBlock,
     RedactedReasoningBlock,
@@ -91,71 +90,36 @@ def test_tool_call_and_reasoning_accessors_preserve_order() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_content_projection_joins_text_blocks() -> None:
-    msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
+def test_content_projection_returns_bare_text_for_one_text_block() -> None:
+    msg = AssistantMessage(blocks=[TextBlock(text="answer")])
     with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
-        assert msg.content == "Let me look.Found it."
+        assert msg.content == "answer"
 
 
-def test_content_projection_empty_string_when_no_text_blocks() -> None:
-    msg = AssistantMessage(blocks=[ToolCall(name="t", arguments="{}")])
+def test_content_projection_returns_empty_text_for_no_blocks() -> None:
+    msg = AssistantMessage()
     with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
         assert msg.content == ""
 
 
-def test_content_projection_media_list_in_block_order() -> None:
-    image = _png_block()
-    msg = AssistantMessage(blocks=[TextBlock(text="see:"), image, TextBlock(text="above")])
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        [ReasoningBlock(content="thinking")],
+        INTERLEAVED_BLOCKS,
+    ],
+)
+def test_content_projection_returns_blocks_for_every_other_shape(blocks: list[AssistantBlock]) -> None:
+    msg = AssistantMessage(blocks=blocks)
     with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
-        assert msg.content == ["see:", image, "above"]
+        content = msg.content
+    assert content is msg.blocks
 
 
-def test_reasoning_projection_rejects_multiple_signed_blocks() -> None:
-    msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
-    with (
-        pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"),
-        pytest.raises(NotImplementedError, match="cannot represent multiple signed blocks"),
-    ):
-        _ = msg.reasoning
-
-
-def test_reasoning_projection_rejects_signed_and_unsigned_mix() -> None:
-    msg = AssistantMessage(
-        blocks=[SignedReasoningBlock(signature="sig", content="signed"), ReasoningBlock(content="unsigned")]
-    )
-    with (
-        pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"),
-        pytest.raises(NotImplementedError, match="signed reasoning mixed"),
-    ):
-        _ = msg.reasoning
-
-
-def test_reasoning_projection_concatenates_unsigned_blocks() -> None:
-    msg = AssistantMessage(blocks=[ReasoningBlock(content="one"), ReasoningBlock(content="two")])
-    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
-        assert msg.reasoning == Reasoning(content="onetwo")
-
-
-def test_reasoning_projection_none_without_reasoning_blocks() -> None:
-    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
-        assert AssistantMessage(blocks=[TextBlock(text="hi")]).reasoning is None
-
-
-def test_reasoning_projection_redacted_blocks_contribute_nothing() -> None:
-    msg = AssistantMessage(
-        blocks=[
-            RedactedReasoningBlock(data="opaque-payload"),
-            SignedReasoningBlock(signature="sig", content="visible"),
-        ]
-    )
-    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
-        reasoning = msg.reasoning
-    assert reasoning is not None
-    assert reasoning.content == "visible"
-    assert reasoning.signature == "sig"
-
-    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
-        assert AssistantMessage(blocks=[RedactedReasoningBlock(data="opaque")]).reasoning is None
+@pytest.mark.parametrize("blocks", [[], [ReasoningBlock(content="thinking")]])
+def test_reasoning_projection_always_raises_deprecation_error(blocks: list[AssistantBlock]) -> None:
+    with pytest.raises(NotImplementedError, match=r"AssistantMessage\.reasoning is deprecated.*reasoning_blocks"):
+        _ = AssistantMessage(blocks=blocks).reasoning
 
 
 def test_tool_calls_projection() -> None:
@@ -201,8 +165,6 @@ def test_empty_content_synthesizes_no_text_block() -> None:
         {"content": "", "tool_calls": [{"name": "t", "arguments": "{}", "tool_call_id": None}]}
     )
     assert [b.kind for b in msg.blocks] == ["tool_call"]
-    with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
-        assert msg.content == ""
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +251,7 @@ def test_opaque_block_rejected_on_responses_replay() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Explicit block replacement
+# Block model invariants
 # ---------------------------------------------------------------------------
 
 
@@ -307,21 +269,6 @@ def test_block_models_are_frozen_but_containers_are_lists() -> None:
     assert isinstance(message.blocks, list)
     assert encrypted.model_config.get("frozen") is True
     assert encrypted.summary == ["one"]
-
-
-def test_with_blocks_replaces_block_list() -> None:
-    msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
-    stripped = msg.with_blocks([b for b in msg.blocks if b.kind != "tool_call"])
-    assert tool_call_blocks(stripped.blocks) == []
-    assert stripped.id == msg.id
-
-
-def test_mutators_clear_provider_response_id() -> None:
-    """The continuation handle is bound to the exact emitted content; an edited copy must replay in full."""
-    msg = AssistantMessage(provider_response_id="resp_1", blocks=[TextBlock(text="original")])
-
-    assert msg.with_blocks([TextBlock(text="other")]).provider_response_id is None
-    assert msg.provider_response_id == "resp_1"
 
 
 # ---------------------------------------------------------------------------
@@ -595,18 +542,6 @@ def test_responses_replay_preserves_interleaved_order() -> None:
     assert items[1]["content"] == [{"type": "output_text", "text": "first"}]
     assert items[2]["call_id"] == "call-1"
     assert items[3]["content"] == [{"type": "output_text", "text": "second"}]
-
-
-def test_encrypted_reasoning_feeds_channel_projections() -> None:
-    """The reasoning projection and CC replay see encrypted summaries as readable content."""
-    msg = AssistantMessage(
-        blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["alpha", "beta"])]
-    )
-    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
-        reasoning = msg.reasoning
-    assert reasoning is not None
-    assert reasoning.content == "alpha\nbeta"
-    assert reasoning.signature is None
 
 
 def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:

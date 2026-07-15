@@ -163,10 +163,6 @@ def deserialize_message(data: dict[str, Any]) -> ChatMessage:
         Restored ChatMessage object.
     """
     data = dict(data)
-    if data.get("role") == "user" and "kind" not in data:
-        # v0.1.1-9 had no user discriminator; summaries were indistinguishable
-        # from ordinary user messages on disk and historically reloaded as such.
-        data["kind"] = "user"
 
     # Handle content field which may contain base64-encoded binary blocks
     content = data.get("content")

@@ -440,9 +440,9 @@ def test_v01_idless_tool_history_upgrade_is_shared_by_subagent_metadata() -> Non
     )
 
 
-def test_pre_v019_history_adds_user_kind_and_assistant_id() -> None:
+def test_v01_history_adds_assistant_id() -> None:
     history: list[dict[str, object]] = [
-        {"role": "user", "content": "task"},
+        {"role": "user", "kind": "user", "content": "task"},
         {
             "role": "assistant",
             "content": "",
@@ -465,12 +465,18 @@ def test_pre_v019_history_adds_user_kind_and_assistant_id() -> None:
     assert call.tool_call_id == result.tool_call_id
 
 
-def test_pre_v010_user_history_upgrade_is_shared_by_subagent_metadata() -> None:
-    metadata = SubAgentMetadata.model_validate(
-        {"message_history": [[{"role": "user", "content": "task"}]], "run_metadata": {}}
-    )
-
-    assert type(metadata.message_history[0][0]) is UserMessage
+def test_untagged_user_cache_raises_informative_error() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Cannot load a cached user message without the required 'kind' discriminator",
+    ):
+        CacheState.from_dict(
+            {
+                "msgs": [{"role": "user", "content": "task"}],
+                "full_msg_history": [],
+                "task_hash": "legacy-task",
+            }
+        )
 
 
 @pytest.mark.parametrize(
