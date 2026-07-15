@@ -17,7 +17,7 @@ import filetype
 from moviepy import AudioFileClip, VideoFileClip
 from moviepy.video.fx import Resize
 from PIL import Image
-from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, model_validator
+from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, field_validator, model_validator
 
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
 
@@ -935,11 +935,16 @@ class AssistantMessage(BaseModel):
     item handle).
     """
     role: Literal["assistant"] = "assistant"
-    blocks: list[AssistantBlock] = Field(default_factory=list)
+    blocks: Sequence[AssistantBlock] = Field(default_factory=tuple, frozen=True)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     metadata: dict[str, Any] = Field(default_factory=dict)
     request_start_time: float | None = None
     request_end_time: float | None = None
+
+    @field_validator("blocks")
+    @classmethod
+    def _freeze_blocks(cls, blocks: Sequence[AssistantBlock]) -> tuple[AssistantBlock, ...]:
+        return tuple(blocks)
 
     @model_validator(mode="before")
     @classmethod
@@ -1049,11 +1054,11 @@ class AssistantMessage(BaseModel):
         replaced: list[AssistantBlock] = [block for block in self.blocks if not isinstance(block, TextBlock)]
         insert_at = next((i for i, block in enumerate(replaced) if isinstance(block, ToolCall)), len(replaced))
         replaced.insert(insert_at, TextBlock(text=text))
-        return self.model_copy(update={"blocks": replaced, "provider_response_id": None})
+        return self.model_copy(update={"blocks": tuple(replaced), "provider_response_id": None})
 
     def with_blocks(self, blocks: Sequence[AssistantBlock]) -> "AssistantMessage":
-        """Copy with ``blocks`` as the new block list; clears ``provider_response_id`` (see ``with_text``)."""
-        return self.model_copy(update={"blocks": list(blocks), "provider_response_id": None})
+        """Copy with ``blocks`` as a frozen sequence; clears ``provider_response_id`` (see ``with_text``)."""
+        return self.model_copy(update={"blocks": tuple(blocks), "provider_response_id": None})
 
     @property
     def e2e_otps(self) -> float | None:

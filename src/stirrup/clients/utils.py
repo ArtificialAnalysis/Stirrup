@@ -5,6 +5,7 @@ to the OpenAI API format. Since LiteLLM and the OpenAI SDK use identical
 formats, these utilities are shared between both client implementations.
 """
 
+from collections.abc import Sequence
 from typing import Any, assert_never
 
 from stirrup.core.models import (
@@ -118,7 +119,7 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
     return out
 
 
-def _assistant_content(blocks: list[AssistantBlock]) -> Content:
+def _assistant_content(blocks: Sequence[AssistantBlock]) -> Content:
     """Project answer/media blocks without using the deprecated message accessor."""
     media_types = ImageContentBlock | VideoContentBlock | AudioContentBlock
     if any(isinstance(block, media_types) for block in blocks):
@@ -131,7 +132,7 @@ def _assistant_content(blocks: list[AssistantBlock]) -> Content:
 
 
 def _validate_chat_assistant_blocks(
-    blocks: list[AssistantBlock],
+    blocks: Sequence[AssistantBlock],
     *,
     allow_tool_call_signatures: bool,
 ) -> None:

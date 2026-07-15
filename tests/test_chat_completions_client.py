@@ -63,11 +63,11 @@ class TestChatCompletionsParsing:
 
         result = await client.generate(messages=[UserMessage(content="Hi")], tools={})
 
-        assert result.blocks == [
+        assert result.blocks == (
             ReasoningBlock(content="Thinking..."),
             TextBlock(text="The answer"),
             ToolCall(tool_call_id="call_1", name="search", arguments='{"q": "x"}'),
-        ]
+        )
 
     async def test_tool_calls_only_turn_has_no_text_block(self) -> None:
         response = _mock_response(content=None, tool_calls=[_mock_tool_call("call_2", "lookup", "{}")])
@@ -75,7 +75,7 @@ class TestChatCompletionsParsing:
 
         result = await client.generate(messages=[UserMessage(content="Hi")], tools={})
 
-        assert result.blocks == [ToolCall(tool_call_id="call_2", name="lookup", arguments="{}")]
+        assert result.blocks == (ToolCall(tool_call_id="call_2", name="lookup", arguments="{}"),)
 
     async def test_idless_tool_call_gets_stable_internal_id_without_provider_provenance(self) -> None:
         response = _mock_response(content=None, tool_calls=[_mock_tool_call(None, "lookup", "{}")])
@@ -94,7 +94,7 @@ class TestChatCompletionsParsing:
 
         result = await client.generate(messages=[UserMessage(content="Hi")], tools={})
 
-        assert result.blocks == [TextBlock(text="plain answer")]
+        assert result.blocks == (TextBlock(text="plain answer"),)
 
     async def test_signed_tool_call_history_fails_before_direct_request(self) -> None:
         client = _client_with_response(_mock_response(content="unused"))

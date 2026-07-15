@@ -164,16 +164,16 @@ def test_legacy_channel_payload_synthesizes_blocks_in_channel_order() -> None:
 
 def test_flat_reasoning_splits_by_signature_presence() -> None:
     signed = AssistantMessage.model_validate({"content": "", "reasoning": {"signature": "sig", "content": "deep"}})
-    assert signed.blocks == [SignedReasoningBlock(signature="sig", content="deep")]
+    assert signed.blocks == (SignedReasoningBlock(signature="sig", content="deep"),)
 
     in_band = AssistantMessage.model_validate({"content": "", "reasoning": {"content": "deep"}})
-    assert in_band.blocks == [ReasoningBlock(content="deep")]
+    assert in_band.blocks == (ReasoningBlock(content="deep"),)
 
 
 def test_media_content_list_passes_through_in_place() -> None:
     image = _png_block()
     msg = AssistantMessage.model_validate({"content": ["before", image, "after"]})
-    assert msg.blocks == [TextBlock(text="before"), image, TextBlock(text="after")]
+    assert msg.blocks == (TextBlock(text="before"), image, TextBlock(text="after"))
 
 
 def test_empty_content_synthesizes_no_text_block() -> None:
@@ -204,16 +204,16 @@ def test_mixing_blocks_with_channel_fields_raises() -> None:
 def test_mixing_guard_ignores_empty_channel_values() -> None:
     # Empty values ("", [], {}) drop nothing — they don't conflict.
     msg = AssistantMessage.model_validate({"blocks": [{"kind": "text", "text": "x"}], "content": "", "tool_calls": []})
-    assert msg.blocks == [TextBlock(text="x")]
+    assert msg.blocks == (TextBlock(text="x"),)
     msg = AssistantMessage.model_validate({"blocks": [{"kind": "text", "text": "x"}], "content": [], "reasoning": {}})
-    assert msg.blocks == [TextBlock(text="x")]
+    assert msg.blocks == (TextBlock(text="x"),)
 
 
 def test_falsy_channel_reasoning_synthesizes_no_block() -> None:
     # v0.1 required Reasoning.content, so an empty dict was never a valid payload;
     # it must not turn into a spurious empty ReasoningBlock.
     msg = AssistantMessage.model_validate({"content": "hi", "reasoning": {}})
-    assert msg.blocks == [TextBlock(text="hi")]
+    assert msg.blocks == (TextBlock(text="hi"),)
 
 
 def test_malformed_channel_content_fails_validation() -> None:
@@ -296,7 +296,7 @@ def test_text_block_signature_round_trips_and_blocks_rewriting() -> None:
     block = TextBlock(text="provider-bound", signature="sig-1")
     message = AssistantMessage.model_validate(AssistantMessage(blocks=[block]).model_dump(mode="json"))
 
-    assert message.blocks == [block]
+    assert message.blocks == (block,)
     with pytest.raises(ValueError, match="Cannot replace signed text blocks"):
         message.with_text("rewritten")
 
@@ -317,6 +317,12 @@ def test_assistant_blocks_are_frozen_and_encrypted_summaries_are_deeply_immutabl
 
     encrypted = EncryptedReasoningBlock(id="rs_1", encrypted_content="opaque", summary=("one",))
     assert encrypted.summary == ("one",)
+
+    message = AssistantMessage(provider_response_id="resp_1", blocks=[TextBlock(text="original")])
+    assert isinstance(message.blocks, tuple)
+    with pytest.raises(ValidationError, match="Field is frozen"):
+        message.blocks = (TextBlock(text="edited"),)
+    assert message.provider_response_id == "resp_1"
 
 
 def test_with_blocks_replaces_block_list() -> None:
@@ -356,11 +362,11 @@ V01_DUMP: dict[str, Any] = {
 def test_v01_golden_dump_upgrades_to_blocks() -> None:
     msg = AssistantMessage.model_validate(V01_DUMP)
     assert msg.id == "abc123"
-    assert msg.blocks == [
+    assert msg.blocks == (
         SignedReasoningBlock(signature="sig", content="thought"),
         TextBlock(text="hello"),
         ToolCall(name="t", arguments="{}", tool_call_id="c1"),
-    ]
+    )
     # The block helpers expose the same information without the deprecated projections.
     assert joined_text(msg.blocks) == "hello"
     assert reasoning_blocks(msg.blocks) == [SignedReasoningBlock(signature="sig", content="thought")]
@@ -402,7 +408,7 @@ def test_tool_call_provider_id_provenance_round_trips() -> None:
     )
     restored = AssistantMessage.model_validate_json(AssistantMessage(blocks=[call]).model_dump_json())
 
-    assert restored.blocks == [call]
+    assert restored.blocks == (call,)
 
 
 def test_tool_call_normalizes_one_internal_id_and_preserves_provenance() -> None:
