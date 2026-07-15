@@ -476,7 +476,10 @@ class OpenResponsesClient(LLMClient):
             instructions: Default system-level instructions. Can be overridden by
                 SystemMessage in the messages list.
             kwargs: Additional arguments passed to responses.create(). Structural
-                request keys owned by this client are rejected.
+                request keys owned by this client are rejected. ``tools`` /
+                ``tool_choice`` and ``reasoning`` remain available for provider-native
+                configuration, but cannot be combined with the corresponding dedicated
+                ``generate(tools=...)`` or ``reasoning_effort`` configuration.
         """
         self._model = model
         self._max_tokens = max_tokens
@@ -553,6 +556,14 @@ class OpenResponsesClient(LLMClient):
         Raises:
             ContextOverflowError: If the response is incomplete due to token limits.
         """
+        conditional_keys: set[str] = set()
+        if tools:
+            conditional_keys.update(("tools", "tool_choice"))
+        if self._reasoning_effort:
+            conditional_keys.add("reasoning")
+        if conflicts := sorted(conditional_keys & self._kwargs.keys()):
+            raise ValueError(f"OpenResponsesClient kwargs keys {conflicts} conflict with dedicated call configuration")
+
         # ``encrypted_reasoning`` owns statefulness; kwargs cannot override ``store``.
         stateful = not self._encrypted_reasoning
 

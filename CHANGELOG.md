@@ -25,7 +25,7 @@ actual emission order. `blocks` is the only stored content; the channel-era
 | Assistant `metadata` sent on the wire by OpenAI-compatible replay | **removed** — metadata is integrator/user state, never transmitted | None (was undocumented leakage). |
 | OpenAI Responses replay of tool-call turns | wire change — when prior turns are replayed (stateless mode, or history predating the last stored response), items replay in true emission order (message/function_call/reasoning interleaved) instead of message-then-all-calls. In default stateful mode, turns at or before the last stored response are not replayed at all (see `previous_response_id` continuation under Added). | Intentional fidelity fix. Channel-constructed messages still replay in the old order. |
 | Unknown OpenAI Responses output item / message content types | **raise `NotImplementedError`** — v0.1 silently skipped them. Affects provider built-in tools enabled via kwargs (e.g. `web_search_call` items). Refusals are handled: their text surfaces as answer text. | Don't enable provider built-in tools on this client, or extend `_parse_response_output` with explicit passback semantics. |
-| `OpenResponsesClient` kwargs containing client-owned request keys (`background`, `conversation`, `input`, `instructions`, `max_output_tokens`, `model`, `previous_response_id`, `store`, or `stream`) | **raises `ValueError` at construction** — these keys otherwise bypass message-history and statefulness invariants | Use the client's dedicated arguments; use `encrypted_reasoning=True` for stateless / ZDR operation. |
+| `OpenResponsesClient` kwargs containing client-owned request keys (`background`, `conversation`, `input`, `instructions`, `max_output_tokens`, `model`, `previous_response_id`, `store`, or `stream`), or colliding with dedicated tool/reasoning configuration | **raises `ValueError`** — these keys otherwise bypass invariants or are silently overwritten | Use the client's dedicated arguments; use `encrypted_reasoning=True` for stateless / ZDR operation. Provider-native `tools` / `tool_choice` and `reasoning` kwargs remain valid when no dedicated configuration conflicts. |
 | OpenAI Responses tool results with non-string content | **raise `NotImplementedError`** instead of stringifying and corrupting multimodal content | Convert to a provider-supported string representation before constructing `ToolMessage`. |
 | LiteLLM replay of signed thinking | wire change — one `thinking_blocks` entry per signed block (was: merged single entry, first signature only) | Intentional fidelity fix for multi-block signed thinking. |
 
@@ -79,7 +79,9 @@ actual emission order. `blocks` is the only stored content; the channel-era
   summarization raises if the summarizer returns no text instead of replacing
   history with an empty summary.
 - v0.1 cache keys are tried as a fallback for losslessly projectable initial
-  assistant messages, then migrated to the v0.2 key on the next save.
+  assistant messages, then migrated to the v0.2 key on the next save. Uniform
+  legacy content encodings are exhaustive; mixed scalar/list encodings are
+  bounded to 256 combinations per historical schema to avoid exponential work.
 
 ## v0.1.12 (2026-07-08)
 

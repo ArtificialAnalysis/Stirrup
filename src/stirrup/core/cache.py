@@ -154,7 +154,12 @@ def _serialize_legacy_assistant(
 
 
 def compute_legacy_task_hashes(init_msgs: str | list[ChatMessage]) -> list[str]:
-    """Compute cache-key candidates for every cache-bearing v0.1 message schema."""
+    """Compute cache-key candidates for cache-bearing v0.1 message schemas.
+
+    Uniform scalar/list content encodings are always covered. Mixed encodings are
+    capped per schema to avoid exponential work, so unusually long histories with
+    ambiguous mixed encodings are recovered on a best-effort basis.
+    """
     if isinstance(init_msgs, str):
         return []
 

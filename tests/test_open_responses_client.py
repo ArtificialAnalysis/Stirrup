@@ -693,6 +693,56 @@ class TestOpenResponsesClient:
         with pytest.raises(ValueError, match="owns request keys"):
             OpenResponsesClient(model="gpt-4o", api_key="test-key", kwargs={key: value})
 
+    @pytest.mark.parametrize("key", ["tools", "tool_choice"])
+    async def test_tool_kwargs_conflict_with_dedicated_tools(self, key: str) -> None:
+        from stirrup.core.models import EmptyParams, Tool, ToolResult
+
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key", kwargs={key: object()})
+        tool = Tool[EmptyParams, None](
+            name="get_time",
+            description="Get current time",
+            executor=lambda _: ToolResult(content="12:00"),
+        )
+
+        with pytest.raises(ValueError, match=rf"{key}.*conflict"):
+            await client.generate(messages=[UserMessage(content="Hi")], tools={tool.name: tool})
+
+    async def test_reasoning_kwarg_conflicts_with_reasoning_effort(self) -> None:
+        client = OpenResponsesClient(
+            model="gpt-4o",
+            api_key="test-key",
+            reasoning_effort="medium",
+            kwargs={"reasoning": {"effort": "low"}},
+        )
+
+        with pytest.raises(ValueError, match=r"reasoning.*conflict"):
+            await client.generate(messages=[UserMessage(content="Hi")], tools={})
+
+    async def test_conditional_kwargs_without_dedicated_configuration_are_forwarded(self) -> None:
+        client = OpenResponsesClient(
+            model="gpt-4o",
+            api_key="test-key",
+            kwargs={
+                "tools": [{"type": "web_search_preview"}],
+                "tool_choice": "auto",
+                "reasoning": {"effort": "low"},
+            },
+        )
+        response = MagicMock(
+            id="resp_next",
+            status="completed",
+            output=[MagicMock(type="message", content=[MagicMock(type="output_text", text="ok")])],
+            usage=MagicMock(input_tokens=1, output_tokens=1, output_tokens_details=None),
+        )
+        create_mock = AsyncMock(return_value=response)
+        client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
+
+        await client.generate(messages=[UserMessage(content="Hi")], tools={})
+
+        assert create_mock.call_args.kwargs["tools"] == [{"type": "web_search_preview"}]
+        assert create_mock.call_args.kwargs["tool_choice"] == "auto"
+        assert create_mock.call_args.kwargs["reasoning"] == {"effort": "low"}
+
     @pytest.mark.parametrize(
         ("error_type", "status_code"),
         [(BadRequestError, 400), (NotFoundError, 404)],
