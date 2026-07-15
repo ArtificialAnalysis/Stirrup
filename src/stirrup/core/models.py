@@ -17,7 +17,16 @@ import filetype
 from moviepy import AudioFileClip, VideoFileClip
 from moviepy.video.fx import Resize
 from PIL import Image
-from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PlainSerializer,
+    PlainValidator,
+    TypeAdapter,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
 
@@ -948,6 +957,10 @@ class AssistantMessage(BaseModel):
     @classmethod
     def _freeze_blocks(cls, blocks: Sequence[AssistantBlock]) -> tuple[AssistantBlock, ...]:
         return tuple(blocks)
+
+    @field_serializer("blocks")
+    def _serialize_blocks(self, blocks: Sequence[AssistantBlock]) -> list[AssistantBlock]:
+        return list(blocks)
 
     @staticmethod
     def _prepare_copy_update(

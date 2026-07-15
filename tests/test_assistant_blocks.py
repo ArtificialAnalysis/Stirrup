@@ -320,6 +320,7 @@ def test_assistant_blocks_are_frozen_and_encrypted_summaries_are_deeply_immutabl
 
     message = AssistantMessage(provider_response_id="resp_1", blocks=[TextBlock(text="original")])
     assert isinstance(message.blocks, tuple)
+    assert isinstance(message.model_dump()["blocks"], list)
     with pytest.raises(ValidationError, match="Field is frozen"):
         message.blocks = (TextBlock(text="edited"),)
     assert message.provider_response_id == "resp_1"
