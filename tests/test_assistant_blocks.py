@@ -305,9 +305,8 @@ def test_block_models_are_frozen_but_containers_are_lists() -> None:
     message = AssistantMessage(blocks=[encrypted])
 
     assert isinstance(message.blocks, list)
+    assert encrypted.model_config.get("frozen") is True
     assert encrypted.summary == ["one"]
-    with pytest.raises(ValidationError, match="frozen"):
-        encrypted.encrypted_content = "changed"
 
 
 def test_with_blocks_replaces_block_list() -> None:
