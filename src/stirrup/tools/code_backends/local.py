@@ -12,6 +12,7 @@ from pathlib import Path
 
 import anyio
 
+from stirrup.constants import MAX_IMAGE_BYTES, RESOLUTION_1MP
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
 
 from .base import (
@@ -63,6 +64,8 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         temp_base_dir: Path | str | None = None,
         description: str | None = None,
         shell_timeout: int = SHELL_TIMEOUT,
+        max_image_pixels: int | None = RESOLUTION_1MP,
+        max_image_bytes: int | None = MAX_IMAGE_BYTES,
     ) -> None:
         """Initialize LocalCodeExecToolProvider configuration.
 
@@ -77,9 +80,16 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
                 ``code_exec`` invocation, and the default for direct
                 ``run_command`` calls that pass ``timeout=None``. Defaults to
                 ``SHELL_TIMEOUT``.
+            max_image_pixels: Maximum pixel count for ``view_image`` results.
+            max_image_bytes: Maximum encoded byte size for ``view_image`` results.
 
         """
-        super().__init__(allowed_commands=allowed_commands, shell_timeout=shell_timeout)
+        super().__init__(
+            allowed_commands=allowed_commands,
+            shell_timeout=shell_timeout,
+            max_image_pixels=max_image_pixels,
+            max_image_bytes=max_image_bytes,
+        )
         self._temp_dir: Path | None = None
         self._temp_base_dir: Path | None = Path(temp_base_dir) if temp_base_dir else None
         self._description = (

@@ -7,6 +7,15 @@ from stirrup.tools.code_backends.base import CodeExecToolProvider, ViewImagePara
 class ViewImageToolProvider(ToolProvider):
     """Tool provider for viewing images from an execution environment.
 
+    Images returned by ``view_image`` are resized and compressed according to the
+    execution environment's ``max_image_pixels`` and ``max_image_bytes`` settings
+    (defaults: :data:`~stirrup.constants.RESOLUTION_1MP` and
+    :data:`~stirrup.constants.MAX_IMAGE_BYTES`). Configure these on the
+    ``CodeExecToolProvider`` instance (for example ``LocalCodeExecToolProvider``).
+
+    The agent also bounds how many image blocks stay in active LLM context via
+    ``max_images_in_context`` (default: :data:`~stirrup.constants.MAX_IMAGES_IN_CONTEXT`).
+
     Can be used with an explicit exec_env or will auto-detect from the
     Agent's session state. Works regardless of tool ordering in the Agent.
 

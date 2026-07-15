@@ -19,7 +19,12 @@ from moviepy.video.fx import Resize
 from PIL import Image
 from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, model_validator
 
-from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
+from stirrup.constants import (
+    DEFAULT_IMAGE_JPEG_QUALITY,
+    MAX_IMAGE_BYTES,
+    RESOLUTION_1MP,
+    RESOLUTION_480P,
+)
 
 __all__ = [
     "Addable",
@@ -46,6 +51,7 @@ __all__ = [
     "UserMessage",
     "VideoContentBlock",
     "aggregate_metadata",
+    "prepare_image_bytes",
 ]
 
 
@@ -76,6 +82,77 @@ def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple
     s = 1.0 if max_pixels is None or w * h <= max_pixels else sqrt(max_pixels / (w * h))
     nw, nh = int(w * s) // 2 * 2, int(h * s) // 2 * 2
     return max(nw, 2), max(nh, 2)
+
+
+def prepare_image_bytes(
+    data: bytes,
+    *,
+    max_pixels: int | None = RESOLUTION_1MP,
+    max_bytes: int | None = MAX_IMAGE_BYTES,
+    jpeg_quality: int = DEFAULT_IMAGE_JPEG_QUALITY,
+) -> bytes:
+    """Resize and compress image bytes before storing them in agent context.
+
+    Images that already fit within ``max_pixels`` and ``max_bytes`` are returned unchanged.
+    Larger images are downscaled to ``max_pixels`` (when set) and re-encoded as JPEG.
+    When quality reduction alone cannot satisfy ``max_bytes``, dimensions are reduced
+    further (down to a 2x2 lower bound) until the byte budget is met or no further
+    reduction is possible.
+
+    Args:
+        data: Raw image file bytes.
+        max_pixels: Maximum pixel count (width * height). ``None`` disables pixel limits.
+        max_bytes: Maximum encoded byte size. ``None`` disables byte limits.
+        jpeg_quality: Starting JPEG quality used when re-encoding oversized images.
+
+    Returns:
+        Image bytes suitable for ``ImageContentBlock`` storage and LLM context.
+    """
+    min_dimension = 2
+
+    with Image.open(BytesIO(data)) as img:
+        width, height = img.size
+        needs_resize = max_pixels is not None and width * height > max_pixels
+        needs_compress = max_bytes is not None and len(data) > max_bytes
+        if not needs_resize and not needs_compress:
+            return data
+
+        working = img.copy()
+        if needs_resize and max_pixels is not None:
+            target_w, target_h = downscale_image(width, height, max_pixels)
+            working.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+
+        if working.mode != "RGB":
+            working = working.convert("RGB")
+
+        if max_bytes is None:
+            buf = BytesIO()
+            working.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+            return buf.getvalue()
+
+        quality = jpeg_quality
+        while True:
+            buf = BytesIO()
+            working.save(buf, format="JPEG", quality=quality, optimize=True)
+            result = buf.getvalue()
+            if len(result) <= max_bytes:
+                return result
+
+            if quality > 30:
+                quality -= 10
+                continue
+
+            current_w, current_h = working.size
+            if current_w <= min_dimension or current_h <= min_dimension:
+                return result
+
+            new_w = max(min_dimension, current_w // 2)
+            new_h = max(min_dimension, current_h // 2)
+            if (new_w, new_h) == (current_w, current_h):
+                return result
+
+            working = working.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            quality = jpeg_quality
 
 
 # Content
@@ -115,7 +192,11 @@ class BinaryContentBlock(BaseModel, ABC):
 
 
 class ImageContentBlock(BinaryContentBlock):
-    """Image content supporting PNG, JPEG, WebP, PSD formats with automatic downscaling."""
+    """Image content supporting PNG, JPEG, WebP, PSD formats with automatic downscaling.
+
+    Use :func:`prepare_image_bytes` before constructing blocks from large files (for example
+    via ``view_image``) so stored bytes stay within configured pixel and byte budgets.
+    """
 
     kind: Literal["image_content_block"] = "image_content_block"
     allowed_mime_types: ClassVar[set[str]] = {

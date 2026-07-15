@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 from stirrup.constants import (
     AGENT_MAX_TURNS,
     CONTEXT_SUMMARIZATION_CUTOFF,
+    MAX_IMAGES_IN_CONTEXT,
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
@@ -123,6 +124,37 @@ def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[
                     raise NotImplementedError(f"Unsupported content block: {type(block)}")
 
     return tool_messages, user_messages
+
+
+_IMAGE_PRUNED_PLACEHOLDER = "[Earlier image removed from context to reduce token usage.]"
+
+
+def _prune_excess_image_blocks(messages: list[ChatMessage], max_images: int | None) -> None:
+    """Replace oldest image blocks with text when more than ``max_images`` are present.
+
+    Mutates message content in place so repeated ``view_image`` calls do not grow
+    LLM context without bound. ``None`` disables pruning.
+    """
+    if max_images is None:
+        return
+
+    image_locations: list[tuple[int, int]] = []
+    for msg_idx, message in enumerate(messages):
+        content = message.content
+        if not isinstance(content, list):
+            continue
+        for block_idx, block in enumerate(content):
+            if isinstance(block, ImageContentBlock):
+                image_locations.append((msg_idx, block_idx))
+
+    excess = len(image_locations) - max_images
+    if excess <= 0:
+        return
+
+    for msg_idx, block_idx in image_locations[:excess]:
+        message = messages[msg_idx]
+        if isinstance(message.content, list):
+            message.content[block_idx] = _IMAGE_PRUNED_PLACEHOLDER
 
 
 def _normalize_finish_tools[FinishParams: BaseModel, FinishMeta](
@@ -277,6 +309,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
         recover_from_context_overflow: bool = ...,
+        max_images_in_context: int | None = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -297,6 +330,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
         recover_from_context_overflow: bool = ...,
+        max_images_in_context: int | None = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -317,6 +351,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
         recover_from_context_overflow: bool = ...,
+        max_images_in_context: int | None = ...,
         share_parent_exec_env: bool = ...,
         logger: AgentLoggerBase | None = ...,
     ) -> None: ...
@@ -337,6 +372,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         text_only_tool_responses: bool = True,
         block_successive_assistant_messages: bool = True,
         recover_from_context_overflow: bool = True,
+        max_images_in_context: int | None = MAX_IMAGES_IN_CONTEXT,
         # Subagent options
         share_parent_exec_env: bool = False,
         # Logging
@@ -366,6 +402,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             recover_from_context_overflow: If True (default), drop one completed turn and retry when
                                            the model reports a context overflow. If the original
                                            prompt still overflows, the context error is raised.
+            max_images_in_context: Maximum number of image blocks to keep in active LLM context.
+                                   Older images are replaced with a short text placeholder before
+                                   each model call. ``None`` disables this limit.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -382,6 +421,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 "(alphanumeric, underscores, hyphens only, 1-128 characters)."
             )
 
+        if max_images_in_context is not None and max_images_in_context < 0:
+            raise ValueError("max_images_in_context must be non-negative or None")
+
         self._client: LLMClient = client
         self._name = name
         self._max_turns = max_turns
@@ -394,6 +436,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._text_only_tool_responses = text_only_tool_responses
         self._block_successive_assistant_messages = block_successive_assistant_messages
         self._recover_from_context_overflow = recover_from_context_overflow
+        self._max_images_in_context = max_images_in_context
         self._share_parent_exec_env = share_parent_exec_env
 
         # Logger (can be passed in or created here)
@@ -1216,6 +1259,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         Returns the assistant message, tool execution results, and finish tool call (if present).
 
         """
+        _prune_excess_image_blocks(messages, self._max_images_in_context)
         assistant_message = await self._client.generate(messages, self._active_tools)
 
         # Log assistant message immediately
@@ -1279,6 +1323,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 )
 
                 summary_prompt = [*current_messages, UserMessage(content=MESSAGE_SUMMARIZER)]
+                _prune_excess_image_blocks(summary_prompt, self._max_images_in_context)
 
                 # Give the summarizer the active tools so it can interpret prior tool calls/results.
                 summary = await self._client.generate(summary_prompt, self._active_tools)

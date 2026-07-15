@@ -38,4 +38,29 @@ async with agent.session() as session:
 1. The `ViewImageToolProvider` is initialized with an optional `exec_env` parameter
 2. If not provided, it automatically detects the execution environment from the session
 3. The `view_image` tool reads image files from the execution environment
-4. Images are returned as `ImageContentBlock` objects for the model to see
+4. Images are resized/compressed to fit configured byte and pixel budgets, then returned as `ImageContentBlock` objects for the model to see
+5. The agent keeps only the most recent `max_images_in_context` image blocks in active LLM context; older images are replaced with a short text placeholder
+
+## Configuration
+
+Image size limits are set on the code execution provider:
+
+```python
+from stirrup.tools import LocalCodeExecToolProvider, ViewImageToolProvider
+
+exec_env = LocalCodeExecToolProvider(
+    max_image_pixels=1_000_000,  # default: RESOLUTION_1MP
+    max_image_bytes=500_000,       # default: MAX_IMAGE_BYTES
+)
+```
+
+Bound how many images remain in context on the agent:
+
+```python
+agent = Agent(
+    client=client,
+    name="image_viewer",
+    max_images_in_context=5,  # default; pass None to disable
+    tools=[exec_env, ViewImageToolProvider()],
+)
+```

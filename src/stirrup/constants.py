@@ -26,6 +26,11 @@ TURNS_REMAINING_WARNING_THRESHOLD = 20
 RESOLUTION_1MP = 1_000_000  # 1 megapixel - default max resolution for images
 RESOLUTION_480P = 640 * 480  # 480p video resolution
 
+# Image context budget (view_image and other ImageContentBlock ingestion)
+MAX_IMAGE_BYTES = 500_000  # Max stored bytes per image after resize/compression
+DEFAULT_IMAGE_JPEG_QUALITY = 85  # Initial JPEG quality when compressing large images
+MAX_IMAGES_IN_CONTEXT = 5  # Max image blocks retained in active LLM context; older ones are replaced with text
+
 # Code execution
 SANDBOX_TIMEOUT = 60 * 10  # 10 minutes
 SANDBOX_REQUEST_TIMEOUT = 60 * 3  # 3 minutes

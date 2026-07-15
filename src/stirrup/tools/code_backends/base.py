@@ -9,7 +9,15 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field
 
-from stirrup.core.models import ImageContentBlock, Tool, ToolProvider, ToolResult, ToolUseCountMetadata
+from stirrup.constants import MAX_IMAGE_BYTES, RESOLUTION_1MP
+from stirrup.core.models import (
+    ImageContentBlock,
+    Tool,
+    ToolProvider,
+    ToolResult,
+    ToolUseCountMetadata,
+    prepare_image_bytes,
+)
 from stirrup.utils.text import truncate_msg
 
 logger = logging.getLogger(__name__)
@@ -151,6 +159,8 @@ class CodeExecToolProvider(ToolProvider, ABC):
         *,
         allowed_commands: list[str] | None = None,
         shell_timeout: int = SHELL_TIMEOUT,
+        max_image_pixels: int | None = RESOLUTION_1MP,
+        max_image_bytes: int | None = MAX_IMAGE_BYTES,
     ) -> None:
         """Initialize execution environment with optional command allowlist.
 
@@ -163,10 +173,16 @@ class CodeExecToolProvider(ToolProvider, ABC):
                            to ``SHELL_TIMEOUT``. Callers should set this to match
                            their application's expected long-running-command
                            budget rather than rely on the stirrup default.
+            max_image_pixels: Maximum pixel count (width * height) for images returned
+                              by ``view_image``. ``None`` disables pixel limits.
+            max_image_bytes: Maximum encoded byte size for images returned by
+                             ``view_image``. ``None`` disables byte limits.
 
         """
         self._allowed_commands = allowed_commands
         self._shell_timeout = shell_timeout
+        self._max_image_pixels = max_image_pixels
+        self._max_image_bytes = max_image_bytes
         self._compiled_allowed: list[re.Pattern[str]] | None = None
         if allowed_commands is not None:
             self._compiled_allowed = [re.compile(p) for p in allowed_commands]
@@ -508,10 +524,18 @@ class CodeExecToolProvider(ToolProvider, ABC):
 
         """
         env = self
+        max_image_pixels = self._max_image_pixels
+        max_image_bytes = self._max_image_bytes
 
         async def executor(params: ViewImageParams) -> ToolResult[ToolUseCountMetadata]:
             try:
                 image = await env.view_image(params.path)
+                normalized_data = prepare_image_bytes(
+                    image.data,
+                    max_pixels=max_image_pixels,
+                    max_bytes=max_image_bytes,
+                )
+                image = ImageContentBlock(data=normalized_data)
                 return ToolResult(
                     content=["Viewing image at path: " + params.path, image],
                     metadata=ToolUseCountMetadata(),
