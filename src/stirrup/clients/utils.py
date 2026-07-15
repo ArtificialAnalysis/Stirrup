@@ -176,7 +176,7 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
             if tool_calls:
                 msg["tool_calls"] = []
                 for tool in tool_calls:
-                    tool_dict = tool.model_dump(exclude={"kind"})
+                    tool_dict = tool.model_dump(exclude={"has_provider_tool_call_id", "kind"})
                     tool_dict["id"] = tool.tool_call_id
                     tool_dict["type"] = "function"
                     if tool.signature is not None:

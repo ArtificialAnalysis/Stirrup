@@ -631,6 +631,12 @@ class ToolCall(BaseModel, frozen=True):
     name: str
     arguments: str
     tool_call_id: str | None = None
+    has_provider_tool_call_id: bool = True
+    """Whether ``tool_call_id`` was present on the provider's original block.
+
+    A client may synthesize ``tool_call_id`` for internal call/result matching
+    while retaining that it must be omitted from provider-attached passback.
+    """
 
 
 class SystemMessage(BaseModel):
@@ -928,9 +934,8 @@ class AssistantMessage(BaseModel):
         tool_calls = upgraded.pop("tool_calls", None)
 
         if "blocks" in upgraded:
-            # Truthiness on purpose: empty values ("", [], {}) carry no data, so they
-            # don't conflict with blocks and are dropped without loss.
-            if content or reasoning or tool_calls:
+            content_has_payload = content is not None and content != "" and content != []
+            if content_has_payload or reasoning or tool_calls:
                 raise ValueError(
                     "AssistantMessage cannot mix 'blocks' with channel fields "
                     "(content/reasoning/tool_calls); channel data would be silently dropped. "

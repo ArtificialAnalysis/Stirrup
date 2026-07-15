@@ -196,6 +196,8 @@ def test_mixing_blocks_with_channel_fields_raises() -> None:
         AssistantMessage.model_validate({"blocks": [], "tool_calls": [{"name": "t", "arguments": "{}"}]})
     with pytest.raises(ValidationError, match="cannot mix"):
         AssistantMessage.model_validate({"blocks": [], "reasoning": {"content": "r"}})
+    with pytest.raises(ValidationError, match="cannot mix"):
+        AssistantMessage.model_validate({"blocks": [], "content": {}})
 
 
 def test_mixing_guard_ignores_empty_channel_values() -> None:
@@ -388,6 +390,18 @@ def test_v02_dump_emits_blocks_only() -> None:
         "tool_call",
         "text",
     ]
+
+
+def test_tool_call_provider_id_provenance_round_trips() -> None:
+    call = ToolCall(
+        name="t",
+        arguments="{}",
+        tool_call_id="internal-call-id",
+        has_provider_tool_call_id=False,
+    )
+    restored = AssistantMessage.model_validate_json(AssistantMessage(blocks=[call]).model_dump_json())
+
+    assert restored.blocks == [call]
 
 
 @pytest.mark.parametrize(
