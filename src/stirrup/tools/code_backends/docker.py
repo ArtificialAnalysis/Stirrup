@@ -595,14 +595,8 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         container = self._container  # Capture for lambda type narrowing
 
         # Check allowlist
-        if not self._check_allowed(cmd):
-            return CommandResult(
-                exit_code=1,
-                stdout="",
-                stderr=f"Command not allowed: '{cmd}' does not match any allowed patterns",
-                error_kind="command_not_allowed",
-                advice="Only commands matching the allowlist patterns are permitted.",
-            )
+        if (rejection := self._allowlist_rejection(cmd)) is not None:
+            return rejection
 
         # Enforce the timeout inside the container via coreutils `timeout(1)`.
         # It runs the command in its own process group and sends SIGKILL to the

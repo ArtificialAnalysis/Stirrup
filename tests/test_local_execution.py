@@ -148,9 +148,12 @@ class TestLocalCodeExecToolProvider:
         ("allowed_pattern", "command"),
         [
             (r".*", "MODE=test echo allowed"),
+            (r".*", "MODE+=test echo allowed"),
             (r"^echo", "echo=x touch forbidden.txt"),
             (r"^echo", "echo[0]=x touch forbidden.txt"),
             (r"^echo", "echo[1 + 1]=x touch forbidden.txt"),
+            (r"^echo", "echo <(printf bypassed)"),
+            (r"^echo", "echo >(printf bypassed)"),
             (r"^echo", "echo allowed && printf bypassed"),
             (r"^echo", "echo allowed || printf bypassed"),
             (r"^echo", "echo allowed | cat"),
@@ -201,6 +204,79 @@ class TestLocalCodeExecToolProvider:
 
         assert result.error_kind == "command_not_allowed"
         assert side_effect_exists is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "(touch forbidden.txt)",
+            "time touch forbidden.txt",
+            "coproc touch forbidden.txt",
+            "! touch forbidden.txt",
+        ],
+    )
+    async def test_run_command_allowlist_blocks_command_prefixes_and_grouping(
+        self,
+        command: str,
+    ) -> None:
+        # A permissive pattern still must not let a subshell or a command-prefixing
+        # keyword run a command other than the vetted first word.
+        provider = LocalCodeExecToolProvider(allowed_commands=[r".*"])
+
+        async with provider:
+            result = await provider.run_command(command)
+            side_effect_exists = await provider.file_exists("forbidden.txt")
+
+        assert result.error_kind == "command_not_allowed"
+        assert side_effect_exists is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo 'a; touch forbidden.txt",
+            'echo "a; touch forbidden.txt',
+            r"echo $'a; touch forbidden.txt",
+        ],
+    )
+    async def test_run_command_allowlist_rejects_unterminated_quotes(
+        self,
+        command: str,
+    ) -> None:
+        # An unterminated quote hides later metacharacters from the scanner, so it
+        # must fail closed rather than rely on Bash to reject it downstream.
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
+
+        async with provider:
+            result = await provider.run_command(command)
+            side_effect_exists = await provider.file_exists("forbidden.txt")
+
+        assert result.error_kind == "command_not_allowed"
+        assert side_effect_exists is False
+
+    async def test_run_command_allowlist_anchors_patterns_at_start(self) -> None:
+        # Patterns match from the start of the command, so an unanchored pattern
+        # must not match a command that merely contains it as a substring.
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"echo"])
+
+        async with provider:
+            result = await provider.run_command("xecho allowed")
+
+        assert result.error_kind == "command_not_allowed"
+
+    async def test_run_command_allowlist_rejection_reason_explains_shell_syntax(self) -> None:
+        # A command that matches the pattern but is rejected for shell syntax must
+        # say so, not claim it failed to match a pattern.
+        provider = LocalCodeExecToolProvider(allowed_commands=[r".*"])
+
+        async with provider:
+            syntax_result = await provider.run_command("echo allowed && printf bypassed")
+            assignment_result = await provider.run_command("MODE=test echo allowed")
+
+        assert syntax_result.error_kind == "command_not_allowed"
+        assert syntax_result.advice is not None
+        assert "shell control syntax" in syntax_result.advice
+        assert assignment_result.error_kind == "command_not_allowed"
+        assert assignment_result.advice is not None
+        assert "assignment" in assignment_result.advice
 
     @pytest.mark.parametrize(
         ("command", "expected_stdout"),

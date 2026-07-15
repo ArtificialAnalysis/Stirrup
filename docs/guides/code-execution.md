@@ -64,19 +64,32 @@ provider = LocalCodeExecToolProvider(
 )
 ```
 
-When `allowed_commands` is configured, each invocation must be one simple shell
-command. Regex patterns match from the start of the command, and the command is
-rejected if it contains:
+The `allowed_commands` allowlist is enforced identically by every backend
+(`LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`, and
+`E2BCodeExecToolProvider`); the rules below apply to all of them.
 
-- control syntax such as separators, pipes, redirects, or newlines
-- command, parameter, or legacy `$[...]` arithmetic expansions
+When `allowed_commands` is configured, each invocation must be one simple shell
+command. Regex patterns are anchored at the start of the command but not at the
+end, so `ls` also allows `lsblk`; use `\Z` or a fuller pattern such as
+`git(\s.*)?\Z` to pin the command word. A command is rejected if it contains:
+
+- control syntax such as separators, pipes, redirects, subshells, or newlines
+- a leading shell keyword such as `time`, `coproc`, or `!`
+- command substitution, arithmetic expansion (both `$((...))` and legacy
+  `$[...]`), or parameter expansion such as `$VAR` and `${VAR}`
 - a leading shell assignment such as `MODE=test command`
 
-Quoted and escaped characters remain ordinary arguments, so `echo 'a;b'` and
-`echo \$NAME` are allowed when `echo` is allowlisted. Commands such as `env`,
-`sh`, and `bash` must themselves be allowlisted; doing so also delegates control
-of the commands they launch. Use an allowlisted script when environment setup is
+Single-quoted and backslash-escaped characters remain ordinary arguments, so
+`echo 'a;b'` and `echo \$NAME` are allowed when `echo` is allowlisted.
+Expansions are rejected even inside double quotes (`echo "$HOME"` is blocked),
+matching how Bash would still expand them. Commands such as `env`, `sh`, and
+`bash` must themselves be allowlisted; doing so also delegates control of the
+commands they launch. Use an allowlisted script when environment setup is
 needed. Setting `allowed_commands=None` allows unrestricted Bash syntax.
+
+> **Note:** because patterns are start-anchored, a pattern like `python` no
+> longer matches `python` appearing later in the command. Adjust existing
+> patterns that relied on substring matching.
 
 ## DockerCodeExecToolProvider
 

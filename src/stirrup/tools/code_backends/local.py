@@ -295,14 +295,8 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
             timeout = self._shell_timeout
 
         # Check allowlist
-        if not self._check_allowed(cmd):
-            return CommandResult(
-                exit_code=1,
-                stdout="",
-                stderr=f"Command not allowed: '{cmd}' does not match any allowed patterns",
-                error_kind="command_not_allowed",
-                advice="Only commands matching the allowlist patterns are permitted.",
-            )
+        if (rejection := self._allowlist_rejection(cmd)) is not None:
+            return rejection
 
         # Check for absolute paths (local environment is not sandboxed)
         absolute_path_error = self._check_absolute_paths(cmd)
