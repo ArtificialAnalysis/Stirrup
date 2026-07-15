@@ -401,7 +401,7 @@ def _parse_response_output(
                         EncryptedReasoningBlock(
                             id=item_id,
                             encrypted_content=encrypted_content,
-                            summary=tuple(summary_parts),
+                            summary=summary_parts,
                         )
                     )
                 elif item_id:

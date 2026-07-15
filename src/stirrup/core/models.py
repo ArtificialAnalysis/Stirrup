@@ -1,10 +1,9 @@
 import base64
-import json
 import mimetypes
 import warnings
 from abc import ABC, abstractmethod
 from base64 import b64encode
-from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -12,7 +11,7 @@ from math import isinf, isnan, sqrt
 from tempfile import NamedTemporaryFile
 from types import TracebackType
 from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, overload, runtime_checkable
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 import filetype
 from moviepy import AudioFileClip, VideoFileClip
@@ -23,9 +22,6 @@ from pydantic import (
     Field,
     PlainSerializer,
     PlainValidator,
-    TypeAdapter,
-    field_serializer,
-    field_validator,
     model_validator,
 )
 
@@ -800,7 +796,7 @@ class EncryptedReasoningBlock(BaseModel, frozen=True):
     kind: Literal["encrypted_reasoning"] = "encrypted_reasoning"
     id: str
     encrypted_content: str
-    summary: tuple[str, ...] = ()
+    summary: list[str] = Field(default_factory=list)
     """Summary parts, when the provider surfaces them; kept split for faithful echo."""
 
     @property
@@ -855,9 +851,6 @@ type AssistantBlock = Annotated[
 ]
 """One block of an assistant turn, discriminated on ``kind``."""
 
-_ASSISTANT_BLOCKS_ADAPTER = TypeAdapter(list[AssistantBlock])
-type _CopyFilter = Set[int] | Set[str] | Mapping[int, Any] | Mapping[str, Any]
-
 _REASONING_SUMMARY_SEPARATOR = "\n"
 
 type _MediaBlock = ImageContentBlock | VideoContentBlock | AudioContentBlock
@@ -909,11 +902,6 @@ def _reasoning_to_block(reasoning: object) -> object:
     return ReasoningBlock(content=content if isinstance(content, str) else "")
 
 
-_CHANNEL_ASSIGNMENT_ERROR = (
-    "AssistantMessage.{channel} is a read-only projection of blocks; "
-    "use with_blocks() or construct a new message. "
-    "See the v0.2 migration guide (CHANGELOG.md, BREAKING)."
-)
 _CHANNEL_PROJECTION_DEPRECATION = (
     "AssistantMessage.{channel} is deprecated; {replacement}. "
     "The compatibility projection will be removed in a future release."
@@ -926,6 +914,37 @@ def _warn_channel_projection(channel: str, replacement: str) -> None:
         DeprecationWarning,
         stacklevel=3,
     )
+
+
+def _upgrade_legacy_assistant_message(data: object) -> object:
+    """Read a serialized v0.1 assistant message into canonical blocks."""
+    if not isinstance(data, dict):
+        return data
+    upgraded = dict(data)
+    content = upgraded.pop("content", None)
+    reasoning = upgraded.pop("reasoning", None)
+    tool_calls = upgraded.pop("tool_calls", None)
+
+    if "blocks" in upgraded:
+        if content not in (None, "", []) or reasoning or tool_calls:
+            raise ValueError("AssistantMessage cannot mix 'blocks' with legacy channels")
+        return upgraded
+
+    blocks: list[object] = []
+    if reasoning:
+        blocks.append(_reasoning_to_block(reasoning))
+    if isinstance(content, str):
+        if content:
+            blocks.append(TextBlock(text=content))
+    elif isinstance(content, list):
+        blocks.extend(TextBlock(text=item) if isinstance(item, str) else item for item in content if item != "")
+    elif content is not None:
+        raise ValueError(f"AssistantMessage 'content' must be a string or list, got {type(content).__name__}")
+    if tool_calls is not None and not isinstance(tool_calls, list | tuple):
+        raise ValueError("AssistantMessage 'tool_calls' must be a sequence")
+    blocks.extend({**call, "kind": "tool_call"} if isinstance(call, dict) else call for call in tool_calls or [])
+    upgraded["blocks"] = blocks
+    return upgraded
 
 
 class AssistantMessage(BaseModel):
@@ -949,101 +968,16 @@ class AssistantMessage(BaseModel):
     item handle).
     """
     role: Literal["assistant"] = "assistant"
-    blocks: Sequence[AssistantBlock] = Field(default_factory=tuple, frozen=True)
+    blocks: list[AssistantBlock] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     metadata: dict[str, Any] = Field(default_factory=dict)
     request_start_time: float | None = None
     request_end_time: float | None = None
 
-    @field_validator("blocks")
-    @classmethod
-    def _freeze_blocks(cls, blocks: Sequence[AssistantBlock]) -> tuple[AssistantBlock, ...]:
-        return tuple(blocks)
-
-    @field_serializer("blocks")
-    def _serialize_blocks(self, blocks: Sequence[AssistantBlock]) -> list[AssistantBlock]:
-        return list(blocks)
-
-    @staticmethod
-    def _prepare_copy_update(
-        update: Mapping[str, Any] | None,
-        *,
-        clear_continuation: bool = False,
-    ) -> dict[str, Any] | None:
-        if update is None:
-            return {"provider_response_id": None} if clear_continuation else None
-        if "blocks" in update:
-            return {
-                **update,
-                "blocks": tuple(_ASSISTANT_BLOCKS_ADAPTER.validate_python(update["blocks"])),
-                "provider_response_id": None,
-            }
-        return {**update, "provider_response_id": None} if clear_continuation else dict(update)
-
-    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
-        """Copy safely when replacing blocks, which Pydantic otherwise leaves unvalidated."""
-        return super().model_copy(update=self._prepare_copy_update(update), deep=deep)
-
-    def copy(
-        self,
-        *,
-        include: _CopyFilter | None = None,
-        exclude: _CopyFilter | None = None,
-        update: dict[str, Any] | None = None,
-        deep: bool = False,
-    ) -> Self:
-        """Keep the deprecated Pydantic copy path from bypassing block invariants."""
-        return super().copy(  # ty: ignore[deprecated]
-            include=include,
-            exclude=exclude,
-            update=self._prepare_copy_update(update, clear_continuation=include is not None or exclude is not None),
-            deep=deep,
-        )
-
     @model_validator(mode="before")
     @classmethod
     def _upgrade_channel_fields(cls, data: object) -> object:
-        """Convert serialized v0.1 channel payloads into blocks.
-
-        Channel-shaped payloads carry no ordering, so blocks are synthesized in
-        the order flat messages have always been replayed: reasoning → text →
-        tool calls.
-        """
-        if not isinstance(data, dict):
-            return data
-        upgraded = dict(data)
-        content = upgraded.pop("content", None)
-        reasoning = upgraded.pop("reasoning", None)
-        tool_calls = upgraded.pop("tool_calls", None)
-
-        if "blocks" in upgraded:
-            content_has_payload = content is not None and content != "" and content != []
-            if content_has_payload or reasoning or tool_calls:
-                raise ValueError(
-                    "AssistantMessage cannot mix 'blocks' with channel fields "
-                    "(content/reasoning/tool_calls); channel data would be silently dropped. "
-                    "Pass one representation. See the v0.2 migration guide (CHANGELOG.md, BREAKING)."
-                )
-            return upgraded
-
-        blocks: list[object] = []
-        if reasoning:
-            blocks.append(_reasoning_to_block(reasoning))
-        if isinstance(content, str):
-            if content:
-                blocks.append(TextBlock(text=content))
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, str):
-                    if item:
-                        blocks.append(TextBlock(text=item))
-                else:
-                    blocks.append(item)  # media blocks already carry their kind discriminator
-        elif content is not None:
-            raise ValueError(f"AssistantMessage 'content' must be a string or list, got {type(content).__name__}")
-        blocks.extend({**tc, "kind": "tool_call"} if isinstance(tc, dict) else tc for tc in tool_calls or [])
-        upgraded["blocks"] = blocks
-        return upgraded
+        return _upgrade_legacy_assistant_message(data)
 
     # Channel-era projections — read-only, derived from blocks.
     @property
@@ -1090,21 +1024,9 @@ class AssistantMessage(BaseModel):
         _warn_channel_projection("tool_calls", "use tool_call_blocks(message.blocks)")
         return tool_call_blocks(self.blocks)
 
-    @content.setter
-    def content(self, _value: object) -> None:
-        raise AttributeError(_CHANNEL_ASSIGNMENT_ERROR.format(channel="content"))
-
-    @reasoning.setter
-    def reasoning(self, _value: object) -> None:
-        raise AttributeError(_CHANNEL_ASSIGNMENT_ERROR.format(channel="reasoning"))
-
-    @tool_calls.setter
-    def tool_calls(self, _value: object) -> None:
-        raise AttributeError(_CHANNEL_ASSIGNMENT_ERROR.format(channel="tool_calls"))
-
     def with_blocks(self, blocks: Sequence[AssistantBlock]) -> "AssistantMessage":
-        """Copy with ``blocks`` frozen; clear continuation state bound to the old blocks."""
-        return self.model_copy(update={"blocks": blocks})
+        """Copy with replacement blocks and clear continuation state bound to the old blocks."""
+        return self.model_copy(update={"blocks": list(blocks), "provider_response_id": None})
 
     @property
     def e2e_otps(self) -> float | None:
@@ -1163,12 +1085,12 @@ type ChatMessage = Annotated[
 """Discriminated union of all message types, automatically parsed based on role field."""
 
 
-def _upgrade_legacy_message_sequence(messages: object, *, scope: str = "") -> object:
+def _upgrade_legacy_message_sequence(messages: object) -> object:
     """Correlate nullable v0.1 tool-call/result IDs before per-message validation.
 
     v0.1 allowed both sides of tool correlation to omit their ID. A single-message
-    validator cannot recover that relationship, so sequence readers assign a stable
-    UUID5 to each idless call and copy it to the following null-ID result in emission
+    validator cannot recover that relationship, so sequence readers assign a shared
+    ID to each idless call and copy it to the following null-ID result in emission
     order. Explicit provider IDs are never rewritten.
     """
     if not isinstance(messages, list | tuple):
@@ -1176,7 +1098,6 @@ def _upgrade_legacy_message_sequence(messages: object, *, scope: str = "") -> ob
 
     upgraded_messages: list[object] = []
     pending_calls: list[tuple[str, str | None]] = []
-    assistant_ordinal = 0
     for message in messages:
         if not isinstance(message, dict):
             pending_calls.clear()
@@ -1187,55 +1108,30 @@ def _upgrade_legacy_message_sequence(messages: object, *, scope: str = "") -> ob
         match upgraded.get("role"):
             case "assistant":
                 pending_calls.clear()
-                assistant_id = upgraded.get("id")
-                if not isinstance(assistant_id, str) or not assistant_id:
-                    canonical_message = json.dumps(
-                        upgraded,
-                        sort_keys=True,
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                        default=repr,
-                    )
-                    assistant_id = uuid5(
-                        NAMESPACE_URL,
-                        f"stirrup:v0.1-assistant:{scope}:{assistant_ordinal}:{canonical_message}",
-                    ).hex
-                    upgraded["id"] = assistant_id
-                assistant_ordinal += 1
-                # Transitional dumps may carry canonical blocks alongside empty
-                # channel-era fields. Blocks are authoritative whenever present.
                 container_key = "blocks" if isinstance(upgraded.get("blocks"), list) else "tool_calls"
                 items = upgraded.get(container_key)
-                if not isinstance(items, list):
-                    upgraded_messages.append(upgraded)
-                    continue
+                if isinstance(items, list):
+                    migrated_items: list[object] = []
+                    for item in items:
+                        is_tool_call = container_key == "tool_calls" or (
+                            isinstance(item, dict) and item.get("kind") == "tool_call"
+                        )
+                        if not is_tool_call or not isinstance(item, dict):
+                            migrated_items.append(item)
+                            continue
 
-                migrated_items: list[object] = []
-                call_ordinal = 0
-                for item in items:
-                    is_tool_call = container_key == "tool_calls" or (
-                        isinstance(item, dict) and item.get("kind") == "tool_call"
-                    )
-                    if not is_tool_call or not isinstance(item, dict):
-                        migrated_items.append(item)
-                        continue
-
-                    call = dict(item)
-                    call_id = call.get("tool_call_id")
-                    if call_id in (None, ""):
-                        call_id = uuid5(
-                            NAMESPACE_URL,
-                            f"stirrup:v0.1-tool-call:{assistant_id}:{call_ordinal}",
-                        ).hex
-                        call["tool_call_id"] = call_id
-                        call["has_provider_tool_call_id"] = False
-                    if not isinstance(call_id, str):
-                        raise ValueError("Legacy tool_call_id must be a string or null")
-                    call_name = call.get("name")
-                    pending_calls.append((call_id, call_name if isinstance(call_name, str) else None))
-                    migrated_items.append(call)
-                    call_ordinal += 1
-                upgraded[container_key] = migrated_items
+                        call = dict(item)
+                        call_id = call.get("tool_call_id")
+                        if call_id in (None, ""):
+                            call_id = uuid4().hex
+                            call["tool_call_id"] = call_id
+                            call["has_provider_tool_call_id"] = False
+                        if not isinstance(call_id, str):
+                            raise ValueError("Legacy tool_call_id must be a string or null")
+                        call_name = call.get("name")
+                        pending_calls.append((call_id, call_name if isinstance(call_name, str) else None))
+                        migrated_items.append(call)
+                    upgraded[container_key] = migrated_items
 
             case "tool":
                 result_id = upgraded.get("tool_call_id")
@@ -1280,10 +1176,7 @@ class SubAgentMetadata(BaseModel):
         upgraded = dict(data)
         history = upgraded.get("message_history")
         if isinstance(history, list | tuple):
-            upgraded["message_history"] = [
-                _upgrade_legacy_message_sequence(group, scope=f"subagent:{index}")
-                for index, group in enumerate(history)
-            ]
+            upgraded["message_history"] = [_upgrade_legacy_message_sequence(group) for group in history]
         return upgraded
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":

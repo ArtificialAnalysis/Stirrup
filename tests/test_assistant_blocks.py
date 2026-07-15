@@ -184,16 +184,16 @@ def test_legacy_channel_payload_synthesizes_blocks_in_channel_order() -> None:
 
 def test_flat_reasoning_splits_by_signature_presence() -> None:
     signed = AssistantMessage.model_validate({"content": "", "reasoning": {"signature": "sig", "content": "deep"}})
-    assert signed.blocks == (SignedReasoningBlock(signature="sig", content="deep"),)
+    assert signed.blocks == [SignedReasoningBlock(signature="sig", content="deep")]
 
     in_band = AssistantMessage.model_validate({"content": "", "reasoning": {"content": "deep"}})
-    assert in_band.blocks == (ReasoningBlock(content="deep"),)
+    assert in_band.blocks == [ReasoningBlock(content="deep")]
 
 
 def test_media_content_list_passes_through_in_place() -> None:
     image = _png_block()
     msg = AssistantMessage.model_validate({"content": ["before", image, "after"]})
-    assert msg.blocks == (TextBlock(text="before"), image, TextBlock(text="after"))
+    assert msg.blocks == [TextBlock(text="before"), image, TextBlock(text="after")]
 
 
 def test_empty_content_synthesizes_no_text_block() -> None:
@@ -224,32 +224,22 @@ def test_mixing_blocks_with_channel_fields_raises() -> None:
 def test_mixing_guard_ignores_empty_channel_values() -> None:
     # Empty values ("", [], {}) drop nothing — they don't conflict.
     msg = AssistantMessage.model_validate({"blocks": [{"kind": "text", "text": "x"}], "content": "", "tool_calls": []})
-    assert msg.blocks == (TextBlock(text="x"),)
+    assert msg.blocks == [TextBlock(text="x")]
     msg = AssistantMessage.model_validate({"blocks": [{"kind": "text", "text": "x"}], "content": [], "reasoning": {}})
-    assert msg.blocks == (TextBlock(text="x"),)
+    assert msg.blocks == [TextBlock(text="x")]
 
 
 def test_falsy_channel_reasoning_synthesizes_no_block() -> None:
     # v0.1 required Reasoning.content, so an empty dict was never a valid payload;
     # it must not turn into a spurious empty ReasoningBlock.
     msg = AssistantMessage.model_validate({"content": "hi", "reasoning": {}})
-    assert msg.blocks == (TextBlock(text="hi"),)
+    assert msg.blocks == [TextBlock(text="hi")]
 
 
 def test_malformed_channel_content_fails_validation() -> None:
     # A non-str, non-list v0.1 content payload must fail loudly, not vanish.
     with pytest.raises(ValidationError, match="must be a string or list"):
         AssistantMessage.model_validate({"role": "assistant", "content": {"oops": 1}})
-
-
-def test_channel_assignment_raises() -> None:
-    msg = AssistantMessage(blocks=[TextBlock(text="x")])
-    with pytest.raises(AttributeError, match="migration guide"):
-        msg.content = "y"
-    with pytest.raises(AttributeError, match="migration guide"):
-        msg.tool_calls = []
-    with pytest.raises(AttributeError, match="migration guide"):
-        msg.reasoning = Reasoning(content="r")
 
 
 # ---------------------------------------------------------------------------
@@ -307,32 +297,17 @@ def test_text_block_signature_round_trips() -> None:
     block = TextBlock(text="provider-bound", signature="sig-1")
     message = AssistantMessage.model_validate(AssistantMessage(blocks=[block]).model_dump(mode="json"))
 
-    assert message.blocks == (block,)
+    assert message.blocks == [block]
 
 
-def test_assistant_blocks_are_frozen_and_encrypted_summaries_are_deeply_immutable() -> None:
-    block_types = (
-        TextBlock,
-        ReasoningBlock,
-        SignedReasoningBlock,
-        RedactedReasoningBlock,
-        ReasoningRefBlock,
-        EncryptedReasoningBlock,
-        OpaqueBlock,
-        ToolCall,
-        ImageContentBlock,
-    )
-    assert all(block_type.model_config.get("frozen") is True for block_type in block_types)
+def test_block_models_are_frozen_but_containers_are_lists() -> None:
+    encrypted = EncryptedReasoningBlock(id="rs_1", encrypted_content="opaque", summary=["one"])
+    message = AssistantMessage(blocks=[encrypted])
 
-    encrypted = EncryptedReasoningBlock(id="rs_1", encrypted_content="opaque", summary=("one",))
-    assert encrypted.summary == ("one",)
-
-    message = AssistantMessage(provider_response_id="resp_1", blocks=[TextBlock(text="original")])
-    assert isinstance(message.blocks, tuple)
-    assert isinstance(message.model_dump()["blocks"], list)
-    with pytest.raises(ValidationError, match="Field is frozen"):
-        message.blocks = (TextBlock(text="edited"),)
-    assert message.provider_response_id == "resp_1"
+    assert isinstance(message.blocks, list)
+    assert encrypted.summary == ["one"]
+    with pytest.raises(ValidationError, match="frozen"):
+        encrypted.encrypted_content = "changed"
 
 
 def test_with_blocks_replaces_block_list() -> None:
@@ -347,14 +322,6 @@ def test_mutators_clear_provider_response_id() -> None:
     msg = AssistantMessage(provider_response_id="resp_1", blocks=[TextBlock(text="original")])
 
     assert msg.with_blocks([TextBlock(text="other")]).provider_response_id is None
-    copied = msg.model_copy(update={"blocks": [TextBlock(text="copied")]})
-    assert copied.blocks == (TextBlock(text="copied"),)
-    assert copied.provider_response_id is None
-    with pytest.warns(DeprecationWarning):
-        legacy_copy = msg.copy(update={"blocks": [TextBlock(text="legacy copy")]})
-    assert legacy_copy.blocks == (TextBlock(text="legacy copy"),)
-    assert legacy_copy.provider_response_id is None
-    # original untouched
     assert msg.provider_response_id == "resp_1"
 
 
@@ -378,11 +345,11 @@ V01_DUMP: dict[str, Any] = {
 def test_v01_golden_dump_upgrades_to_blocks() -> None:
     msg = AssistantMessage.model_validate(V01_DUMP)
     assert msg.id == "abc123"
-    assert msg.blocks == (
+    assert msg.blocks == [
         SignedReasoningBlock(signature="sig", content="thought"),
         TextBlock(text="hello"),
         ToolCall(name="t", arguments="{}", tool_call_id="c1"),
-    )
+    ]
     # The block helpers expose the same information without the deprecated projections.
     assert joined_text(msg.blocks) == "hello"
     assert reasoning_blocks(msg.blocks) == [SignedReasoningBlock(signature="sig", content="thought")]
@@ -424,7 +391,7 @@ def test_tool_call_provider_id_provenance_round_trips() -> None:
     )
     restored = AssistantMessage.model_validate_json(AssistantMessage(blocks=[call]).model_dump_json())
 
-    assert restored.blocks == (call,)
+    assert restored.blocks == [call]
 
 
 def test_tool_call_normalizes_one_internal_id_and_preserves_provenance() -> None:
@@ -457,7 +424,7 @@ def test_legacy_none_tool_call_id_normalizes_but_tool_result_requires_correlatio
         RedactedReasoningBlock(data="opaque"),
         ReasoningRefBlock(id="rs_1", content="summary"),
         ReasoningRefBlock(id="rs_2"),
-        EncryptedReasoningBlock(id="rs_3", encrypted_content="zdr-payload", summary=("part one", "part two")),
+        EncryptedReasoningBlock(id="rs_3", encrypted_content="zdr-payload", summary=["part one", "part two"]),
     ],
 )
 def test_each_reasoning_kind_round_trips(block: ReasoningBlock) -> None:
@@ -634,7 +601,7 @@ def test_responses_replay_preserves_interleaved_order() -> None:
 def test_encrypted_reasoning_feeds_channel_projections() -> None:
     """The reasoning projection and CC replay see encrypted summaries as readable content."""
     msg = AssistantMessage(
-        blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=("alpha", "beta"))]
+        blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["alpha", "beta"])]
     )
     with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
         reasoning = msg.reasoning
@@ -644,7 +611,7 @@ def test_encrypted_reasoning_feeds_channel_projections() -> None:
 
 
 def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:
-    msg = AssistantMessage(blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=("a", "b"))])
+    msg = AssistantMessage(blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["a", "b"])])
     _instructions, items = _to_open_responses_input([msg])
     assert items == [
         {

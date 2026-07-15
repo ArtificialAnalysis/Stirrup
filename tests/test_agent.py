@@ -1,6 +1,5 @@
 """Tests for agent core functionality."""
 
-import hashlib
 import json
 from collections.abc import Awaitable, Sequence
 from io import BytesIO
@@ -14,10 +13,7 @@ from pydantic import BaseModel
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent, SubAgentParams
 from stirrup.core.cache import (
-    CacheManager,
     CacheState,
-    compute_legacy_task_hashes,
-    compute_task_hash,
     deserialize_messages,
 )
 from stirrup.core.exceptions import ContextOverflowError
@@ -391,22 +387,15 @@ def _v01_idless_tool_history() -> list[dict[str, object]]:
     ]
 
 
-def test_v01_idless_tool_history_is_correlated_deterministically() -> None:
-    first = deserialize_messages(_v01_idless_tool_history())
-    second = deserialize_messages(_v01_idless_tool_history())
+def test_v01_idless_tool_history_is_correlated() -> None:
+    messages = deserialize_messages(_v01_idless_tool_history())
 
-    assistant = first[0]
+    assistant = messages[0]
     assert isinstance(assistant, AssistantMessage)
     calls = [block for block in assistant.blocks if isinstance(block, ToolCall)]
-    results = [message for message in first if isinstance(message, ToolMessage)]
+    results = [message for message in messages if isinstance(message, ToolMessage)]
     assert [call.tool_call_id for call in calls] == [result.tool_call_id for result in results]
     assert all(not call.has_provider_tool_call_id for call in calls)
-
-    second_assistant = second[0]
-    assert isinstance(second_assistant, AssistantMessage)
-    assert [call.tool_call_id for call in calls] == [
-        block.tool_call_id for block in second_assistant.blocks if isinstance(block, ToolCall)
-    ]
 
 
 def test_transitional_blocks_with_empty_tool_calls_correlate_idless_result() -> None:
@@ -451,7 +440,7 @@ def test_v01_idless_tool_history_upgrade_is_shared_by_subagent_metadata() -> Non
     )
 
 
-def test_pre_v019_history_adds_user_kind_and_stable_assistant_id() -> None:
+def test_pre_v019_history_adds_user_kind_and_assistant_id() -> None:
     history: list[dict[str, object]] = [
         {"role": "user", "content": "task"},
         {
@@ -464,19 +453,15 @@ def test_pre_v019_history_adds_user_kind_and_stable_assistant_id() -> None:
     ]
 
     with pytest.warns(DeprecationWarning, match="'output' field is deprecated"):
-        first = deserialize_messages(history, scope="legacy")
-    with pytest.warns(DeprecationWarning, match="'output' field is deprecated"):
-        second = deserialize_messages(history, scope="legacy")
+        messages = deserialize_messages(history)
 
-    assert type(first[0]) is UserMessage
-    first_assistant = first[1]
-    second_assistant = second[1]
-    result = first[2]
-    assert isinstance(first_assistant, AssistantMessage)
-    assert isinstance(second_assistant, AssistantMessage)
+    assert type(messages[0]) is UserMessage
+    assistant = messages[1]
+    result = messages[2]
+    assert isinstance(assistant, AssistantMessage)
     assert isinstance(result, ToolMessage)
-    [call] = [block for block in first_assistant.blocks if isinstance(block, ToolCall)]
-    assert first_assistant.id == second_assistant.id
+    [call] = [block for block in assistant.blocks if isinstance(block, ToolCall)]
+    assert assistant.id
     assert call.tool_call_id == result.tool_call_id
 
 
@@ -486,24 +471,6 @@ def test_pre_v010_user_history_upgrade_is_shared_by_subagent_metadata() -> None:
     )
 
     assert type(metadata.message_history[0][0]) is UserMessage
-
-
-def test_pre_id_assistant_scopes_are_unique_across_cache_groups() -> None:
-    legacy_assistant = {"role": "assistant", "content": "same", "tool_calls": []}
-    state = CacheState.from_dict(
-        {
-            "msgs": [],
-            "full_msg_history": [[legacy_assistant], [legacy_assistant]],
-            "run_metadata": {},
-            "task_hash": "legacy",
-        }
-    )
-
-    first = state.full_msg_history[0][0]
-    second = state.full_msg_history[1][0]
-    assert isinstance(first, AssistantMessage)
-    assert isinstance(second, AssistantMessage)
-    assert first.id != second.id
 
 
 @pytest.mark.parametrize(
@@ -524,106 +491,6 @@ def test_pre_id_assistant_scopes_are_unique_across_cache_groups() -> None:
 def test_v01_uncorrelatable_tool_result_raises(history: list[dict[str, object]]) -> None:
     with pytest.raises(ValueError, match="Cannot correlate"):
         deserialize_messages(history)
-
-
-def test_v01_task_hash_fallback_matches_legacy_assistant_shape() -> None:
-    message = AssistantMessage(
-        id="assistant-1",
-        blocks=[
-            ReasoningBlock(content="thinking"),
-            TextBlock(text="answer"),
-            ToolCall(
-                name="lookup",
-                arguments="{}",
-                tool_call_id="internal-id",
-                has_provider_tool_call_id=False,
-            ),
-        ],
-    )
-    tool_result = ToolMessage(content="done", tool_call_id="internal-id", name="lookup")
-    legacy_dump = [
-        {
-            "id": "assistant-1",
-            "role": "assistant",
-            "reasoning": {"signature": None, "content": "thinking"},
-            "content": "answer",
-            "tool_calls": [{"signature": None, "name": "lookup", "arguments": "{}", "tool_call_id": None}],
-            "token_usage": {"input": 0, "answer": 0, "reasoning": 0},
-            "metadata": {},
-            "request_start_time": None,
-            "request_end_time": None,
-        },
-        {
-            "role": "tool",
-            "content": "done",
-            "tool_call_id": None,
-            "name": "lookup",
-            "args_was_valid": True,
-            "success": False,
-            "tool_start_time": None,
-            "tool_end_time": None,
-        },
-    ]
-    expected = hashlib.sha256(json.dumps(legacy_dump, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()[
-        :12
-    ]
-    earliest_dump = json.loads(json.dumps(legacy_dump))
-    for key in ("id", "metadata", "request_start_time", "request_end_time"):
-        earliest_dump[0].pop(key)
-    earliest_dump[0]["token_usage"]["output"] = earliest_dump[0]["token_usage"].pop("answer")
-    earliest_dump[1].pop("tool_start_time")
-    earliest_dump[1].pop("tool_end_time")
-    earliest_expected = hashlib.sha256(
-        json.dumps(earliest_dump, sort_keys=True, ensure_ascii=True).encode("utf-8")
-    ).hexdigest()[:12]
-
-    legacy_hashes = compute_legacy_task_hashes([message, tool_result])
-    assert expected in legacy_hashes
-    assert earliest_expected in legacy_hashes
-    assert compute_task_hash([message, tool_result]) != expected
-
-
-async def test_agent_resumes_legacy_hash_directory_and_clears_all_candidates(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    init_messages: list[ChatMessage] = [AssistantMessage(id="seed", blocks=[TextBlock(text="seed answer")])]
-    current_hash = compute_task_hash(init_messages)
-    legacy_hash = compute_legacy_task_hashes(init_messages)[0]
-    cache_manager = CacheManager(tmp_path)
-    cache_manager.save_state(
-        legacy_hash,
-        CacheState(
-            msgs=[SystemMessage(content="cached system"), UserMessage(content="cached marker")],
-            full_msg_history=[],
-            run_metadata_by_turn={},
-            task_hash=legacy_hash,
-        ),
-    )
-    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", tmp_path)
-    client = MockLLMClient(
-        [
-            AssistantMessage(
-                blocks=[
-                    ToolCall(
-                        name=DEFAULT_FINISH_TOOL_NAME,
-                        arguments='{"reason":"done","paths":[]}',
-                        tool_call_id="finish-1",
-                    )
-                ]
-            )
-        ]
-    )
-    agent = Agent(client=client, name="cache-test", tools=[], finish_tool=SIMPLE_FINISH_TOOL)
-
-    async with agent.session(resume=True, cache_on_interrupt=False) as session:
-        finish_params, history, _ = await session.run(init_messages)
-
-    assert finish_params is not None
-    assert isinstance(history[0][1], UserMessage)
-    assert history[0][1].content == "cached marker"
-    assert not (tmp_path / legacy_hash).exists()
-    assert not (tmp_path / current_hash).exists()
 
 
 async def test_cache_state_preserves_special_user_message_types() -> None:
@@ -653,7 +520,6 @@ async def test_cache_round_trips_block_based_assistant_message() -> None:
     from stirrup.core.models import (
         EncryptedReasoningBlock,
         OpaqueBlock,
-        ReasoningBlock,
         ReasoningRefBlock,
         RedactedReasoningBlock,
         TextBlock,
@@ -665,7 +531,7 @@ async def test_cache_round_trips_block_based_assistant_message() -> None:
             SignedReasoningBlock(signature="sig-1", content="signed thinking"),
             RedactedReasoningBlock(data="redacted-token"),
             ReasoningRefBlock(id="rs_1", content="summary"),
-            EncryptedReasoningBlock(id="rs_2", encrypted_content="zdr-payload", summary=("summary",)),
+            EncryptedReasoningBlock(id="rs_2", encrypted_content="zdr-payload", summary=["summary"]),
             ReasoningBlock(content="in-band thinking"),
             TextBlock(text="the answer"),
             OpaqueBlock(data='{"type": "provider_marker"}'),

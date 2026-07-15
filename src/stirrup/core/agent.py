@@ -21,7 +21,7 @@ from stirrup.constants import (
     CONTEXT_SUMMARIZATION_CUTOFF,
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
-from stirrup.core.cache import CacheManager, CacheState, compute_legacy_task_hashes, compute_task_hash
+from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -1412,29 +1412,21 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Compute task hash for caching/resume
         task_hash = compute_task_hash(init_msgs)
-        cache_task_hashes = [task_hash]
         self._current_task_hash = task_hash
 
         # Initialize cache manager
         cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
-        loaded_task_hash = task_hash
         resumed = False
         cached_run_metadata_by_turn: dict[str, dict[str, list[Any]]] | None = None
 
         # Try to resume from cache if requested
         if self._resume:
-            cache_task_hashes.extend(compute_legacy_task_hashes(init_msgs))
             state = _SESSION_STATE.get()
-            cached = None
-            for candidate_hash in cache_task_hashes:
-                cached = cache_manager.load_state(candidate_hash)
-                if cached is not None:
-                    loaded_task_hash = candidate_hash
-                    break
+            cached = cache_manager.load_state(task_hash)
             if cached:
                 # Restore files to exec env
                 if state.exec_env and state.exec_env.temp_dir:
-                    cache_manager.restore_files(loaded_task_hash, state.exec_env.temp_dir)
+                    cache_manager.restore_files(task_hash, state.exec_env.temp_dir)
 
                 # Restore state
                 msgs = cached.msgs
@@ -1581,8 +1573,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Clear cache on successful completion (finish_params is set)
         if finish_params is not None and cache_manager.clear_on_success:
-            for cache_task_hash in cache_task_hashes:
-                cache_manager.clear_cache(cache_task_hash)
+            cache_manager.clear_cache(task_hash)
             self._current_task_hash = None
             self._current_run_state = None
 

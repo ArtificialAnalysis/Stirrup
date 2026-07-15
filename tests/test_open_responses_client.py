@@ -258,7 +258,7 @@ class TestMessageConversion:
                     EncryptedReasoningBlock(
                         id="rs_123",
                         encrypted_content="opaque",
-                        summary=("summary",),
+                        summary=["summary"],
                     )
                 ],
             )
@@ -478,7 +478,7 @@ class TestResponseParsing:
 
         assert blocks == [
             EncryptedReasoningBlock(
-                id="rs_789", encrypted_content="opaque-zdr-payload", summary=("First thought.", "Second thought.")
+                id="rs_789", encrypted_content="opaque-zdr-payload", summary=["First thought.", "Second thought."]
             ),
             EncryptedReasoningBlock(id="rs_790", encrypted_content="opaque-zdr-payload-2"),
         ]
