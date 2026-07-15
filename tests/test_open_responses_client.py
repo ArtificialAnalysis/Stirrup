@@ -207,11 +207,27 @@ class TestMessageConversion:
             {"role": "user", "content": [{"type": "input_text", "text": "new input"}]},
         ]
 
-    def test_stateless_request_replays_items_instead_of_using_response_id(self) -> None:
+    def test_stored_continuation_rejects_provider_idless_tool_call(self) -> None:
+        call = ToolCall.from_provider(provider_id=None, name="lookup", arguments="{}")
+        messages = [
+            AssistantMessage(provider_response_id="resp_123", blocks=[call]),
+            ToolMessage(content="done", tool_call_id=call.tool_call_id, name="lookup"),
+        ]
+
+        with pytest.raises(NotImplementedError, match="cannot correlate a provider-idless tool call"):
+            _to_open_responses_request(messages, use_provider_response_id=True)
+
+    def test_stateless_request_replays_encrypted_reasoning_instead_of_using_response_id(self) -> None:
         messages = [
             AssistantMessage(
                 provider_response_id="resp_123",
-                blocks=[ReasoningRefBlock(id="rs_123", content="summary")],
+                blocks=[
+                    EncryptedReasoningBlock(
+                        id="rs_123",
+                        encrypted_content="opaque",
+                        summary=("summary",),
+                    )
+                ],
             )
         ]
 
@@ -226,8 +242,38 @@ class TestMessageConversion:
                 "type": "reasoning",
                 "id": "rs_123",
                 "summary": [{"type": "summary_text", "text": "summary"}],
+                "encrypted_content": "opaque",
             }
         ]
+
+    def test_stateless_request_rejects_reference_only_reasoning(self) -> None:
+        message = AssistantMessage(blocks=[ReasoningRefBlock(id="rs_123", content="summary")])
+
+        with pytest.raises(NotImplementedError, match="requires encrypted reasoning content"):
+            _to_open_responses_request([message], use_provider_response_id=False)
+
+    def test_stateful_request_without_continuation_rejects_reference_only_reasoning(self) -> None:
+        message = AssistantMessage(blocks=[ReasoningRefBlock(id="rs_123", content="summary")])
+
+        with pytest.raises(NotImplementedError, match="requires encrypted reasoning content"):
+            _to_open_responses_request([message], use_provider_response_id=True)
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            TextBlock(text="signed", signature="google-signature"),
+            ToolCall(
+                tool_call_id="internal",
+                has_provider_tool_call_id=False,
+                name="lookup",
+                arguments="{}",
+            ),
+            ReasoningBlock(content="unreferenced"),
+        ],
+    )
+    def test_unrepresentable_assistant_blocks_fail_loudly(self, block: AssistantBlock) -> None:
+        with pytest.raises((TypeError, NotImplementedError)):
+            _to_open_responses_input([AssistantMessage(blocks=[block])])
 
 
 class TestToolConversion:
@@ -309,6 +355,19 @@ class TestResponseParsing:
         assert tool_call.tool_call_id == "call_abc"
         assert tool_call.name == "get_weather"
         assert tool_call.arguments == '{"city": "NYC"}'
+
+    def test_parse_idless_function_call_synthesizes_one_internal_id(self) -> None:
+        fn_call = MagicMock()
+        fn_call.type = "function_call"
+        fn_call.call_id = None
+        fn_call.name = "get_weather"
+        fn_call.arguments = "{}"
+
+        [tool_call] = _parse_response_output([fn_call])
+
+        assert isinstance(tool_call, ToolCall)
+        assert tool_call.tool_call_id
+        assert not tool_call.has_provider_tool_call_id
 
     def test_parse_reasoning_output(self) -> None:
         """Test parsing a response with reasoning (no id: in-band reasoning block)."""
@@ -543,6 +602,19 @@ class TestOpenResponsesClient:
         assert request_kwargs["include"] == ["reasoning.encrypted_content"]
         assert result.provider_response_id is None
 
+    async def test_stateful_generate_requires_response_id(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        mock_response = MagicMock(
+            id=None,
+            status="completed",
+            output=[MagicMock(type="message", content=[MagicMock(type="output_text", text="Hello!")])],
+            usage=MagicMock(input_tokens=10, output_tokens=5, output_tokens_details=None),
+        )
+        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(ValueError, match="require a non-empty response ID"):
+            await client.generate(messages=[UserMessage(content="Hi")], tools={})
+
     async def test_generate_uses_previous_response_id(self) -> None:
         client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
         mock_response = MagicMock(
@@ -637,6 +709,7 @@ class TestOpenResponsesClient:
         fn_call.arguments = "{}"
 
         mock_response = MagicMock()
+        mock_response.id = "resp_tools"
         mock_response.status = "completed"
         mock_response.output = [fn_call]
         mock_response.usage = MagicMock(
@@ -676,6 +749,7 @@ class TestOpenResponsesClient:
         reasoning_item.summary = "Thinking step by step..."
 
         mock_response = MagicMock()
+        mock_response.id = "resp_reasoning"
         mock_response.status = "completed"
         mock_response.output = [
             reasoning_item,
@@ -732,6 +806,7 @@ class TestOpenResponsesClient:
         )
 
         mock_response = MagicMock()
+        mock_response.id = "resp_instructions"
         mock_response.status = "completed"
         mock_response.output = [
             MagicMock(
@@ -771,6 +846,7 @@ class TestOpenResponsesClient:
         )
 
         mock_response = MagicMock()
+        mock_response.id = "resp_default_instructions"
         mock_response.status = "completed"
         mock_response.output = [
             MagicMock(

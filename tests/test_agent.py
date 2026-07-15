@@ -617,12 +617,14 @@ async def test_run_tool_preserves_image_content() -> None:
         finish_tool=SIMPLE_FINISH_TOOL,
     )
 
+    tool_call = ToolCall.from_provider(provider_id=None, name="image_tool", arguments="{}")
     async with agent.session() as session:
         tool_message = await session.run_tool(
-            ToolCall(name="image_tool", arguments="{}", tool_call_id="call_1"),
+            tool_call,
             run_metadata={},
         )
 
+    assert tool_message.tool_call_id == tool_call.tool_call_id
     assert isinstance(tool_message.content, list)
     assert len(tool_message.content) == 1
     assert isinstance(tool_message.content[0], ImageContentBlock)

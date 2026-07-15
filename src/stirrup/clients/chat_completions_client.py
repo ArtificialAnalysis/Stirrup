@@ -197,8 +197,8 @@ class ChatCompletionsClient(LLMClient):
 
         # Parse tool calls
         blocks.extend(
-            ToolCall(
-                tool_call_id=tc.id,
+            ToolCall.from_provider(
+                provider_id=tc.id,
                 name=tc.function.name,
                 arguments=tc.function.arguments or "",
             )

@@ -1,9 +1,18 @@
 """Tests for LiteLLM client parsing."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
-from stirrup.clients.litellm_client import _parse_thinking_blocks
-from stirrup.core.models import ReasoningBlock, RedactedReasoningBlock, SignedReasoningBlock
+from stirrup.clients.litellm_client import LiteLLMClient, _parse_thinking_blocks
+from stirrup.core.models import (
+    AssistantMessage,
+    ReasoningBlock,
+    RedactedReasoningBlock,
+    SignedReasoningBlock,
+    ToolCall,
+    UserMessage,
+)
 
 
 class TestParseThinkingBlocks:
@@ -61,3 +70,39 @@ class TestParseThinkingBlocks:
     def test_entry_without_signature_or_content_raises(self) -> None:
         with pytest.raises(ValueError, match="Signature and content not found"):
             _parse_thinking_blocks([{"type": "thinking"}])
+
+
+async def test_idless_litellm_tool_call_gets_internal_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = {
+        "content": None,
+        "tool_calls": [{"id": None, "function": {"name": "lookup", "arguments": "{}"}}],
+    }
+    choice = MagicMock(finish_reason="stop")
+    choice.__getitem__.side_effect = {"message": message}.__getitem__
+    usage = MagicMock(prompt_tokens=1, completion_tokens=1, completion_tokens_details=None)
+    completion = AsyncMock(return_value={"choices": [choice], "usage": usage})
+    monkeypatch.setattr("stirrup.clients.litellm_client.acompletion", completion)
+
+    result = await LiteLLMClient(model="test").generate([UserMessage(content="prompt")], {})
+
+    [tool_call] = result.blocks
+    assert isinstance(tool_call, ToolCall)
+    assert tool_call.tool_call_id
+    assert not tool_call.has_provider_tool_call_id
+
+
+async def test_litellm_passes_back_tool_call_signatures(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = {"content": None, "tool_calls": []}
+    choice = MagicMock(finish_reason="stop")
+    choice.__getitem__.side_effect = {"message": message}.__getitem__
+    usage = MagicMock(prompt_tokens=1, completion_tokens=1, completion_tokens_details=None)
+    completion = AsyncMock(return_value={"choices": [choice], "usage": usage})
+    monkeypatch.setattr("stirrup.clients.litellm_client.acompletion", completion)
+    history = AssistantMessage(
+        blocks=[ToolCall(tool_call_id="call_1", name="lookup", arguments="{}", signature="google-signature")]
+    )
+
+    await LiteLLMClient(model="test").generate([history], {})
+
+    [wire_call] = completion.call_args.kwargs["messages"][0]["tool_calls"]
+    assert wire_call["provider_specific_fields"] == {"thought_signature": "google-signature"}

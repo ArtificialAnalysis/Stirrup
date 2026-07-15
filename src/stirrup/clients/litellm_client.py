@@ -128,7 +128,7 @@ class LiteLLMClient(LLMClient):
         request_start_time = perf_counter()
         r = await acompletion(
             model=self.model_slug,
-            messages=to_openai_messages(messages),
+            messages=to_openai_messages(messages, allow_tool_call_signatures=True),
             tools=to_openai_tools(tools) if tools else None,
             tool_choice="auto" if tools else None,
             max_tokens=self._max_tokens,
@@ -158,8 +158,8 @@ class LiteLLMClient(LLMClient):
             blocks.append(TextBlock(text=content))
 
         blocks.extend(
-            ToolCall(
-                tool_call_id=tc.get("id"),
+            ToolCall.from_provider(
+                provider_id=tc.get("id"),
                 name=tc["function"]["name"],
                 arguments=tc["function"].get("arguments", "") or "",
                 signature=tc.get("provider_specific_fields", {}).get("thought_signature", None),

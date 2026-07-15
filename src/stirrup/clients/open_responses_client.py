@@ -125,6 +125,8 @@ def _to_open_responses_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:
 
 def _to_open_responses_input(
     msgs: Sequence[ChatMessage],
+    *,
+    allow_reference_reasoning: bool = True,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert ChatMessage list to OpenResponses (instructions, input) tuple.
 
@@ -161,7 +163,7 @@ def _to_open_responses_input(
             # message-then-calls order automatically.
             for block in m.blocks:
                 match block:
-                    case TextBlock(text=text):
+                    case TextBlock(text=text, signature=None):
                         input_items.append(
                             {
                                 "type": "message",
@@ -169,7 +171,15 @@ def _to_open_responses_input(
                                 "content": [{"type": "output_text", "text": text}],
                             }
                         )
-                    case ToolCall(tool_call_id=call_id, name=name, arguments=arguments):
+                    case TextBlock():
+                        raise TypeError("OpenAI Responses cannot pass back signed text blocks")
+                    case ToolCall(
+                        tool_call_id=call_id,
+                        name=name,
+                        arguments=arguments,
+                        signature=None,
+                        has_provider_tool_call_id=True,
+                    ):
                         input_items.append(
                             {
                                 "type": "function_call",
@@ -177,6 +187,12 @@ def _to_open_responses_input(
                                 "name": name,
                                 "arguments": arguments,
                             }
+                        )
+                    case ToolCall():
+                        raise TypeError("OpenAI Responses cannot pass back provider-attached or synthetic tool calls")
+                    case ReasoningRefBlock() if not allow_reference_reasoning:
+                        raise NotImplementedError(
+                            "Stateless OpenAI Responses passback requires encrypted reasoning content"
                         )
                     case ReasoningRefBlock(id=reasoning_id, content=content):
                         # Passed back by reference: the id is the handle to the stored
@@ -201,10 +217,9 @@ def _to_open_responses_input(
                             }
                         )
                     case ReasoningBlock():
-                        # In-band reasoning has no passback token; this client itself emits
-                        # ReasoningBlock for id-less reasoning items, and the Responses API
-                        # offers no way to replay reasoning without an item id.
-                        continue
+                        raise NotImplementedError(
+                            "OpenAI Responses cannot pass back reasoning without an item ID or encrypted content"
+                        )
                     case (
                         SignedReasoningBlock()
                         | RedactedReasoningBlock()
@@ -213,9 +228,9 @@ def _to_open_responses_input(
                         | VideoContentBlock()
                         | AudioContentBlock()
                     ):
-                        # Cross-provider or uninterpreted blocks: no Responses input
-                        # representation exists, so they are intentionally dropped.
-                        continue
+                        raise NotImplementedError(
+                            f"OpenAI Responses cannot pass back {type(block).__name__} assistant blocks"
+                        )
                     case _:
                         assert_never(block)
         elif isinstance(m, ToolMessage):
@@ -253,11 +268,18 @@ def _to_open_responses_request(
         for index in range(len(msgs) - 1, -1, -1):
             msg = msgs[index]
             if isinstance(msg, AssistantMessage) and msg.provider_response_id is not None:
+                if any(isinstance(block, ToolCall) and not block.has_provider_tool_call_id for block in msg.blocks):
+                    raise NotImplementedError(
+                        "Stored OpenAI Responses continuation cannot correlate a provider-idless tool call"
+                    )
                 previous_response_id = msg.provider_response_id
                 messages_to_process = msgs[index + 1 :]
                 break
 
-    _, input_items = _to_open_responses_input(messages_to_process)
+    _, input_items = _to_open_responses_input(
+        messages_to_process,
+        allow_reference_reasoning=previous_response_id is not None,
+    )
     return instructions, previous_response_id, input_items
 
 
@@ -314,8 +336,8 @@ def _parse_response_output(
 
             case "function_call":
                 blocks.append(
-                    ToolCall(
-                        tool_call_id=_get_attr(item, "call_id"),
+                    ToolCall.from_provider(
+                        provider_id=_get_attr(item, "call_id"),
                         name=_get_attr(item, "name"),
                         arguments=_get_attr(item, "arguments", ""),
                     )
@@ -562,6 +584,13 @@ class OpenResponsesClient(LLMClient):
                 "Reduce max_tokens or message length and try again."
             )
 
+        provider_response_id: str | None = None
+        if stateful:
+            response_id = response.id
+            if not isinstance(response_id, str) or not response_id:
+                raise ValueError("Stored OpenAI Responses calls require a non-empty response ID")
+            provider_response_id = response_id
+
         # Parse response output into ordered blocks
         blocks = _parse_response_output(response.output, allow_reference_reasoning=stateful)
 
@@ -578,7 +607,7 @@ class OpenResponsesClient(LLMClient):
         answer_tokens = output_tokens - reasoning_tokens
 
         return AssistantMessage(
-            provider_response_id=str(response.id) if stateful else None,
+            provider_response_id=provider_response_id,
             blocks=blocks,
             token_usage=TokenUsage(
                 input=input_tokens,

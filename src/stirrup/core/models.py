@@ -630,13 +630,43 @@ class ToolCall(BaseModel, frozen=True):
     """Opaque passback state attached to this exact block, e.g. a Google thought signature."""
     name: str
     arguments: str
-    tool_call_id: str | None = None
+    tool_call_id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
     has_provider_tool_call_id: bool = True
     """Whether ``tool_call_id`` was present on the provider's original block.
 
     A client may synthesize ``tool_call_id`` for internal call/result matching
     while retaining that it must be omitted from provider-attached passback.
     """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_internal_id(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if normalized.get("tool_call_id") in (None, ""):
+            normalized["tool_call_id"] = uuid4().hex
+            normalized["has_provider_tool_call_id"] = False
+        return normalized
+
+    @classmethod
+    def from_provider(
+        cls,
+        *,
+        provider_id: str | None,
+        name: str,
+        arguments: str,
+        signature: str | None = None,
+    ) -> Self:
+        """Capture one provider call with a stable internal correlation ID."""
+        native_id = provider_id or None
+        return cls(
+            tool_call_id=native_id or uuid4().hex,
+            has_provider_tool_call_id=native_id is not None,
+            name=name,
+            arguments=arguments,
+            signature=signature,
+        )
 
 
 class SystemMessage(BaseModel):
@@ -690,10 +720,9 @@ class TextBlock(BaseModel, frozen=True):
     """One contiguous run of answer text in an assistant turn.
 
     ``signature`` carries opaque passback state attached to this exact block,
-    e.g. a Google thought signature emitted on a visible text part. It exists
-    for external clients only: the built-in clients never set it and drop it
-    on replay (they re-emit only ``text``). An external client that sets it is
-    responsible for re-emitting it on passback.
+    e.g. a Google thought signature emitted on a visible text part. A client
+    that cannot re-emit the signature must reject passback rather than silently
+    stripping it.
     """
 
     kind: Literal["text"] = "text"
@@ -766,7 +795,7 @@ class EncryptedReasoningBlock(BaseModel, frozen=True):
     @property
     def content(self) -> str:
         """Readable summary text for channel projections; parts newline-joined."""
-        return _TEXT_BLOCK_SEPARATOR.join(self.summary)
+        return _REASONING_SUMMARY_SEPARATOR.join(self.summary)
 
 
 class OpaqueBlock(BaseModel, frozen=True):
@@ -775,9 +804,8 @@ class OpaqueBlock(BaseModel, frozen=True):
     For provider-issued marker/control blocks that must round-trip untouched:
     ``data`` holds the block's raw JSON (self-describing — the provider's own
     ``type`` field travels inside it). The framework preserves it in position
-    through history, projections, and serialization so a client that
-    understands the payload can re-emit it verbatim on passback; the built-in
-    clients do not interpret it and skip it on replay.
+    through history, projections, and serialization so a client that understands
+    the payload can re-emit it verbatim on passback; other clients fail loudly.
     """
 
     kind: Literal["opaque"] = "opaque"
@@ -816,21 +844,17 @@ type AssistantBlock = Annotated[
 ]
 """One block of an assistant turn, discriminated on ``kind``."""
 
-_TEXT_BLOCK_SEPARATOR = "\n"
-"""Separator when joining distinct text blocks for the channel projection.
-
-Reasoning content deliberately concatenates *without* a separator — byte-compatible
-with what signed passback re-emits."""
+_REASONING_SUMMARY_SEPARATOR = "\n"
 
 type _MediaBlock = ImageContentBlock | VideoContentBlock | AudioContentBlock
 
 
 def joined_text(blocks: Sequence[AssistantBlock]) -> str | None:
-    """All answer text across text blocks, newline-joined; None when there are no text blocks."""
+    """All answer text across text blocks, directly concatenated; None when absent."""
     texts = [block.text for block in blocks if isinstance(block, TextBlock)]
     if not texts:
         return None
-    return _TEXT_BLOCK_SEPARATOR.join(texts)
+    return "".join(texts)
 
 
 def final_text(blocks: Sequence[AssistantBlock]) -> str | None:
@@ -1056,7 +1080,7 @@ class ToolMessage(BaseModel):
 
     role: Literal["tool"] = "tool"
     content: Content
-    tool_call_id: str | None = None
+    tool_call_id: str = Field(min_length=1)
     name: str | None = None
     args_was_valid: bool = True
     success: bool = False

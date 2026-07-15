@@ -5,7 +5,7 @@ to the OpenAI API format. Since LiteLLM and the OpenAI SDK use identical
 formats, these utilities are shared between both client implementations.
 """
 
-from typing import Any
+from typing import Any, assert_never
 
 from stirrup.core.models import (
     AssistantBlock,
@@ -14,12 +14,17 @@ from stirrup.core.models import (
     ChatMessage,
     Content,
     EmptyParams,
+    EncryptedReasoningBlock,
     ImageContentBlock,
+    OpaqueBlock,
+    ReasoningBlock,
+    ReasoningRefBlock,
     RedactedReasoningBlock,
     SignedReasoningBlock,
     SystemMessage,
     TextBlock,
     Tool,
+    ToolCall,
     ToolMessage,
     UserMessage,
     VideoContentBlock,
@@ -125,7 +130,42 @@ def _assistant_content(blocks: list[AssistantBlock]) -> Content:
     return joined_text(blocks) or ""
 
 
-def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
+def _validate_chat_assistant_blocks(
+    blocks: list[AssistantBlock],
+    *,
+    allow_tool_call_signatures: bool,
+) -> None:
+    for block in blocks:
+        match block:
+            case TextBlock(signature=None) | ReasoningBlock() | SignedReasoningBlock() | RedactedReasoningBlock():
+                pass
+            case ToolCall(has_provider_tool_call_id=True, signature=None):
+                pass
+            case ToolCall(has_provider_tool_call_id=True) if allow_tool_call_signatures:
+                pass
+            case ImageContentBlock() | VideoContentBlock() | AudioContentBlock():
+                pass
+            case TextBlock():
+                raise TypeError("OpenAI-compatible chat cannot pass back signed text blocks")
+            case ToolCall(has_provider_tool_call_id=True):
+                raise NotImplementedError("Direct OpenAI-compatible chat cannot pass back signed tool calls")
+            case ToolCall():
+                raise NotImplementedError(
+                    "OpenAI-compatible chat cannot pass back a tool call without a provider-issued ID"
+                )
+            case ReasoningRefBlock() | EncryptedReasoningBlock() | OpaqueBlock():
+                raise NotImplementedError(
+                    f"OpenAI-compatible chat cannot pass back {type(block).__name__} assistant blocks"
+                )
+            case _:
+                assert_never(block)
+
+
+def to_openai_messages(
+    msgs: list[ChatMessage],
+    *,
+    allow_tool_call_signatures: bool = False,
+) -> list[dict[str, Any]]:
     """Convert ChatMessage list to OpenAI-compatible message dictionaries.
 
     Handles all message types: SystemMessage, UserMessage, AssistantMessage,
@@ -148,6 +188,10 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
         elif isinstance(m, UserMessage):
             out.append({"role": "user", "content": content_to_openai(m.content)})
         elif isinstance(m, AssistantMessage):
+            _validate_chat_assistant_blocks(
+                m.blocks,
+                allow_tool_call_signatures=allow_tool_call_signatures,
+            )
             # Note: message metadata is deliberately NOT sent on the wire — it is
             # integrator/user state, opaque to the framework.
             msg: dict[str, Any] = {"role": "assistant", "content": content_to_openai(_assistant_content(m.blocks))}
@@ -176,17 +220,18 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
             if tool_calls:
                 msg["tool_calls"] = []
                 for tool in tool_calls:
-                    tool_dict = tool.model_dump(exclude={"has_provider_tool_call_id", "kind"})
-                    tool_dict["id"] = tool.tool_call_id
-                    tool_dict["type"] = "function"
+                    tool_dict: dict[str, Any] = {
+                        "id": tool.tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "arguments": tool.arguments,
+                        },
+                    }
                     if tool.signature is not None:
                         tool_dict["provider_specific_fields"] = {
                             "thought_signature": tool.signature,
                         }
-                    tool_dict["function"] = {
-                        "name": tool.name,
-                        "arguments": tool.arguments,
-                    }
                     msg["tool_calls"].append(tool_dict)
 
             out.append(msg)

@@ -38,6 +38,7 @@ from stirrup.core.models import (
     TokenUsage,
     Tool,
     ToolCall,
+    ToolMessage,
     TurnWarningMessage,
     UserMessage,
     final_text,
@@ -69,8 +70,8 @@ INTERLEAVED_BLOCKS: list[AssistantBlock] = [
 # ---------------------------------------------------------------------------
 
 
-def test_joined_text_joins_with_newline() -> None:
-    assert joined_text(INTERLEAVED_BLOCKS) == "Let me look.\nFound it."
+def test_joined_text_concatenates_exact_text_deltas() -> None:
+    assert joined_text(INTERLEAVED_BLOCKS) == "Let me look.Found it."
     assert joined_text([ToolCall(name="t", arguments="{}")]) is None
     assert joined_text([]) is None
 
@@ -93,7 +94,7 @@ def test_tool_call_and_reasoning_accessors_preserve_order() -> None:
 def test_content_projection_joins_text_blocks() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
     with pytest.warns(DeprecationWarning, match="AssistantMessage.content is deprecated"):
-        assert msg.content == "Let me look.\nFound it."
+        assert msg.content == "Let me look.Found it."
 
 
 def test_content_projection_empty_string_when_no_text_blocks() -> None:
@@ -255,26 +256,26 @@ def test_opaque_block_round_trips_and_stays_out_of_projections() -> None:
     assert tool_call_blocks(msg.blocks) == []
 
 
-def test_opaque_block_skipped_on_openai_replay() -> None:
+def test_opaque_block_rejected_on_openai_replay() -> None:
     msg = AssistantMessage(
         blocks=[
             OpaqueBlock(data=OPAQUE_PAYLOAD),
             TextBlock(text="answer"),
         ]
     )
-    [wire] = to_openai_messages([msg])
-    assert wire == {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}
+    with pytest.raises(NotImplementedError, match="OpaqueBlock"):
+        to_openai_messages([msg])
 
 
-def test_opaque_block_skipped_on_responses_replay() -> None:
+def test_opaque_block_rejected_on_responses_replay() -> None:
     msg = AssistantMessage(
         blocks=[
             OpaqueBlock(data=OPAQUE_PAYLOAD),
             TextBlock(text="answer"),
         ]
     )
-    _, items = _to_open_responses_input([msg])
-    assert [item["type"] for item in items] == ["message"]
+    with pytest.raises(NotImplementedError, match="OpaqueBlock"):
+        _to_open_responses_input([msg])
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +289,7 @@ def test_with_text_replaces_text_blocks_before_tool_calls() -> None:
     assert [b.kind for b in replaced.blocks] == ["signed_reasoning", "signed_reasoning", "text", "tool_call"]
     assert joined_text(replaced.blocks) == "redacted"
     # original untouched
-    assert joined_text(msg.blocks) == "Let me look.\nFound it."
+    assert joined_text(msg.blocks) == "Let me look.Found it."
 
 
 def test_text_block_signature_round_trips_and_blocks_rewriting() -> None:
@@ -404,6 +405,28 @@ def test_tool_call_provider_id_provenance_round_trips() -> None:
     assert restored.blocks == [call]
 
 
+def test_tool_call_normalizes_one_internal_id_and_preserves_provenance() -> None:
+    idless = ToolCall.from_provider(provider_id=None, name="t", arguments="{}")
+    native = ToolCall.from_provider(provider_id="provider-call", name="t", arguments="{}")
+
+    assert idless.tool_call_id
+    assert not idless.has_provider_tool_call_id
+    assert native.tool_call_id == "provider-call"
+    assert native.has_provider_tool_call_id
+    assert ToolCall.model_validate_json(idless.model_dump_json()) == idless
+
+
+def test_legacy_none_tool_call_id_normalizes_but_tool_result_requires_correlation() -> None:
+    call = ToolCall.model_validate({"name": "t", "arguments": "{}", "tool_call_id": None})
+
+    assert call.tool_call_id
+    assert not call.has_provider_tool_call_id
+    with pytest.raises(ValidationError):
+        ToolMessage.model_validate({"content": "result"})
+    with pytest.raises(ValidationError):
+        ToolMessage(content="result", tool_call_id="")
+
+
 @pytest.mark.parametrize(
     "block",
     [
@@ -475,8 +498,8 @@ def test_agent_injected_user_messages_round_trip_through_chat_message_union() ->
 # ---------------------------------------------------------------------------
 
 
-def test_chat_wire_byte_identical_for_non_signed_turns() -> None:
-    """A v0.1-shaped payload still produces the exact v0.1.11 wire format."""
+def test_chat_wire_from_legacy_payload_uses_strict_api_shape() -> None:
+    """A v0.1-shaped payload still produces a valid OpenAI-compatible request."""
     msg = AssistantMessage.model_validate(
         {
             "content": "hi",
@@ -491,10 +514,6 @@ def test_chat_wire_byte_identical_for_non_signed_turns() -> None:
             "reasoning_content": "think",
             "tool_calls": [
                 {
-                    "signature": None,
-                    "name": "t",
-                    "arguments": "{}",
-                    "tool_call_id": "c1",
                     "id": "c1",
                     "type": "function",
                     "function": {"name": "t", "arguments": "{}"},
@@ -534,10 +553,34 @@ def test_chat_wire_emits_one_thinking_entry_per_signed_block() -> None:
     assert wire["reasoning_content"] == "ab"
 
 
-def test_chat_wire_tool_call_dicts_carry_no_kind_key() -> None:
-    msg = AssistantMessage(blocks=[ToolCall(name="t", arguments="{}", tool_call_id="c1")])
-    (wire,) = to_openai_messages([msg])
-    assert "kind" not in wire["tool_calls"][0]
+def test_chat_wire_tool_call_has_only_supported_fields() -> None:
+    msg = AssistantMessage(
+        blocks=[ToolCall(name="t", arguments="{}", tool_call_id="c1", signature="thought-signature")]
+    )
+    with pytest.raises(NotImplementedError, match="cannot pass back signed tool calls"):
+        to_openai_messages([msg])
+
+    (wire,) = to_openai_messages([msg], allow_tool_call_signatures=True)
+    assert wire["tool_calls"] == [
+        {
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "t", "arguments": "{}"},
+            "provider_specific_fields": {"thought_signature": "thought-signature"},
+        }
+    ]
+
+
+def test_chat_wire_rejects_synthetic_tool_ids() -> None:
+    call = ToolCall.from_provider(provider_id=None, name="t", arguments="{}")
+
+    with pytest.raises(NotImplementedError, match="without a provider-issued ID"):
+        to_openai_messages(
+            [
+                AssistantMessage(blocks=[call]),
+                ToolMessage(content="done", tool_call_id=call.tool_call_id, name="t"),
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -606,7 +649,7 @@ def test_responses_replay_of_legacy_channel_payload_keeps_v01_order() -> None:
     assert [item["type"] for item in items] == ["message", "function_call", "function_call"]
 
 
-def test_responses_replay_skips_inband_and_signed_reasoning() -> None:
+def test_responses_replay_rejects_inband_and_signed_reasoning() -> None:
     msg = AssistantMessage(
         blocks=[
             ReasoningBlock(content="in-band"),
@@ -614,8 +657,8 @@ def test_responses_replay_skips_inband_and_signed_reasoning() -> None:
             TextBlock(text="hi"),
         ]
     )
-    _instructions, items = _to_open_responses_input([msg])
-    assert [item["type"] for item in items] == ["message"]
+    with pytest.raises(NotImplementedError, match="without an item ID"):
+        _to_open_responses_input([msg])
 
 
 # ---------------------------------------------------------------------------
