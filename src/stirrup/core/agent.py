@@ -40,6 +40,7 @@ from stirrup.core.models import (
     ToolUseCountMetadata,
     TurnWarningMessage,
     UserMessage,
+    llm_client_context_window,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
@@ -1465,7 +1466,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if finish_params:
                 break
 
-            pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
+            pct_context_used = assistant_message.token_usage.total / llm_client_context_window(self._client)
             if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)

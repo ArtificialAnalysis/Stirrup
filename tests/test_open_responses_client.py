@@ -293,6 +293,7 @@ class TestOpenResponsesClient:
         )
         assert client.model_slug == "gpt-4o"
         assert client.max_tokens == 50000
+        assert client.context_window == 50000
 
     @pytest.mark.asyncio
     async def test_generate_basic(self) -> None:

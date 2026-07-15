@@ -65,6 +65,7 @@ class ChatCompletionsClient(LLMClient):
         self,
         model: str,
         max_tokens: int = 64_000,
+        context_window: int | None = None,
         *,
         base_url: str | None = None,
         api_key: str | None = None,
@@ -77,7 +78,9 @@ class ChatCompletionsClient(LLMClient):
 
         Args:
             model: Model identifier (e.g., 'gpt-5', 'gpt-4o', 'o1-preview').
-            max_tokens: Maximum context window size in tokens. Defaults to 64,000.
+            max_tokens: Maximum output tokens per completion request. Defaults to 64,000.
+            context_window: Model context window size in tokens, used for summarization
+                threshold calculation. Defaults to ``max_tokens`` when omitted.
             base_url: API base URL. If None, uses OpenAI's standard URL.
                 Use for OpenAI-compatible providers (e.g., 'http://localhost:8000/v1').
             api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
@@ -91,6 +94,7 @@ class ChatCompletionsClient(LLMClient):
         """
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window = context_window if context_window is not None else max_tokens
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
 
@@ -106,8 +110,13 @@ class ChatCompletionsClient(LLMClient):
 
     @property
     def max_tokens(self) -> int:
-        """Maximum context window size in tokens."""
+        """Maximum output tokens per completion request."""
         return self._max_tokens
+
+    @property
+    def context_window(self) -> int:
+        """Model context window size in tokens, used for summarization threshold calculation."""
+        return self._context_window
 
     @property
     def model_slug(self) -> str:
@@ -174,9 +183,10 @@ class ChatCompletionsClient(LLMClient):
         # Check for context overflow
         if choice.finish_reason in ("max_tokens", "length"):
             raise ContextOverflowError(
-                f"Maximal context window tokens reached for model {self.model_slug}, "
-                f"resulting in finish reason: {choice.finish_reason}. "
-                "Reduce agent.max_tokens and try again."
+                f"Context or output token limit reached for model {self.model_slug} "
+                f"(finish reason: {choice.finish_reason}). "
+                "max_tokens caps per-request output; context_window drives summarization. "
+                "Shorten the conversation or adjust client settings."
             )
 
         msg = choice.message

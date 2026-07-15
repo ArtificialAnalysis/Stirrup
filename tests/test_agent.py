@@ -28,13 +28,47 @@ from stirrup.core.models import (
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
-class MockLLMClient(LLMClient):
-    """Mock LLM client for testing."""
+class LegacyMockLLMClient:
+    """Legacy client without context_window (pre-issue-#55 protocol surface)."""
 
-    def __init__(self, responses: list[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
+    def __init__(
+        self,
+        responses: list[AssistantMessage | Exception],
+        max_tokens: int = 100_000,
+    ) -> None:
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
+
+    @property
+    def model_slug(self) -> str:
+        return "legacy-mock-model"
+
+    @property
+    def max_tokens(self) -> int:
+        return self._max_tokens
+
+    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+        response = self.responses[self.call_count]
+        self.call_count += 1
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class MockLLMClient(LLMClient):
+    """Mock LLM client for testing."""
+
+    def __init__(
+        self,
+        responses: list[AssistantMessage | Exception],
+        max_tokens: int = 100_000,
+        context_window: int | None = None,
+    ) -> None:
+        self.responses = responses
+        self.call_count = 0
+        self._max_tokens = max_tokens
+        self._context_window = context_window if context_window is not None else max_tokens
         self.tools_seen: list[dict[str, Tool]] = []
 
     @property
@@ -44,6 +78,10 @@ class MockLLMClient(LLMClient):
     @property
     def max_tokens(self) -> int:
         return self._max_tokens
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
 
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
         self.tools_seen.append(tools)
@@ -1257,4 +1295,100 @@ async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     assert finish_params is not None
     assert finish_params.reason == "Completed"
     assert client.call_count == 5
+    assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+async def test_summarization_uses_context_window_not_max_tokens() -> None:
+    """Summarization threshold should use context_window, not max_tokens."""
+    responses = [
+        AssistantMessage(
+            content="Working",
+            tool_calls=[],
+            token_usage=TokenUsage(input=250, answer=100),  # total=350
+        ),
+        AssistantMessage(
+            content="Summary of progress.",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Completed", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    # max_tokens is large enough that 350/10000 = 0.035 < 0.3 (no summarization).
+    # context_window=1000 makes 350/1000 = 0.35 >= 0.3 (summarization triggers).
+    client = MockLLMClient(responses, max_tokens=10_000, context_window=1000)
+
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Do the task")])
+
+    assert finish_params is not None
+    assert client.call_count == 3
+    assert len(history) == 2
+    assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+async def test_legacy_client_without_context_window_falls_back_to_max_tokens() -> None:
+    """Legacy clients without context_window should use max_tokens for summarization."""
+    responses = [
+        AssistantMessage(
+            content="Working",
+            tool_calls=[],
+            token_usage=TokenUsage(input=250, answer=100),  # total=350
+        ),
+        AssistantMessage(
+            content="Summary of progress.",
+            tool_calls=[],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Completed", "paths": []}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    # Legacy client: no context_window property, so Agent falls back to max_tokens=1000.
+    # 350/1000 = 0.35 >= 0.3 cutoff triggers summarization (same as pre-#55 behavior).
+    client = LegacyMockLLMClient(responses, max_tokens=1000)
+
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Do the task")])
+
+    assert finish_params is not None
+    assert client.call_count == 3
+    assert len(history) == 2
     assert any(isinstance(msg, SummaryMessage) for msg in history[-1])

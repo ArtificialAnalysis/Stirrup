@@ -281,6 +281,7 @@ class OpenResponsesClient(LLMClient):
         self,
         model: str,
         max_tokens: int = 64_000,
+        context_window: int | None = None,
         *,
         base_url: str | None = None,
         api_key: str | None = None,
@@ -294,7 +295,9 @@ class OpenResponsesClient(LLMClient):
 
         Args:
             model: Model identifier (e.g., 'gpt-4o', 'o1-preview').
-            max_tokens: Maximum output tokens. Defaults to 64,000.
+            max_tokens: Maximum output tokens per response. Defaults to 64,000.
+            context_window: Model context window size in tokens, used for summarization
+                threshold calculation. Defaults to ``max_tokens`` when omitted.
             base_url: API base URL. If None, uses OpenAI's standard URL.
                 Use for OpenAI-compatible providers.
             api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
@@ -309,6 +312,7 @@ class OpenResponsesClient(LLMClient):
         """
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window = context_window if context_window is not None else max_tokens
         self._reasoning_effort = reasoning_effort
         self._default_instructions = instructions
         self._kwargs = kwargs or {}
@@ -330,8 +334,13 @@ class OpenResponsesClient(LLMClient):
 
     @property
     def max_tokens(self) -> int:
-        """Maximum output tokens."""
+        """Maximum output tokens per response."""
         return self._max_tokens
+
+    @property
+    def context_window(self) -> int:
+        """Model context window size in tokens, used for summarization threshold calculation."""
+        return self._context_window
 
     @property
     def model_slug(self) -> str:
@@ -408,7 +417,8 @@ class OpenResponsesClient(LLMClient):
             stop_reason = getattr(response, "incomplete_details", None)
             raise ContextOverflowError(
                 f"Response incomplete for model {self.model_slug}: {stop_reason}. "
-                "Reduce max_tokens or message length and try again."
+                "max_tokens caps per-request output; context_window drives summarization. "
+                "Shorten the conversation or adjust client settings."
             )
 
         # Parse response output

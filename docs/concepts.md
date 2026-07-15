@@ -213,7 +213,8 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `model` | `str` | required | Model identifier (e.g., `"gpt-5"`, `"deepseek-chat"`) |
-| `max_tokens` | `int` | `64_000` | Context window size |
+| `max_tokens` | `int` | `64_000` | Maximum output tokens per completion request |
+| `context_window` | `int \| None` | `None` | Model context window size for summarization; defaults to `max_tokens` |
 | `base_url` | `str \| None` | `None` | Custom API URL (for Deepseek, vLLM, etc.) |
 | `api_key` | `str \| None` | `None` | API key (defaults to `OPENROUTER_API_KEY` env var) |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
@@ -230,7 +231,8 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-sonnet-4-5"`) |
-| `max_tokens` | `int` | required | Context window size |
+| `max_tokens` | `int` | `64_000` | Maximum output tokens per completion request |
+| `context_window` | `int \| None` | `None` | Model context window size for summarization; defaults to `max_tokens` |
 | `reasoning_effort` | `str \| None` | `None` | For reasoning models (o1/o3) |
 | `kwargs` | `dict \| None` | `None` | Additional provider-specific arguments |
 
@@ -255,6 +257,10 @@ class MyCustomClient(LLMClient):
 
     @property
     def max_tokens(self) -> int:
+        return 128_000
+
+    @property
+    def context_window(self) -> int:
         return 128_000
 ```
 

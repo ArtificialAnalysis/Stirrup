@@ -20,7 +20,8 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 |--------|------|-------------|
 | `generate()` | `async method` | Generate next message with optional tool calls |
 | `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
-| `max_tokens` | `property` | Maximum context window size |
+| `max_tokens` | `property` | Maximum output tokens per completion request |
+| `context_window` | `property` | Model context window size, used for summarization threshold calculation (recommended; Agent falls back to `max_tokens` if absent) |
 
 ## Basic Implementation
 
@@ -40,10 +41,12 @@ class MyCustomClient:
         self,
         model: str,
         max_tokens: int = 64_000,
+        context_window: int | None = None,
         api_key: str | None = None,
     ):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window = context_window if context_window is not None else max_tokens
         self._api_key = api_key
 
     @property
@@ -53,6 +56,10 @@ class MyCustomClient:
     @property
     def max_tokens(self) -> int:
         return self._max_tokens
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
 
     async def generate(
         self,
@@ -102,9 +109,10 @@ from stirrup import AssistantMessage, ChatMessage, Tool, ToolCall, ToolMessage, 
 class OpenAIClient:
     """Direct OpenAI API client."""
 
-    def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000):
+    def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000, context_window: int | None = None):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window = context_window if context_window is not None else max_tokens
         self._client = openai.AsyncOpenAI()
 
     @property
@@ -114,6 +122,10 @@ class OpenAIClient:
     @property
     def max_tokens(self) -> int:
         return self._max_tokens
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
 
     def _convert_message(self, msg: ChatMessage) -> dict:
         """Convert a message to OpenAI format."""
@@ -168,6 +180,10 @@ class MockClient:
 
     @property
     def max_tokens(self) -> int:
+        return 10_000
+
+    @property
+    def context_window(self) -> int:
         return 10_000
 
     async def generate(self, messages, tools) -> AssistantMessage:

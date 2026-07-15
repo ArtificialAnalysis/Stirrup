@@ -585,6 +585,10 @@ class LLMClient(Protocol):
 
     Any LLM client must implement this protocol to work with the Agent class.
     Provides text generation with tool support and model capability inspection.
+
+    ``context_window`` is recommended for accurate summarization thresholds.
+    Legacy clients that only expose ``max_tokens`` remain supported: the Agent
+    falls back to ``max_tokens`` when ``context_window`` is absent.
     """
 
     @abstractmethod
@@ -595,6 +599,17 @@ class LLMClient(Protocol):
 
     @property
     def max_tokens(self) -> int: ...
+
+    @property
+    def context_window(self) -> int: ...
+
+
+def llm_client_context_window(client: LLMClient) -> int:
+    """Return the context window size used for summarization threshold calculation.
+
+    Falls back to ``max_tokens`` for legacy clients that predate ``context_window``.
+    """
+    return getattr(client, "context_window", client.max_tokens)
 
 
 class ToolCall(BaseModel):
