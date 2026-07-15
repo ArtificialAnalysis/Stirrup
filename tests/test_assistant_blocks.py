@@ -213,6 +213,12 @@ def test_falsy_channel_reasoning_synthesizes_no_block() -> None:
     assert msg.blocks == [TextBlock(text="hi")]
 
 
+def test_malformed_channel_content_fails_validation() -> None:
+    # A non-str, non-list v0.1 content payload must fail loudly, not vanish.
+    with pytest.raises(ValidationError, match="must be a string or list"):
+        AssistantMessage.model_validate({"role": "assistant", "content": {"oops": 1}})
+
+
 def test_channel_assignment_raises() -> None:
     msg = AssistantMessage(blocks=[TextBlock(text="x")])
     with pytest.raises(AttributeError, match="migration guide"):
@@ -315,6 +321,16 @@ def test_with_blocks_replaces_block_list() -> None:
     stripped = msg.with_blocks([b for b in msg.blocks if b.kind != "tool_call"])
     assert tool_call_blocks(stripped.blocks) == []
     assert stripped.id == msg.id
+
+
+def test_mutators_clear_provider_response_id() -> None:
+    """The continuation handle is bound to the exact emitted content; an edited copy must replay in full."""
+    msg = AssistantMessage(provider_response_id="resp_1", blocks=[TextBlock(text="original")])
+
+    assert msg.with_text("edited").provider_response_id is None
+    assert msg.with_blocks([TextBlock(text="other")]).provider_response_id is None
+    # original untouched
+    assert msg.provider_response_id == "resp_1"
 
 
 # ---------------------------------------------------------------------------

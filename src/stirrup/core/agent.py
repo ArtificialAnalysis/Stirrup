@@ -1326,7 +1326,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 summary = await self._client.generate(summary_prompt, self._active_tools)
 
                 removed = current_messages[len(task_context) :]
-                summary_content = joined_text(summary.blocks) or ""
+                summary_content = joined_text(summary.blocks)
+                if summary_content is None:
+                    # The summarizer holds the active tools, so it can answer with only a
+                    # tool call; replacing history with an empty summary would silently
+                    # erase all context past task_context.
+                    raise RuntimeError("Summarizer response contained no text blocks; cannot summarize context")
                 summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_content)
                 # Chain lineage across summarization rounds: a removed prior summary
                 # contributes the ids it already stood for, so the final summary's

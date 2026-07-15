@@ -85,10 +85,8 @@ class TestMessageConversion:
         unexpected = cast(AssistantBlock, object())
         message = AssistantMessage.model_construct(blocks=[unexpected])
 
-        with pytest.raises(
-            NotImplementedError,
-            match="Unsupported assistant block type for OpenAI Responses replay: object",
-        ):
+        # The replay match is statically exhaustive; an out-of-union object trips assert_never.
+        with pytest.raises(AssertionError, match="Expected code to be unreachable"):
             _to_open_responses_input([message])
 
     def test_assistant_message_conversion(self) -> None:
@@ -432,10 +430,39 @@ class TestResponseParsing:
             _parse_response_output([MagicMock(type="computer_call")])
 
     def test_unexpected_message_content_raises(self) -> None:
-        output = [MagicMock(type="message", content=[MagicMock(type="refusal", refusal="no")])]
+        output = [MagicMock(type="message", content=[MagicMock(type="output_audio")])]
 
         with pytest.raises(NotImplementedError, match="Unsupported OpenAI Responses message content type"):
             _parse_response_output(output)
+
+    def test_refusal_content_surfaces_as_text(self) -> None:
+        """A refusal is a normal API response: its text becomes the assistant's answer."""
+        output = [MagicMock(type="message", content=[MagicMock(type="refusal", refusal="I can't help with that.")])]
+
+        assert _parse_response_output(output) == [TextBlock(text="I can't help with that.")]
+
+    def test_encrypted_content_without_id_raises(self) -> None:
+        """The item id is the passback handle; encrypted payloads without one cannot be re-emitted."""
+        item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        item.type = "reasoning"
+        item.id = None
+        item.summary = []
+        item.encrypted_content = "opaque-zdr-payload"
+
+        with pytest.raises(ValueError, match="encrypted_content but no id"):
+            _parse_response_output([item])
+
+    def test_reasoning_summary_entry_without_text_raises(self) -> None:
+        bad_part = MagicMock(spec=["type"])
+        bad_part.type = "summary_image"
+        item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        item.type = "reasoning"
+        item.id = "rs_1"
+        item.summary = [bad_part]
+        item.encrypted_content = None
+
+        with pytest.raises(ValueError, match="reasoning summary entry has no text"):
+            _parse_response_output([item])
 
 
 class TestOpenResponsesClient:
@@ -451,7 +478,6 @@ class TestOpenResponsesClient:
         assert client.model_slug == "gpt-4o"
         assert client.max_tokens == 50000
 
-    @pytest.mark.asyncio
     async def test_generate_basic(self) -> None:
         """Test basic generation with mocked response."""
         client = OpenResponsesClient(
@@ -488,7 +514,6 @@ class TestOpenResponsesClient:
         assert result.token_usage.input == 10
         assert result.token_usage.answer == 5
 
-    @pytest.mark.asyncio
     async def test_generate_encrypted_reasoning_sends_stateless_params(self) -> None:
         """encrypted_reasoning=True sends store=false + the encrypted-content include."""
         client = OpenResponsesClient(
@@ -518,7 +543,6 @@ class TestOpenResponsesClient:
         assert request_kwargs["include"] == ["reasoning.encrypted_content"]
         assert result.provider_response_id is None
 
-    @pytest.mark.asyncio
     async def test_generate_uses_previous_response_id(self) -> None:
         client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
         mock_response = MagicMock(
@@ -546,7 +570,56 @@ class TestOpenResponsesClient:
         assert request_kwargs["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "new"}]}]
         assert result.provider_response_id == "resp_next"
 
-    @pytest.mark.asyncio
+    def test_store_false_without_encrypted_reasoning_raises_at_init(self) -> None:
+        """store=False alone captures reasoning refs whose ids dangle on the next turn."""
+        with pytest.raises(ValueError, match="store=False requires encrypted_reasoning=True"):
+            OpenResponsesClient(model="gpt-4o", api_key="test-key", kwargs={"store": False})
+
+        # With encrypted_reasoning=True the same kwargs are a valid (redundant) spelling.
+        OpenResponsesClient(model="gpt-4o", api_key="test-key", encrypted_reasoning=True, kwargs={"store": False})
+
+    async def test_configured_previous_response_id_conflict_raises(self) -> None:
+        client = OpenResponsesClient(
+            model="gpt-4o",
+            api_key="test-key",
+            kwargs={"previous_response_id": "resp_configured"},
+        )
+        client._client.responses.create = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(ValueError, match="previous_response_id conflicts"):
+            await client.generate(
+                messages=[
+                    AssistantMessage(provider_response_id="resp_history", blocks=[TextBlock(text="old")]),
+                    UserMessage(content="new"),
+                ],
+                tools={},
+            )
+
+    async def test_configured_previous_response_id_matching_history_passes(self) -> None:
+        client = OpenResponsesClient(
+            model="gpt-4o",
+            api_key="test-key",
+            kwargs={"previous_response_id": "resp_history"},
+        )
+        mock_response = MagicMock(
+            id="resp_next",
+            status="completed",
+            output=[MagicMock(type="message", content=[MagicMock(type="output_text", text="ok")])],
+            usage=MagicMock(input_tokens=1, output_tokens=1, output_tokens_details=None),
+        )
+        create_mock = AsyncMock(return_value=mock_response)
+        client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
+
+        await client.generate(
+            messages=[
+                AssistantMessage(provider_response_id="resp_history", blocks=[TextBlock(text="old")]),
+                UserMessage(content="new"),
+            ],
+            tools={},
+        )
+
+        assert create_mock.call_args.kwargs["previous_response_id"] == "resp_history"
+
     async def test_generate_with_tools(self) -> None:
         """Test generation with tool calls."""
         from stirrup.core.models import EmptyParams, Tool, ToolResult
@@ -590,7 +663,6 @@ class TestOpenResponsesClient:
         assert tool_calls[0].name == "get_time"
         assert tool_calls[0].tool_call_id == "call_xyz"
 
-    @pytest.mark.asyncio
     async def test_generate_with_reasoning_tokens(self) -> None:
         """Test that reasoning tokens are properly extracted."""
         client = OpenResponsesClient(
@@ -629,7 +701,6 @@ class TestOpenResponsesClient:
         assert result.token_usage.reasoning == 80
         assert result.token_usage.answer == 20  # 100 - 80
 
-    @pytest.mark.asyncio
     async def test_generate_incomplete_raises_error(self) -> None:
         """Test that incomplete response raises ContextOverflowError."""
         from stirrup.core.exceptions import ContextOverflowError
@@ -653,7 +724,6 @@ class TestOpenResponsesClient:
                 tools={},
             )
 
-    @pytest.mark.asyncio
     async def test_instructions_from_system_message(self) -> None:
         """Test that SystemMessage is passed as instructions parameter."""
         client = OpenResponsesClient(
@@ -692,7 +762,6 @@ class TestOpenResponsesClient:
         # Verify input doesn't contain the system message
         assert all(item.get("role") != "system" for item in call_kwargs["input"])
 
-    @pytest.mark.asyncio
     async def test_default_instructions_fallback(self) -> None:
         """Test that default instructions are used when no SystemMessage provided."""
         client = OpenResponsesClient(

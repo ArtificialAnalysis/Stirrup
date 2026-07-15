@@ -92,11 +92,11 @@ agent = Agent(
 
 ## OpenAI API Example
 
-Stirrup message types use OpenAI-compatible field names (`role`, `content`, `tool_call_id`), so conversion is straightforward. The main difference is the `tool_calls` structure—OpenAI nests them under `function`.
+Stirrup's user, system, and tool message types use OpenAI-compatible field names (`role`, `content`, `tool_call_id`), so conversion is straightforward; assistant messages are block-based, and the `joined_text` / `tool_call_blocks` helpers project them into channel shape. The main difference is the `tool_calls` structure—OpenAI nests them under `function`.
 
 ```python
 import openai
-from stirrup import AssistantMessage, ChatMessage, TextBlock, Tool, ToolCall, ToolMessage, TokenUsage
+from stirrup import AssistantMessage, ChatMessage, TextBlock, Tool, ToolCall, ToolMessage, TokenUsage, joined_text, tool_call_blocks
 
 
 class OpenAIClient:
@@ -119,11 +119,11 @@ class OpenAIClient:
         """Convert a message to OpenAI format."""
         # SystemMessage, UserMessage, ToolMessage have compatible structure
         if isinstance(msg, AssistantMessage):
-            result = {"role": "assistant", "content": str(msg.content)}
-            if msg.tool_calls:
+            result = {"role": "assistant", "content": joined_text(msg.blocks) or ""}
+            if tool_calls := tool_call_blocks(msg.blocks):
                 result["tool_calls"] = [
                     {"id": tc.tool_call_id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
-                    for tc in msg.tool_calls
+                    for tc in tool_calls
                 ]
             return result
         elif isinstance(msg, ToolMessage):
@@ -142,14 +142,16 @@ class OpenAIClient:
         response = await self._client.chat.completions.create(model=self._model, messages=api_messages, tools=api_tools)
         message = response.choices[0].message
 
+        blocks = []
+        if message.content:
+            blocks.append(TextBlock(text=message.content))
+        blocks.extend(
+            ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id)
+            for tc in (message.tool_calls or [])
+        )
+
         return AssistantMessage(
-            blocks=[
-                TextBlock(text=message.content or ""),
-                *[
-                    ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id)
-                    for tc in (message.tool_calls or [])
-                ],
-            ],
+            blocks=blocks,
             token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
         )
 ```

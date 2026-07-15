@@ -8,7 +8,7 @@ the Responses API via the `base_url` parameter.
 import os
 from collections.abc import Sequence
 from time import perf_counter
-from typing import Any
+from typing import Any, assert_never
 
 from openai import (
     APIConnectionError,
@@ -200,21 +200,24 @@ def _to_open_responses_input(
                                 "encrypted_content": encrypted_content,
                             }
                         )
+                    case ReasoningBlock():
+                        # In-band reasoning has no passback token; this client itself emits
+                        # ReasoningBlock for id-less reasoning items, and the Responses API
+                        # offers no way to replay reasoning without an item id.
+                        continue
                     case (
-                        ReasoningBlock()
-                        | SignedReasoningBlock()
+                        SignedReasoningBlock()
                         | RedactedReasoningBlock()
                         | OpaqueBlock()
                         | ImageContentBlock()
                         | VideoContentBlock()
                         | AudioContentBlock()
                     ):
-                        # These blocks have no Responses input representation.
+                        # Cross-provider or uninterpreted blocks: no Responses input
+                        # representation exists, so they are intentionally dropped.
                         continue
                     case _:
-                        raise NotImplementedError(
-                            f"Unsupported assistant block type for OpenAI Responses replay: {type(block).__name__}"
-                        )
+                        assert_never(block)
         elif isinstance(m, ToolMessage):
             # Tool results are function_call_output items
             content_str = m.content if isinstance(m.content, str) else str(m.content)
@@ -273,10 +276,12 @@ def _parse_response_output(
     """Parse response output items into ordered assistant blocks.
 
     One exhaustive pass in item order: each ``message`` item becomes its own
-    TextBlock, each ``function_call`` a ToolCall block, each ``reasoning`` item a
-    ReasoningRefBlock (id retained even when the summary is empty — it is the
-    passback handle). Unknown item and content types raise until their semantics
-    and passback behavior are explicitly implemented.
+    TextBlock (refusal content surfaces as answer text), each ``function_call``
+    a ToolCall block, each ``reasoning`` item one of EncryptedReasoningBlock /
+    ReasoningRefBlock / ReasoningBlock depending on the passback state it carries
+    (an id is retained even when the summary is empty — it is the passback
+    handle). Unknown item and content types raise until their semantics and
+    passback behavior are explicitly implemented.
     """
     blocks: list[AssistantBlock] = []
 
@@ -288,6 +293,14 @@ def _parse_response_output(
                 text_parts: list[str] = []
                 for content_item in _get_attr(item, "content", []):
                     content_type = _get_attr(content_item, "type")
+                    if content_type == "refusal":
+                        # A refusal is a normal API response, not malformed output: surface
+                        # its text as the assistant's answer rather than crashing the turn.
+                        refusal = _get_attr(content_item, "refusal")
+                        if not isinstance(refusal, str):
+                            raise ValueError(f"OpenAI Responses refusal is not a string: {refusal!r}")
+                        text_parts.append(refusal)
+                        continue
                     if content_type != "output_text":
                         raise NotImplementedError(
                             f"Unsupported OpenAI Responses message content type: {content_type!r}"
@@ -312,7 +325,14 @@ def _parse_response_output(
                 # summary can be a list of Summary objects with .text attribute
                 summary = _get_attr(item, "summary")
                 if isinstance(summary, list):
-                    summary_parts = [text for s in summary if (text := _get_attr(s, "text"))]
+                    summary_parts = []
+                    for s in summary:
+                        text = _get_attr(s, "text")
+                        if not isinstance(text, str):
+                            raise ValueError(f"OpenAI Responses reasoning summary entry has no text: {s!r}")
+                        # Empty parts carry no data; dropping them keeps re-emission faithful.
+                        if text:
+                            summary_parts.append(text)
                 elif summary:
                     summary_parts = [str(summary)]
                 else:
@@ -321,6 +341,10 @@ def _parse_response_output(
 
                 item_id = _get_attr(item, "id")
                 encrypted_content = _get_attr(item, "encrypted_content")
+                if encrypted_content and not item_id:
+                    # The id is the passback handle; without it the encrypted payload
+                    # cannot be re-emitted and ZDR reasoning state would silently vanish.
+                    raise ValueError(f"OpenAI Responses reasoning item has encrypted_content but no id: {item!r}")
                 if item_id and encrypted_content:
                     # Stateless (store=false / ZDR) item: carried whole for verbatim re-emission.
                     blocks.append(
@@ -409,6 +433,11 @@ class OpenResponsesClient(LLMClient):
         self._encrypted_reasoning = encrypted_reasoning
         self._default_instructions = instructions
         self._kwargs = kwargs or {}
+        if self._kwargs.get("store") is False and not encrypted_reasoning:
+            # Nothing is stored provider-side and no encrypted payload is requested,
+            # so reasoning would be captured as reference blocks whose ids dangle on
+            # the next turn — failing at the provider, far from this misconfiguration.
+            raise ValueError("store=False requires encrypted_reasoning=True so reasoning state can be passed back")
 
         # Initialize AsyncOpenAI client
         resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -468,7 +497,9 @@ class OpenResponsesClient(LLMClient):
         Raises:
             ContextOverflowError: If the response is incomplete due to token limits.
         """
-        stateful = not self._encrypted_reasoning and self._kwargs.get("store", True) is not False
+        # store=False without encrypted_reasoning is rejected at __init__, so
+        # encrypted_reasoning alone decides statefulness here.
+        stateful = not self._encrypted_reasoning
 
         # Convert messages to OpenResponses format. Stateful calls continue from the
         # latest provider response; stateless/ZDR calls replay encrypted reasoning items.

@@ -669,8 +669,9 @@ class TurnWarningMessage(UserMessage):
 class Reasoning(BaseModel):
     """Channel-era reasoning shape; survives as the ``AssistantMessage.reasoning`` projection carrier.
 
-    Deprecated as a standalone type: match on ReasoningBlock / SignedReasoningBlock /
-    ReasoningRefBlock instead.
+    Deprecated as a standalone type: match on the ``AnyReasoningBlock`` kinds
+    (ReasoningBlock / SignedReasoningBlock / RedactedReasoningBlock /
+    ReasoningRefBlock / EncryptedReasoningBlock) instead.
     """
 
     signature: str | None = None
@@ -683,7 +684,10 @@ class TextBlock(BaseModel, frozen=True):
     """One contiguous run of answer text in an assistant turn.
 
     ``signature`` carries opaque passback state attached to this exact block,
-    e.g. a Google thought signature emitted on a visible text part.
+    e.g. a Google thought signature emitted on a visible text part. It exists
+    for external clients only: the built-in clients never set it and drop it
+    on replay (they re-emit only ``text``). An external client that sets it is
+    responsible for re-emitting it on passback.
     """
 
     kind: Literal["text"] = "text"
@@ -779,6 +783,15 @@ type AnyReasoningBlock = (
 )
 """The reasoning family: one kind per passback mechanism."""
 
+REASONING_BLOCK_TYPES = (
+    ReasoningBlock,
+    SignedReasoningBlock,
+    RedactedReasoningBlock,
+    ReasoningRefBlock,
+    EncryptedReasoningBlock,
+)
+"""Runtime mirror of ``AnyReasoningBlock`` for isinstance checks — keep in lockstep."""
+
 # No current provider signs *and* references the same reasoning payload; if one
 # appears, it becomes a new kind rather than fields grafted onto an existing one.
 type AssistantBlock = Annotated[
@@ -829,18 +842,7 @@ def tool_call_blocks(blocks: Sequence[AssistantBlock]) -> list[ToolCall]:
 
 def reasoning_blocks(blocks: Sequence[AssistantBlock]) -> list[AnyReasoningBlock]:
     """Reasoning blocks (any kind) in emission order."""
-    return [
-        block
-        for block in blocks
-        if isinstance(
-            block,
-            ReasoningBlock
-            | SignedReasoningBlock
-            | RedactedReasoningBlock
-            | ReasoningRefBlock
-            | EncryptedReasoningBlock,
-        )
-    ]
+    return [block for block in blocks if isinstance(block, REASONING_BLOCK_TYPES)]
 
 
 def _reasoning_to_block(reasoning: object) -> object:
@@ -949,6 +951,8 @@ class AssistantMessage(BaseModel):
                         blocks.append(TextBlock(text=item))
                 else:
                     blocks.append(item)  # media blocks already carry their kind discriminator
+        elif content is not None:
+            raise ValueError(f"AssistantMessage 'content' must be a string or list, got {type(content).__name__}")
         blocks.extend({**tc, "kind": "tool_call"} if isinstance(tc, dict) else tc for tc in tool_calls or [])
         upgraded["blocks"] = blocks
         return upgraded
@@ -1005,19 +1009,22 @@ class AssistantMessage(BaseModel):
     def with_text(self, text: str) -> "AssistantMessage":
         """Copy with all text blocks replaced by one text block carrying ``text``.
 
-        The replacement sits where channel-era text sat: after reasoning, before tool calls.
+        The replacement sits where channel-era text sat: before the first tool call.
         Signed text cannot be rewritten because its signature is bound to the exact block.
+        ``provider_response_id`` is cleared: the handle is bound to the exact emitted
+        content, which the copy no longer carries — keeping it would make stateful
+        replay silently substitute the provider's stored (unedited) turn.
         """
         if any(isinstance(block, TextBlock) and block.signature is not None for block in self.blocks):
             raise ValueError("Cannot replace signed text blocks; their signatures are bound to the original text")
         replaced: list[AssistantBlock] = [block for block in self.blocks if not isinstance(block, TextBlock)]
         insert_at = next((i for i, block in enumerate(replaced) if isinstance(block, ToolCall)), len(replaced))
         replaced.insert(insert_at, TextBlock(text=text))
-        return self.model_copy(update={"blocks": replaced})
+        return self.model_copy(update={"blocks": replaced, "provider_response_id": None})
 
     def with_blocks(self, blocks: Sequence[AssistantBlock]) -> "AssistantMessage":
-        """Copy with ``blocks`` as the new block list."""
-        return self.model_copy(update={"blocks": list(blocks)})
+        """Copy with ``blocks`` as the new block list; clears ``provider_response_id`` (see ``with_text``)."""
+        return self.model_copy(update={"blocks": list(blocks), "provider_response_id": None})
 
     @property
     def e2e_otps(self) -> float | None:

@@ -81,8 +81,14 @@ A list of message groups representing the conversation history. Each group conta
 An assistant turn is stored as `blocks`, preserving the model's actual emission order
 (modern models interleave thinking → text → thinking → tool call). Each block is
 discriminated on `kind`: `text`, `reasoning` (in-band), `signed_reasoning`,
-`redacted_reasoning`, `reasoning_ref` (provider-side reference), `tool_call`, and the
-media block kinds.
+`redacted_reasoning`, `reasoning_ref` (provider-side reference), `encrypted_reasoning`
+(opaque payload for stateless / zero-data-retention passback), `opaque`
+(provider-native block carried uninterpreted), `tool_call`, and the media block kinds.
+
+Alongside its blocks, an `AssistantMessage` may carry `provider_response_id` —
+provider-attached continuation state (e.g. an OpenAI Responses `resp_...` id). The
+Responses client uses it in its default stateful mode to continue conversations via
+`previous_response_id` instead of replaying full history.
 
 ```python
 history = [
