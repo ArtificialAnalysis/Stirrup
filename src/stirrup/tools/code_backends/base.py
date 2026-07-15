@@ -41,8 +41,7 @@ _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
         "single simple command without an assignment prefix."
     ),
     "shell_keyword": (
-        "The command begins with a shell keyword such as time, coproc, or !. Run a single "
-        "simple command."
+        "The command begins with a shell keyword such as time, coproc, or !. Run a single simple command."
     ),
 }
 
