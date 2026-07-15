@@ -12,18 +12,26 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import islice, product
 from pathlib import Path
 from typing import Any
 
 from pydantic import TypeAdapter
 
 from stirrup.core.models import (
+    AssistantMessage,
     AudioContentBlock,
     ChatMessage,
     ImageContentBlock,
+    ReasoningBlock,
+    SignedReasoningBlock,
     SummaryMessage,
+    TextBlock,
+    ToolCall,
+    ToolMessage,
     TurnWarningMessage,
     VideoContentBlock,
+    _upgrade_legacy_message_sequence,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +41,10 @@ DEFAULT_CACHE_DIR = Path("~/.cache/stirrup/").expanduser()
 
 # TypeAdapter for deserializing ChatMessage discriminated union
 ChatMessageAdapter: TypeAdapter[ChatMessage] = TypeAdapter(ChatMessage)
+
+
+def _short_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
 
 
 def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
@@ -54,8 +66,135 @@ def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
             ensure_ascii=True,
         )
 
-    hash_bytes = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    return hash_bytes[:12]
+    return _short_hash(content)
+
+
+@dataclass(frozen=True)
+class _LegacyMessageSchema:
+    assistant_id: bool
+    assistant_metadata: bool
+    timings: bool
+    answer_tokens: bool
+    user_kind: bool
+
+
+_LEGACY_MESSAGE_SCHEMAS = (
+    _LegacyMessageSchema(True, True, True, True, True),  # v0.1.10-12
+    _LegacyMessageSchema(True, True, True, True, False),  # v0.1.9
+    _LegacyMessageSchema(False, False, True, True, False),  # v0.1.7-8
+    _LegacyMessageSchema(False, False, False, False, False),  # v0.1.5-6
+)
+_MAX_AMBIGUOUS_CONTENT_COMBINATIONS = 256
+
+
+def _serialize_legacy_assistant(
+    message: AssistantMessage,
+    schema: _LegacyMessageSchema,
+) -> list[dict[str, Any]] | None:
+    """Project a block-native assistant into all lossless shapes for one v0.1 schema."""
+    if message.provider_response_id is not None:
+        return None
+
+    reasoning: dict[str, str | None] | None = None
+    content_parts: list[dict[str, Any] | str] = []
+    tool_calls: list[dict[str, Any]] = []
+    phase = 0
+    for block in message.blocks:
+        match block:
+            case ReasoningBlock(content=content) if phase == 0 and reasoning is None:
+                reasoning = {"signature": None, "content": content}
+            case SignedReasoningBlock(signature=signature, content=content) if phase == 0 and reasoning is None:
+                reasoning = {"signature": signature, "content": content}
+            case TextBlock(text=text, signature=None) if phase <= 1 and text:
+                phase = 1
+                content_parts.append(text)
+            case ImageContentBlock() | VideoContentBlock() | AudioContentBlock() if phase <= 1:
+                phase = 1
+                serialized = _serialize_content_block(block)
+                if not isinstance(serialized, dict):
+                    return None
+                content_parts.append(serialized)
+            case ToolCall() if phase <= 2:
+                phase = 2
+                tool_calls.append(
+                    {
+                        "signature": block.signature,
+                        "name": block.name,
+                        "arguments": block.arguments,
+                        "tool_call_id": block.tool_call_id if block.has_provider_tool_call_id else None,
+                    }
+                )
+            case _:
+                return None
+
+    content_variants: list[str | list[dict[str, Any] | str]]
+    if not content_parts:
+        content_variants = ["", [], [""]]
+    elif len(content_parts) == 1 and isinstance(content_parts[0], str):
+        content_variants = [content_parts[0], [content_parts[0]]]
+    else:
+        content_variants = [content_parts]
+
+    serialized = message.model_dump(mode="json")
+    serialized.pop("blocks")
+    serialized.pop("provider_response_id")
+    serialized.update(reasoning=reasoning, tool_calls=tool_calls)
+    if not schema.assistant_id:
+        serialized.pop("id")
+    if not schema.assistant_metadata:
+        serialized.pop("metadata")
+    if not schema.timings:
+        serialized.pop("request_start_time")
+        serialized.pop("request_end_time")
+    if not schema.answer_tokens:
+        token_usage = dict(serialized["token_usage"])
+        token_usage["output"] = token_usage.pop("answer")
+        serialized["token_usage"] = token_usage
+    return [{**serialized, "content": content} for content in content_variants]
+
+
+def compute_legacy_task_hashes(init_msgs: str | list[ChatMessage]) -> list[str]:
+    """Compute cache-key candidates for every cache-bearing v0.1 message schema."""
+    if isinstance(init_msgs, str):
+        return []
+
+    current_hash = compute_task_hash(init_msgs)
+    hashes: list[str] = []
+    for schema in _LEGACY_MESSAGE_SCHEMAS:
+        message_variants: list[list[dict[str, Any]]] = []
+        synthetic_call_ids: set[str] = set()
+        for message in init_msgs:
+            if isinstance(message, AssistantMessage):
+                variants = _serialize_legacy_assistant(message, schema)
+                if variants is None:
+                    return []
+                message_variants.append(variants)
+                synthetic_call_ids.update(
+                    block.tool_call_id
+                    for block in message.blocks
+                    if isinstance(block, ToolCall) and not block.has_provider_tool_call_id
+                )
+                continue
+            data = serialize_message(message)
+            data.pop("replaced_ids", None)
+            if not schema.user_kind and data.get("role") == "user":
+                data.pop("kind", None)
+            if isinstance(message, ToolMessage) and not schema.timings:
+                data.pop("tool_start_time")
+                data.pop("tool_end_time")
+            if isinstance(message, ToolMessage) and message.tool_call_id in synthetic_call_ids:
+                data["tool_call_id"] = None
+                synthetic_call_ids.remove(message.tool_call_id)
+            message_variants.append([data])
+        combinations = [
+            tuple(variants[min(index, len(variants) - 1)] for variants in message_variants) for index in range(3)
+        ]
+        combinations.extend(islice(product(*message_variants), _MAX_AMBIGUOUS_CONTENT_COMBINATIONS))
+        for serialized in combinations:
+            candidate = _short_hash(json.dumps(serialized, sort_keys=True, ensure_ascii=True))
+            if candidate != current_hash and candidate not in hashes:
+                hashes.append(candidate)
+    return hashes
 
 
 def _serialize_content_block(block: Any) -> dict | str:  # noqa: ANN401
@@ -147,7 +286,7 @@ def serialize_message(msg: ChatMessage) -> dict:
     return data
 
 
-def deserialize_message(data: dict) -> ChatMessage:
+def deserialize_message(data: dict[str, Any]) -> ChatMessage:
     """Deserialize a ChatMessage from JSON format.
 
     Handles base64-encoded binary content blocks.
@@ -158,6 +297,12 @@ def deserialize_message(data: dict) -> ChatMessage:
     Returns:
         Restored ChatMessage object.
     """
+    data = dict(data)
+    if data.get("role") == "user" and "kind" not in data:
+        # v0.1.1-9 had no user discriminator; summaries were indistinguishable
+        # from ordinary user messages on disk and historically reloaded as such.
+        data["kind"] = "user"
+
     # Handle content field which may contain base64-encoded binary blocks
     content = data.get("content")
     if isinstance(content, list):
@@ -230,7 +375,7 @@ def _serialize_run_metadata_by_turn(
     return {turn_id: _serialize_run_metadata(turn_metadata) for turn_id, turn_metadata in run_metadata_by_turn.items()}
 
 
-def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
+def deserialize_messages(data: list[dict[str, Any]], *, scope: str = "") -> list[ChatMessage]:
     """Deserialize a list of ChatMessages from JSON format.
 
     Args:
@@ -239,7 +384,15 @@ def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
     Returns:
         List of restored ChatMessage objects.
     """
-    return [deserialize_message(msg_data) for msg_data in data]
+    upgraded = _upgrade_legacy_message_sequence(data, scope=scope)
+    if not isinstance(upgraded, list):
+        raise ValueError("Serialized message history must be a list of message dictionaries")
+    messages: list[ChatMessage] = []
+    for message in upgraded:
+        if not isinstance(message, dict) or not all(isinstance(key, str) for key in message):
+            raise ValueError("Serialized message history must be a list of message dictionaries")
+        messages.append(deserialize_message({key: value for key, value in message.items() if isinstance(key, str)}))
+    return messages
 
 
 @dataclass
@@ -281,13 +434,20 @@ class CacheState:
     @classmethod
     def from_dict(cls, data: dict) -> "CacheState":
         """Create CacheState from JSON dictionary."""
+        run_metadata_by_turn = data.get("run_metadata_by_turn")
+        if run_metadata_by_turn is None:
+            legacy_run_metadata = data.get("run_metadata")
+            run_metadata_by_turn = {} if legacy_run_metadata is None else {"__legacy__": legacy_run_metadata}
         return cls(
-            msgs=deserialize_messages(data["msgs"]),
-            full_msg_history=[deserialize_messages(group) for group in data["full_msg_history"]],
+            msgs=deserialize_messages(data["msgs"], scope="msgs"),
+            full_msg_history=[
+                deserialize_messages(group, scope=f"full:{index}")
+                for index, group in enumerate(data["full_msg_history"])
+            ],
             task_hash=data["task_hash"],
             timestamp=data.get("timestamp", ""),
             agent_name=data.get("agent_name", ""),
-            run_metadata_by_turn=data["run_metadata_by_turn"],
+            run_metadata_by_turn=run_metadata_by_turn,
         )
 
 

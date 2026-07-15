@@ -1,4 +1,5 @@
 import base64
+import json
 import mimetypes
 import warnings
 from abc import ABC, abstractmethod
@@ -10,8 +11,8 @@ from io import BytesIO
 from math import isinf, isnan, sqrt
 from tempfile import NamedTemporaryFile
 from types import TracebackType
-from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, cast, overload, runtime_checkable
-from uuid import uuid4
+from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, overload, runtime_checkable
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import filetype
 from moviepy import AudioFileClip, VideoFileClip
@@ -463,8 +464,9 @@ class TokenUsage(BaseModel):
                 DeprecationWarning,
                 stacklevel=3,
             )
-            values = cast("dict[str, Any]", data)
+            values = dict(data)
             values.setdefault("answer", values.pop("output"))
+            return values
         return data
 
     @property
@@ -909,7 +911,7 @@ def _reasoning_to_block(reasoning: object) -> object:
 
 _CHANNEL_ASSIGNMENT_ERROR = (
     "AssistantMessage.{channel} is a read-only projection of blocks; "
-    "use with_text()/with_blocks() or construct a new message. "
+    "use with_blocks() or construct a new message. "
     "See the v0.2 migration guide (CHANGELOG.md, BREAKING)."
 )
 _CHANNEL_PROJECTION_DEPRECATION = (
@@ -933,8 +935,8 @@ class AssistantMessage(BaseModel):
     ``reasoning`` / ``tool_calls`` attributes are read-only projections of it.
     Serialized v0.1 payloads upgrade to blocks during validation. Channel-shaped
     construction is not part of the v0.2 API; new code constructs blocks directly.
-    Mixing ``blocks`` with non-empty legacy channel keys raises. Use
-    ``with_text`` / ``with_blocks`` instead of channel assignment.
+    Mixing ``blocks`` with non-empty legacy channel keys raises. Use ``with_blocks``
+    or construct a new message instead of channel assignment.
     """
 
     id: str = Field(default_factory=lambda: uuid4().hex)
@@ -1058,21 +1060,29 @@ class AssistantMessage(BaseModel):
 
     @property
     def reasoning(self) -> Reasoning | None:
-        """Merged channel view: concatenated reasoning content plus the first signature.
+        """Lossless channel-era reasoning view.
 
         Redacted blocks carry no readable content and no channel-era equivalent;
-        they contribute nothing here.
+        they contribute nothing here. Multiple signed blocks, or signed reasoning
+        mixed with another readable reasoning kind, cannot fit the legacy shape and
+        raise instead of manufacturing a mismatched signature/content pair.
         """
         _warn_channel_projection("reasoning", "use reasoning_blocks(message.blocks)")
         rblocks = reasoning_blocks(self.blocks)
-        if not rblocks:
+        readable = [block for block in rblocks if not isinstance(block, RedactedReasoningBlock)]
+        if not readable:
             return None
-        signature = next(
-            (block.signature for block in rblocks if isinstance(block, SignedReasoningBlock)),
-            None,
-        )
-        content = "".join(block.content for block in rblocks if not isinstance(block, RedactedReasoningBlock))
-        return Reasoning(signature=signature, content=content)
+        signed = [block for block in readable if isinstance(block, SignedReasoningBlock)]
+        other_readable = [block for block in readable if not isinstance(block, SignedReasoningBlock)]
+        if len(signed) > 1 or (signed and other_readable):
+            raise NotImplementedError(
+                "AssistantMessage.reasoning cannot represent multiple signed blocks or signed reasoning mixed "
+                "with another readable reasoning kind; use reasoning_blocks(message.blocks)"
+            )
+        if signed:
+            return Reasoning(signature=signed[0].signature, content=signed[0].content)
+        content = "".join(block.content for block in readable)
+        return Reasoning(content=content)
 
     @property
     def tool_calls(self) -> list[ToolCall]:
@@ -1092,24 +1102,8 @@ class AssistantMessage(BaseModel):
     def tool_calls(self, _value: object) -> None:
         raise AttributeError(_CHANNEL_ASSIGNMENT_ERROR.format(channel="tool_calls"))
 
-    def with_text(self, text: str) -> "AssistantMessage":
-        """Copy with all text blocks replaced by one text block carrying ``text``.
-
-        The replacement sits where channel-era text sat: before the first tool call.
-        Signed text cannot be rewritten because its signature is bound to the exact block.
-        ``provider_response_id`` is cleared: the handle is bound to the exact emitted
-        content, which the copy no longer carries — keeping it would make stateful
-        replay silently substitute the provider's stored (unedited) turn.
-        """
-        if any(isinstance(block, TextBlock) and block.signature is not None for block in self.blocks):
-            raise ValueError("Cannot replace signed text blocks; their signatures are bound to the original text")
-        replaced: list[AssistantBlock] = [block for block in self.blocks if not isinstance(block, TextBlock)]
-        insert_at = next((i for i, block in enumerate(replaced) if isinstance(block, ToolCall)), len(replaced))
-        replaced.insert(insert_at, TextBlock(text=text))
-        return self.model_copy(update={"blocks": replaced})
-
     def with_blocks(self, blocks: Sequence[AssistantBlock]) -> "AssistantMessage":
-        """Copy with ``blocks`` as a frozen sequence; clears ``provider_response_id`` (see ``with_text``)."""
+        """Copy with ``blocks`` frozen; clear continuation state bound to the old blocks."""
         return self.model_copy(update={"blocks": blocks})
 
     @property
@@ -1169,6 +1163,106 @@ type ChatMessage = Annotated[
 """Discriminated union of all message types, automatically parsed based on role field."""
 
 
+def _upgrade_legacy_message_sequence(messages: object, *, scope: str = "") -> object:
+    """Correlate nullable v0.1 tool-call/result IDs before per-message validation.
+
+    v0.1 allowed both sides of tool correlation to omit their ID. A single-message
+    validator cannot recover that relationship, so sequence readers assign a stable
+    UUID5 to each idless call and copy it to the following null-ID result in emission
+    order. Explicit provider IDs are never rewritten.
+    """
+    if not isinstance(messages, list | tuple):
+        return messages
+
+    upgraded_messages: list[object] = []
+    pending_calls: list[tuple[str, str | None]] = []
+    assistant_ordinal = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            pending_calls.clear()
+            upgraded_messages.append(message)
+            continue
+
+        upgraded = dict(message)
+        match upgraded.get("role"):
+            case "assistant":
+                pending_calls.clear()
+                assistant_id = upgraded.get("id")
+                if not isinstance(assistant_id, str) or not assistant_id:
+                    canonical_message = json.dumps(
+                        upgraded,
+                        sort_keys=True,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        default=repr,
+                    )
+                    assistant_id = uuid5(
+                        NAMESPACE_URL,
+                        f"stirrup:v0.1-assistant:{scope}:{assistant_ordinal}:{canonical_message}",
+                    ).hex
+                    upgraded["id"] = assistant_id
+                assistant_ordinal += 1
+                # Transitional dumps may carry canonical blocks alongside empty
+                # channel-era fields. Blocks are authoritative whenever present.
+                container_key = "blocks" if isinstance(upgraded.get("blocks"), list) else "tool_calls"
+                items = upgraded.get(container_key)
+                if not isinstance(items, list):
+                    upgraded_messages.append(upgraded)
+                    continue
+
+                migrated_items: list[object] = []
+                call_ordinal = 0
+                for item in items:
+                    is_tool_call = container_key == "tool_calls" or (
+                        isinstance(item, dict) and item.get("kind") == "tool_call"
+                    )
+                    if not is_tool_call or not isinstance(item, dict):
+                        migrated_items.append(item)
+                        continue
+
+                    call = dict(item)
+                    call_id = call.get("tool_call_id")
+                    if call_id in (None, ""):
+                        call_id = uuid5(
+                            NAMESPACE_URL,
+                            f"stirrup:v0.1-tool-call:{assistant_id}:{call_ordinal}",
+                        ).hex
+                        call["tool_call_id"] = call_id
+                        call["has_provider_tool_call_id"] = False
+                    if not isinstance(call_id, str):
+                        raise ValueError("Legacy tool_call_id must be a string or null")
+                    call_name = call.get("name")
+                    pending_calls.append((call_id, call_name if isinstance(call_name, str) else None))
+                    migrated_items.append(call)
+                    call_ordinal += 1
+                upgraded[container_key] = migrated_items
+
+            case "tool":
+                result_id = upgraded.get("tool_call_id")
+                if result_id in (None, ""):
+                    if not pending_calls:
+                        raise ValueError("Cannot correlate a null-ID v0.1 tool result with a preceding tool call")
+                    expected_id, expected_name = pending_calls.pop(0)
+                    result_name = upgraded.get("name")
+                    if isinstance(result_name, str) and expected_name is not None and result_name != expected_name:
+                        raise ValueError(
+                            f"Cannot correlate v0.1 tool result {result_name!r} with preceding call {expected_name!r}"
+                        )
+                    upgraded["tool_call_id"] = expected_id
+                elif isinstance(result_id, str):
+                    pending_calls = [call for call in pending_calls if call[0] != result_id]
+
+            case "user":
+                pending_calls.clear()
+                upgraded.setdefault("kind", "user")
+
+            case _:
+                pending_calls.clear()
+
+        upgraded_messages.append(upgraded)
+    return upgraded_messages
+
+
 class SubAgentMetadata(BaseModel):
     """Metadata from sub-agent execution including token usage, message history, and child run metadata.
 
@@ -1177,6 +1271,20 @@ class SubAgentMetadata(BaseModel):
 
     message_history: list[list[ChatMessage]]
     run_metadata: Annotated[dict[str, Any], Field(default_factory=dict)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_history(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        upgraded = dict(data)
+        history = upgraded.get("message_history")
+        if isinstance(history, list | tuple):
+            upgraded["message_history"] = [
+                _upgrade_legacy_message_sequence(group, scope=f"subagent:{index}")
+                for index, group in enumerate(history)
+            ]
+        return upgraded
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":
         """Combine metadata from multiple subagent calls."""

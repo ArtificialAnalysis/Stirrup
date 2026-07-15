@@ -76,3 +76,14 @@ def test_token_usage_output_deprecation_warning() -> None:
     assert len(w) == 1
     assert issubclass(w[0].category, DeprecationWarning)
     assert "output" in str(w[0].message).lower()
+
+
+def test_token_usage_legacy_upgrade_does_not_mutate_input() -> None:
+    payload = {"input": 10, "output": 5, "reasoning": 2}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        usage = TokenUsage.model_validate(payload)
+
+    assert usage == TokenUsage(input=10, answer=5, reasoning=2)
+    assert payload == {"input": 10, "output": 5, "reasoning": 2}

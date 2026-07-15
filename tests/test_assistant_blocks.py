@@ -110,13 +110,30 @@ def test_content_projection_media_list_in_block_order() -> None:
         assert msg.content == ["see:", image, "above"]
 
 
-def test_reasoning_projection_concatenates_without_separator_and_takes_first_signature() -> None:
+def test_reasoning_projection_rejects_multiple_signed_blocks() -> None:
     msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
+    with (
+        pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"),
+        pytest.raises(NotImplementedError, match="cannot represent multiple signed blocks"),
+    ):
+        _ = msg.reasoning
+
+
+def test_reasoning_projection_rejects_signed_and_unsigned_mix() -> None:
+    msg = AssistantMessage(
+        blocks=[SignedReasoningBlock(signature="sig", content="signed"), ReasoningBlock(content="unsigned")]
+    )
+    with (
+        pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"),
+        pytest.raises(NotImplementedError, match="signed reasoning mixed"),
+    ):
+        _ = msg.reasoning
+
+
+def test_reasoning_projection_concatenates_unsigned_blocks() -> None:
+    msg = AssistantMessage(blocks=[ReasoningBlock(content="one"), ReasoningBlock(content="two")])
     with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
-        reasoning = msg.reasoning
-    assert reasoning is not None
-    assert reasoning.signature == "sig-1"
-    assert reasoning.content == "first thoughtsecond thought"
+        assert msg.reasoning == Reasoning(content="onetwo")
 
 
 def test_reasoning_projection_none_without_reasoning_blocks() -> None:
@@ -136,6 +153,9 @@ def test_reasoning_projection_redacted_blocks_contribute_nothing() -> None:
     assert reasoning is not None
     assert reasoning.content == "visible"
     assert reasoning.signature == "sig"
+
+    with pytest.warns(DeprecationWarning, match="AssistantMessage.reasoning is deprecated"):
+        assert AssistantMessage(blocks=[RedactedReasoningBlock(data="opaque")]).reasoning is None
 
 
 def test_tool_calls_projection() -> None:
@@ -279,26 +299,15 @@ def test_opaque_block_rejected_on_responses_replay() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Explicit mutators
+# Explicit block replacement
 # ---------------------------------------------------------------------------
 
 
-def test_with_text_replaces_text_blocks_before_tool_calls() -> None:
-    msg = AssistantMessage(blocks=INTERLEAVED_BLOCKS)
-    replaced = msg.with_text("redacted")
-    assert [b.kind for b in replaced.blocks] == ["signed_reasoning", "signed_reasoning", "text", "tool_call"]
-    assert joined_text(replaced.blocks) == "redacted"
-    # original untouched
-    assert joined_text(msg.blocks) == "Let me look.Found it."
-
-
-def test_text_block_signature_round_trips_and_blocks_rewriting() -> None:
+def test_text_block_signature_round_trips() -> None:
     block = TextBlock(text="provider-bound", signature="sig-1")
     message = AssistantMessage.model_validate(AssistantMessage(blocks=[block]).model_dump(mode="json"))
 
     assert message.blocks == (block,)
-    with pytest.raises(ValueError, match="Cannot replace signed text blocks"):
-        message.with_text("rewritten")
 
 
 def test_assistant_blocks_are_frozen_and_encrypted_summaries_are_deeply_immutable() -> None:
@@ -337,7 +346,6 @@ def test_mutators_clear_provider_response_id() -> None:
     """The continuation handle is bound to the exact emitted content; an edited copy must replay in full."""
     msg = AssistantMessage(provider_response_id="resp_1", blocks=[TextBlock(text="original")])
 
-    assert msg.with_text("edited").provider_response_id is None
     assert msg.with_blocks([TextBlock(text="other")]).provider_response_id is None
     copied = msg.model_copy(update={"blocks": [TextBlock(text="copied")]})
     assert copied.blocks == (TextBlock(text="copied"),)
