@@ -3,7 +3,7 @@ import mimetypes
 import warnings
 from abc import ABC, abstractmethod
 from base64 import b64encode
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -845,6 +845,7 @@ type AssistantBlock = Annotated[
 """One block of an assistant turn, discriminated on ``kind``."""
 
 _ASSISTANT_BLOCKS_ADAPTER = TypeAdapter(list[AssistantBlock])
+type _CopyFilter = Set[int] | Set[str] | Mapping[int, Any] | Mapping[str, Any]
 
 _REASONING_SUMMARY_SEPARATOR = "\n"
 
@@ -948,15 +949,41 @@ class AssistantMessage(BaseModel):
     def _freeze_blocks(cls, blocks: Sequence[AssistantBlock]) -> tuple[AssistantBlock, ...]:
         return tuple(blocks)
 
-    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
-        """Copy safely when replacing blocks, which Pydantic otherwise leaves unvalidated."""
-        if update is not None and "blocks" in update:
-            update = {
+    @staticmethod
+    def _prepare_copy_update(
+        update: Mapping[str, Any] | None,
+        *,
+        clear_continuation: bool = False,
+    ) -> dict[str, Any] | None:
+        if update is None:
+            return {"provider_response_id": None} if clear_continuation else None
+        if "blocks" in update:
+            return {
                 **update,
                 "blocks": tuple(_ASSISTANT_BLOCKS_ADAPTER.validate_python(update["blocks"])),
                 "provider_response_id": None,
             }
-        return super().model_copy(update=update, deep=deep)
+        return {**update, "provider_response_id": None} if clear_continuation else dict(update)
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        """Copy safely when replacing blocks, which Pydantic otherwise leaves unvalidated."""
+        return super().model_copy(update=self._prepare_copy_update(update), deep=deep)
+
+    def copy(
+        self,
+        *,
+        include: _CopyFilter | None = None,
+        exclude: _CopyFilter | None = None,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """Keep the deprecated Pydantic copy path from bypassing block invariants."""
+        return super().copy(  # ty: ignore[deprecated]
+            include=include,
+            exclude=exclude,
+            update=self._prepare_copy_update(update, clear_continuation=include is not None or exclude is not None),
+            deep=deep,
+        )
 
     @model_validator(mode="before")
     @classmethod

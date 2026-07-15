@@ -341,6 +341,10 @@ def test_mutators_clear_provider_response_id() -> None:
     copied = msg.model_copy(update={"blocks": [TextBlock(text="copied")]})
     assert copied.blocks == (TextBlock(text="copied"),)
     assert copied.provider_response_id is None
+    with pytest.warns(DeprecationWarning):
+        legacy_copy = msg.copy(update={"blocks": [TextBlock(text="legacy copy")]})
+    assert legacy_copy.blocks == (TextBlock(text="legacy copy"),)
+    assert legacy_copy.provider_response_id is None
     # original untouched
     assert msg.provider_response_id == "resp_1"
 
