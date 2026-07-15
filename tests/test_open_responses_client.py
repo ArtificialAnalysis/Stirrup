@@ -1,9 +1,12 @@
 """Tests for OpenResponsesClient."""
 
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from httpx import Request, Response
+from openai import APIConnectionError, APIStatusError, BadRequestError, NotFoundError
+from tenacity import wait_none
 
 from stirrup.clients.open_responses_client import (
     OpenResponsesClient,
@@ -30,6 +33,30 @@ from stirrup.core.models import (
     reasoning_blocks,
     tool_call_blocks,
 )
+
+
+def _status_error(
+    error_type: type[APIStatusError],
+    status_code: int,
+    *,
+    code: str,
+    param: str | None,
+) -> APIStatusError:
+    request = Request("POST", "https://api.openai.com/v1/responses")
+    return error_type(
+        "Responses request failed",
+        response=Response(status_code, request=request),
+        body={"message": "request failed", "type": "invalid_request_error", "code": code, "param": param},
+    )
+
+
+def _previous_response_not_found_error() -> APIStatusError:
+    return _status_error(
+        BadRequestError,
+        400,
+        code="previous_response_not_found",
+        param="previous_response_id",
+    )
 
 
 class TestContentConversion:
@@ -154,6 +181,12 @@ class TestMessageConversion:
             "call_id": "call_123",
             "output": "Search results here",
         }
+
+    def test_non_string_tool_message_output_raises(self) -> None:
+        message = ToolMessage(content=["part one", "part two"], tool_call_id="call_123")
+
+        with pytest.raises(NotImplementedError, match="require string content"):
+            _to_open_responses_input([message])
 
     def test_full_conversation_flow(self) -> None:
         """Test converting a complete conversation with tool use."""
@@ -642,44 +675,109 @@ class TestOpenResponsesClient:
         assert request_kwargs["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "new"}]}]
         assert result.provider_response_id == "resp_next"
 
-    def test_store_false_without_encrypted_reasoning_raises_at_init(self) -> None:
-        """store=False alone captures reasoning refs whose ids dangle on the next turn."""
-        with pytest.raises(ValueError, match="store=False requires encrypted_reasoning=True"):
-            OpenResponsesClient(model="gpt-4o", api_key="test-key", kwargs={"store": False})
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("background", True),
+            ("conversation", "conv_123"),
+            ("model", "other-model"),
+            ("input", []),
+            ("instructions", "hidden override"),
+            ("max_output_tokens", 1),
+            ("previous_response_id", "resp_configured"),
+            ("store", False),
+            ("stream", True),
+        ],
+    )
+    def test_client_owned_kwargs_raise_at_init(self, key: str, value: object) -> None:
+        with pytest.raises(ValueError, match="owns request keys"):
+            OpenResponsesClient(model="gpt-4o", api_key="test-key", kwargs={key: value})
 
-        # With encrypted_reasoning=True the same kwargs are a valid (redundant) spelling.
-        OpenResponsesClient(model="gpt-4o", api_key="test-key", encrypted_reasoning=True, kwargs={"store": False})
-
-    async def test_configured_previous_response_id_conflict_raises(self) -> None:
-        client = OpenResponsesClient(
-            model="gpt-4o",
-            api_key="test-key",
-            kwargs={"previous_response_id": "resp_configured"},
-        )
-        client._client.responses.create = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
-
-        with pytest.raises(ValueError, match="previous_response_id conflicts"):
-            await client.generate(
-                messages=[
-                    AssistantMessage(provider_response_id="resp_history", blocks=[TextBlock(text="old")]),
-                    UserMessage(content="new"),
-                ],
-                tools={},
-            )
-
-    async def test_configured_previous_response_id_matching_history_passes(self) -> None:
-        client = OpenResponsesClient(
-            model="gpt-4o",
-            api_key="test-key",
-            kwargs={"previous_response_id": "resp_history"},
-        )
+    @pytest.mark.parametrize(
+        ("error_type", "status_code"),
+        [(BadRequestError, 400), (NotFoundError, 404)],
+    )
+    async def test_missing_stored_response_retries_once_with_full_history(
+        self,
+        error_type: type[APIStatusError],
+        status_code: int,
+    ) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
         mock_response = MagicMock(
             id="resp_next",
             status="completed",
             output=[MagicMock(type="message", content=[MagicMock(type="output_text", text="ok")])],
             usage=MagicMock(input_tokens=1, output_tokens=1, output_tokens_details=None),
         )
-        create_mock = AsyncMock(return_value=mock_response)
+        missing_error = _status_error(
+            error_type,
+            status_code,
+            code="previous_response_not_found",
+            param="previous_response_id",
+        )
+        create_mock = AsyncMock(side_effect=[missing_error, mock_response])
+        client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
+
+        result = await client.generate(
+            messages=[
+                SystemMessage(content="Be concise"),
+                UserMessage(content="old question"),
+                AssistantMessage(provider_response_id="resp_history", blocks=[TextBlock(text="old answer")]),
+                UserMessage(content="new"),
+            ],
+            tools={},
+        )
+
+        first_request, replay_request = [call.kwargs for call in create_mock.call_args_list]
+        assert first_request["previous_response_id"] == "resp_history"
+        assert first_request["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "new"}]}]
+        assert "previous_response_id" not in replay_request
+        assert replay_request["instructions"] == "Be concise"
+        assert replay_request["input"] == [
+            {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "old answer"}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "new"}]},
+        ]
+        assert result.provider_response_id == "resp_next"
+
+    async def test_missing_stored_response_with_reference_reasoning_is_unrecoverable(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        create_mock = AsyncMock(side_effect=_previous_response_not_found_error())
+        client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(RuntimeError, match="cannot be replayed exactly"):
+            await client.generate(
+                messages=[
+                    AssistantMessage(
+                        provider_response_id="resp_history",
+                        blocks=[ReasoningRefBlock(id="rs_1", content="summary")],
+                    ),
+                    UserMessage(content="new"),
+                ],
+                tools={},
+            )
+
+        assert create_mock.await_count == 1
+
+    async def test_transport_retry_after_fallback_does_not_retry_stale_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        retry_controller = cast(Any, client._create_response).retry  # noqa: SLF001
+        monkeypatch.setattr(retry_controller, "wait", wait_none())
+        response = MagicMock(
+            id="resp_next",
+            status="completed",
+            output=[MagicMock(type="message", content=[MagicMock(type="output_text", text="ok")])],
+            usage=MagicMock(input_tokens=1, output_tokens=1, output_tokens_details=None),
+        )
+        connection_error = APIConnectionError(request=Request("POST", "https://api.openai.com/v1/responses"))
+        create_mock = AsyncMock(side_effect=[_previous_response_not_found_error(), connection_error, response])
         client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
 
         await client.generate(
@@ -690,7 +788,40 @@ class TestOpenResponsesClient:
             tools={},
         )
 
-        assert create_mock.call_args.kwargs["previous_response_id"] == "resp_history"
+        requests = [call.kwargs for call in create_mock.call_args_list]
+        assert ["previous_response_id" in request for request in requests] == [True, False, False]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _status_error(BadRequestError, 400, code="invalid_model", param="model"),
+            _status_error(NotFoundError, 404, code="not_found", param=None),
+        ],
+    )
+    async def test_unrelated_status_error_does_not_trigger_history_replay(self, error: APIStatusError) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        create_mock = AsyncMock(side_effect=error)
+        client._client.responses.create = create_mock  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(type(error)):
+            await client.generate(
+                messages=[
+                    AssistantMessage(provider_response_id="resp_history", blocks=[TextBlock(text="old")]),
+                    UserMessage(content="new"),
+                ],
+                tools={},
+            )
+
+        assert create_mock.await_count == 1
+
+    @pytest.mark.parametrize("status", ["queued", "in_progress", "failed", "cancelled"])
+    async def test_non_completed_response_status_raises(self, status: str) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        response = MagicMock(status=status, error={"message": "provider failure"})
+        client._client.responses.create = AsyncMock(return_value=response)  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(RuntimeError, match=repr(status)):
+            await client.generate(messages=[UserMessage(content="Hi")], tools={})
 
     async def test_generate_with_tools(self) -> None:
         """Test generation with tool calls."""

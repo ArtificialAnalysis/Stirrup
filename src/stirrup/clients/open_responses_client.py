@@ -5,6 +5,7 @@ supporting both OpenAI's API and any OpenAI-compatible endpoint that implements
 the Responses API via the `base_url` parameter.
 """
 
+import logging
 import os
 from collections.abc import Sequence
 from time import perf_counter
@@ -12,11 +13,13 @@ from typing import Any, assert_never
 
 from openai import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     InternalServerError,
     RateLimitError,
 )
+from openai.types.responses import Response
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from stirrup.core.exceptions import ContextOverflowError
@@ -48,6 +51,27 @@ from stirrup.core.models import (
 __all__ = [
     "OpenResponsesClient",
 ]
+
+logger = logging.getLogger(__name__)
+
+_OWNED_REQUEST_KEYS = frozenset(
+    {
+        "background",
+        "conversation",
+        "input",
+        "instructions",
+        "max_output_tokens",
+        "model",
+        "previous_response_id",
+        "store",
+        "stream",
+    }
+)
+
+
+def _is_missing_previous_response(error: APIStatusError) -> bool:
+    """Match only the provider error that identifies an unavailable continuation."""
+    return error.code == "previous_response_not_found" and error.param == "previous_response_id"
 
 
 def _content_to_open_responses_input(content: Content) -> list[dict[str, Any]]:
@@ -235,12 +259,16 @@ def _to_open_responses_input(
                         assert_never(block)
         elif isinstance(m, ToolMessage):
             # Tool results are function_call_output items
-            content_str = m.content if isinstance(m.content, str) else str(m.content)
+            if not isinstance(m.content, str):
+                raise NotImplementedError(
+                    "OpenAI Responses tool outputs currently require string content; multimodal tool output "
+                    "needs a lossless provider mapping"
+                )
             input_items.append(
                 {
                     "type": "function_call_output",
                     "call_id": m.tool_call_id,
-                    "output": content_str,
+                    "output": m.content,
                 }
             )
         else:
@@ -447,19 +475,21 @@ class OpenResponsesClient(LLMClient):
             max_retries: Number of retries for transient errors. Defaults to 2.
             instructions: Default system-level instructions. Can be overridden by
                 SystemMessage in the messages list.
-            kwargs: Additional arguments passed to responses.create().
+            kwargs: Additional arguments passed to responses.create(). Structural
+                request keys owned by this client are rejected.
         """
         self._model = model
         self._max_tokens = max_tokens
         self._reasoning_effort = reasoning_effort
         self._encrypted_reasoning = encrypted_reasoning
         self._default_instructions = instructions
-        self._kwargs = kwargs or {}
-        if self._kwargs.get("store") is False and not encrypted_reasoning:
-            # Nothing is stored provider-side and no encrypted payload is requested,
-            # so reasoning would be captured as reference blocks whose ids dangle on
-            # the next turn — failing at the provider, far from this misconfiguration.
-            raise ValueError("store=False requires encrypted_reasoning=True so reasoning state can be passed back")
+        self._kwargs = dict(kwargs or {})
+        reserved_keys = sorted(_OWNED_REQUEST_KEYS & self._kwargs.keys())
+        if reserved_keys:
+            raise ValueError(
+                f"OpenResponsesClient owns request keys {reserved_keys}; use its dedicated arguments and message "
+                "history instead of kwargs"
+            )
 
         # Initialize AsyncOpenAI client
         resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -498,6 +528,10 @@ class OpenResponsesClient(LLMClient):
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
     )
+    async def _create_response(self, request_kwargs: dict[str, Any]) -> Response:
+        """Create one logical request with the client's standard transient retries."""
+        return await self._client.responses.create(**request_kwargs)
+
     async def generate(
         self,
         messages: list[ChatMessage],
@@ -519,8 +553,7 @@ class OpenResponsesClient(LLMClient):
         Raises:
             ContextOverflowError: If the response is incomplete due to token limits.
         """
-        # store=False without encrypted_reasoning is rejected at __init__, so
-        # encrypted_reasoning alone decides statefulness here.
+        # ``encrypted_reasoning`` owns statefulness; kwargs cannot override ``store``.
         stateful = not self._encrypted_reasoning
 
         # Convert messages to OpenResponses format. Stateful calls continue from the
@@ -535,17 +568,12 @@ class OpenResponsesClient(LLMClient):
 
         # Build request kwargs
         request_kwargs: dict[str, Any] = {
+            **self._kwargs,
             "model": self._model,
             "input": input_items,
             "max_output_tokens": self._max_tokens,
-            **self._kwargs,
         }
         if previous_response_id is not None:
-            configured_previous_id = request_kwargs.get("previous_response_id")
-            if configured_previous_id not in (None, previous_response_id):
-                raise ValueError(
-                    "Configured previous_response_id conflicts with the latest AssistantMessage.provider_response_id"
-                )
             request_kwargs["previous_response_id"] = previous_response_id
 
         # Add instructions if present
@@ -573,7 +601,34 @@ class OpenResponsesClient(LLMClient):
 
         # Make API call
         request_start_time = perf_counter()
-        response = await self._client.responses.create(**request_kwargs)
+        try:
+            response = await self._create_response(request_kwargs)
+        except APIStatusError as error:
+            if previous_response_id is None or not _is_missing_previous_response(error):
+                raise
+            try:
+                replay_instructions, _, replay_input = _to_open_responses_request(
+                    messages,
+                    use_provider_response_id=False,
+                )
+            except (NotImplementedError, TypeError) as replay_error:
+                raise RuntimeError(
+                    "The stored OpenAI response is unavailable and this history cannot be replayed exactly "
+                    f"without its provider-side continuation state: {replay_error}"
+                ) from error
+
+            logger.warning(
+                "Stored OpenAI response %s was not found; retrying once with a full local-history replay",
+                previous_response_id,
+            )
+            request_kwargs["input"] = replay_input
+            request_kwargs.pop("previous_response_id", None)
+            final_replay_instructions = replay_instructions or self._default_instructions
+            if final_replay_instructions:
+                request_kwargs["instructions"] = final_replay_instructions
+            else:
+                request_kwargs.pop("instructions", None)
+            response = await self._create_response(request_kwargs)
         request_end_time = perf_counter()
 
         # Check for incomplete response (context overflow)
@@ -582,6 +637,11 @@ class OpenResponsesClient(LLMClient):
             raise ContextOverflowError(
                 f"Response incomplete for model {self.model_slug}: {stop_reason}. "
                 "Reduce max_tokens or message length and try again."
+            )
+        if response.status != "completed":
+            raise RuntimeError(
+                f"OpenAI Responses returned unsupported status {response.status!r}: "
+                f"{getattr(response, 'error', None)!r}"
             )
 
         provider_response_id: str | None = None

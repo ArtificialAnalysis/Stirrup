@@ -88,7 +88,10 @@ discriminated on `kind`: `text`, `reasoning` (in-band), `signed_reasoning`,
 Alongside its blocks, an `AssistantMessage` may carry `provider_response_id` —
 provider-attached continuation state (e.g. an OpenAI Responses `resp_...` id). The
 Responses client uses it in its default stateful mode to continue conversations via
-`previous_response_id` instead of replaying full history.
+`previous_response_id` instead of replaying full history. Provider response IDs are
+provider/project scoped and may expire; on a definitive not-found response the client
+replays full local history once when every block is losslessly representable, otherwise
+it raises because reference-only reasoning cannot be reconstructed.
 
 ```python
 history = [
@@ -111,8 +114,8 @@ available as deprecated, read-only projections of `blocks`; reading them emits a
 `DeprecationWarning`. Use `joined_text`, `reasoning_blocks`, or `tool_call_blocks`
 instead. New messages must be constructed from `blocks`; channel-shaped v0.1 data is
 accepted only as a legacy deserialization format and is synthesized in reasoning → text
-→ tool-call order. Assigning to a projection raises; use `msg.with_text(...)` /
-`msg.with_blocks(...)` instead.
+→ tool-call order. Assigning to a projection raises; use `msg.with_blocks(...)` or
+construct a replacement message instead.
 Convenience accessors `joined_text`, `final_text`, `tool_call_blocks`, and
 `reasoning_blocks` operate on any block list.
 
