@@ -94,7 +94,12 @@ provider = MyCodeExecProvider(
 )
 ```
 
-The base class validates commands before execution.
+The base class parses and validates commands: call
+`self._prepare_command(cmd)` at the top of `run_command`. It returns
+`(argv, rejection)`; return the rejection if one is set, and when `argv` is
+not `None` execute it directly without a shell (see
+`LocalCodeExecToolProvider` for an example). With no allowlist configured,
+`argv` is `None` and `cmd` runs through a shell unchanged.
 
 ## Next Steps
 

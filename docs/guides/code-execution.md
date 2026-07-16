@@ -68,24 +68,30 @@ The `allowed_commands` allowlist is enforced identically by every backend
 (`LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`, and
 `E2BCodeExecToolProvider`); the rules below apply to all of them.
 
-When `allowed_commands` is configured, each invocation must be one simple shell
-command. Regex patterns are anchored at the start of the command but not at the
-end, so `ls` also allows `lsblk`; use `\Z` or a fuller pattern such as
-`git(\s.*)?\Z` to pin the command word. A command is rejected if it contains:
+When `allowed_commands` is configured, commands are not run through a shell.
+Each invocation is parsed into an argument vector with POSIX shlex rules,
+matched against the patterns, and executed directly, so shell interpretation
+can never disagree with what was vetted. Patterns are matched against the
+parsed command with quoting normalized (`echo 'a'` is matched as `echo a`),
+anchored at the start but not at the end, so `ls` also allows `lsblk`; use
+`\Z` or a fuller pattern such as `git(\s.*)?\Z` to pin the command word.
 
-- control syntax such as separators, pipes, redirects, subshells, or newlines
-- a leading shell keyword such as `time`, `coproc`, or `!`
-- command substitution, arithmetic expansion (both `$((...))` and legacy
-  `$[...]`), or parameter expansion such as `$VAR` and `${VAR}`
-- a leading shell assignment such as `MODE=test command`
+Because no shell is involved:
 
-Single-quoted and backslash-escaped characters remain ordinary arguments, so
-`echo 'a;b'` and `echo \$NAME` are allowed when `echo` is allowlisted.
-Expansions are rejected even inside double quotes (`echo "$HOME"` is blocked),
-matching how Bash would still expand them. Commands such as `env`, `sh`, and
-`bash` must themselves be allowlisted; doing so also delegates control of the
-commands they launch. Use an allowlisted script when environment setup is
-needed. Setting `allowed_commands=None` allows unrestricted Bash syntax.
+- arguments are passed literally: `$VAR`, `$(...)`, backticks, and globs such
+  as `*.py` are never expanded — `echo "$HOME"` prints `$HOME`
+- shell operators are rejected with advice: separators (`;`, `&`), pipes,
+  redirects, `&&`/`||` chains, and unquoted newlines between commands
+- a leading shell assignment such as `MODE=test command` is rejected
+- quoting that cannot be parsed — Bash-only forms such as `$'...'`, or an
+  unterminated quote — is rejected
+
+Quoted and escaped characters remain ordinary literal arguments, so
+`echo 'a;b'` and `grep 'foo$' file` work when their command is allowlisted.
+Commands such as `env`, `sh`, and `bash` must themselves be allowlisted; doing
+so also delegates control of the commands they launch. Use an allowlisted
+script when environment setup is needed. Setting `allowed_commands=None`
+allows unrestricted Bash syntax.
 
 > **Note:** because patterns are start-anchored, a pattern like `python` no
 > longer matches `python` appearing later in the command. Adjust existing

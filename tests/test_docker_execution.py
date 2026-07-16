@@ -13,6 +13,7 @@ pytest.importorskip("docker")
 
 from docker.errors import APIError, ImageNotFound
 
+from stirrup.tools.code_backends.base import SHELL_TIMEOUT
 from stirrup.tools.code_backends.docker import (
     DEFAULT_WORKING_DIR,
     DockerCodeExecToolProvider,
@@ -206,9 +207,17 @@ class TestDockerCodeExecToolProvider:
             mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
             async with provider as _:
-                # Allowed command
+                # Allowed command: executed as argv (no shell), wrapped in timeout(1)
                 result = await provider.run_command("echo 'allowed'")
                 assert result.error_kind is None
+                exec_run = mock_docker_client.containers.run.return_value.exec_run
+                assert exec_run.call_args.kwargs["cmd"] == [
+                    "timeout",
+                    "--kill-after=5s",
+                    f"{SHELL_TIMEOUT}s",
+                    "echo",
+                    "allowed",
+                ]
 
                 # Disallowed command
                 result = await provider.run_command("rm -rf /")

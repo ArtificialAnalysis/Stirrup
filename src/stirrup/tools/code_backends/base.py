@@ -2,6 +2,7 @@
 
 import logging
 import re
+import shlex
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,254 +18,48 @@ logger = logging.getLogger(__name__)
 MAX_LENGTH_SHELL_STDOUT = 20_000
 MAX_LENGTH_SHELL_STDERR = 20_000
 SHELL_TIMEOUT = 60 * 5
-_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# Bash keywords that prefix another command, so the command actually run is not
-# the first word (``time cmd``, ``coproc cmd``, ``! cmd``). Rejected so a single
-# allowlisted word cannot smuggle a different command behind the keyword.
-_SHELL_COMMAND_PREFIX_KEYWORDS = frozenset({"time", "coproc", "!"})
 
 # Reason a command is rejected by the allowlist; each key maps to advice below.
-RejectionReason = Literal["no_pattern_match", "shell_syntax", "shell_assignment", "shell_keyword"]
+RejectionReason = Literal["empty_command", "no_pattern_match", "shell_syntax", "shell_assignment"]
 
-# Reason codes returned by ``_command_rejection_reason`` mapped to the advice the
-# LLM (or operator) sees, so a rejection explains which rule fired instead of
-# always blaming a pattern mismatch.
+# Tokens that are almost certainly a shell operator the model expected a shell
+# to interpret (``a | b``, ``a && b``, ``a > f``). Without a shell they would be
+# passed to the command as literal arguments and silently do nothing, so they
+# are rejected with advice instead.
+_BARE_OPERATOR_TOKENS = frozenset(
+    {";", ";;", "&", "&&", "|", "||", "|&", "<", ">", ">>", "<<", "<<<", ">&", "<&", "(", ")"}
+)
+
+# Reason codes mapped to the advice the LLM (or operator) sees, so a rejection
+# explains which rule fired instead of always blaming a pattern mismatch.
 _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
-    "no_pattern_match": "The command does not match any configured allowlist pattern.",
+    "empty_command": "The command is empty.",
+    "no_pattern_match": (
+        "The command does not match any configured allowlist pattern. Patterns are "
+        "matched against the parsed command with shell quoting normalized."
+    ),
     "shell_syntax": (
-        "The command contains shell control syntax or expansions (separators, pipes, "
-        "redirects, subshells, $VAR, $(...), or backticks). Run a single simple command "
-        "with literal arguments."
+        "Allowlisted commands run directly without a shell, so shell operators "
+        "(;, &&, ||, |, redirects, newlines between commands) and Bash-only quoting "
+        "are not supported. Run a single command with literal arguments."
     ),
     "shell_assignment": (
-        "The command begins with a shell variable assignment such as NAME=value. Run a "
-        "single simple command without an assignment prefix."
-    ),
-    "shell_keyword": (
-        "The command begins with a shell keyword such as time, coproc, or !. Run a single simple command."
+        "The command begins with a shell variable assignment such as NAME=value, "
+        "which is not supported. Run a single command without an assignment prefix."
     ),
 }
 
 
-def _remove_shell_line_continuations(cmd: str) -> str:
-    """Remove the unescaped backslash-newline pairs Bash removes before parsing.
+def _quote_argv_for_shell(argv: list[str]) -> str:
+    """Render parsed argv as a shell command string that executes exactly argv.
 
-    Tracks quote context so continuations are only stripped where Bash strips
-    them: a backslash-newline is removed outside quotes and inside double quotes,
-    but kept literal inside single quotes and ANSI-C ``$'...'`` quotes.
+    Every argument is quoted with :func:`shlex.quote`; the command word is
+    additionally force-quoted so a shell cannot interpret it as a reserved word
+    (``time``), an assignment, or any other special form -- it is always looked
+    up as a plain command, matching the no-shell backends.
     """
-    if "\\\n" not in cmd:
-        return cmd  # No backslash-newline pair means nothing to strip.
-    result: list[str] = []
-    quote: str | None = None
-    index = 0
-
-    while index < len(cmd):
-        char = cmd[index]
-        if quote == "'":
-            result.append(char)
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-
-        if quote == "ansi_c":
-            result.append(char)
-            if char == "\\" and index + 1 < len(cmd):
-                result.append(cmd[index + 1])
-                index += 2
-                continue
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-
-        if char == "\\" and index + 1 < len(cmd):
-            next_char = cmd[index + 1]
-            if next_char == "\n":
-                index += 2
-                continue
-            result.extend((char, next_char))
-            index += 2
-            continue
-
-        if quote is None and char == "$" and cmd[index + 1 : index + 2] == "'":
-            result.extend((char, "'"))
-            quote = "ansi_c"
-            index += 2
-            continue
-        if char == "'" and quote is None:
-            quote = char
-        elif char == '"':
-            quote = None if quote == char else char
-        result.append(char)
-        index += 1
-
-    return "".join(result)
-
-
-def _shell_array_subscript_end(cmd: str, start: int) -> int | None:
-    """Return the end of a balanced array subscript in an assignment word.
-
-    ``start`` must index the opening ``[``. Returns the index just past the
-    matching ``]`` (exclusive), or ``None`` if the subscript is unterminated or
-    unbalanced.
-    """
-    quote: str | None = None
-    depth = 0
-    index = start
-
-    while index < len(cmd):
-        char = cmd[index]
-        if quote == "'":
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-
-        if quote == "ansi_c":
-            if char == "\\" and index + 1 < len(cmd):
-                index += 2
-                continue
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-
-        if char == "\\":
-            index += 2
-            continue
-        if quote is None and char == "$" and cmd[index + 1 : index + 2] == "'":
-            quote = "ansi_c"
-            index += 2
-            continue
-        if char == "'" and quote is None:
-            quote = char
-        elif char == '"':
-            quote = None if quote == char else char
-        elif quote is None and char == "[":
-            depth += 1
-        elif quote is None and char == "]":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        index += 1
-
-    return None
-
-
-def _starts_with_shell_assignment(cmd: str) -> bool:
-    """Return whether the first shell word is a Bash assignment.
-
-    Recognizes ``NAME=``, ``NAME+=``, and ``NAME[subscript]=`` after optional
-    leading whitespace. An unbalanced subscript is not an assignment (Bash needs
-    ``]=``); such input is still rejected by ``_contains_disallowed_shell_syntax``
-    and the anchored pattern match, so returning ``False`` here does not open a
-    hole.
-    """
-    index = 0
-    while index < len(cmd) and cmd[index] in " \t":
-        index += 1
-
-    name = _SHELL_NAME.match(cmd, index)
-    if name is None:
-        return False
-    index = name.end()
-
-    if index < len(cmd) and cmd[index] == "[":
-        subscript_end = _shell_array_subscript_end(cmd, index)
-        if subscript_end is None:
-            return False
-        index = subscript_end
-    if index < len(cmd) and cmd[index] == "+":
-        index += 1
-    return cmd[index : index + 1] == "="
-
-
-def _starts_with_shell_keyword(cmd: str) -> bool:
-    """Return whether the first shell word is a command-prefixing Bash keyword.
-
-    Splits on space/tab only (not newline) so ``time\\ncmd`` is left to
-    ``_contains_disallowed_shell_syntax``'s newline check, matching Bash.
-    """
-    first_word = re.split(r"[ \t]", cmd.lstrip(" \t"), maxsplit=1)[0]
-    return first_word in _SHELL_COMMAND_PREFIX_KEYWORDS
-
-
-def _contains_disallowed_shell_syntax(cmd: str) -> bool:
-    """Return whether a command uses syntax that can change what Bash executes.
-
-    Three categories are rejected: command/arithmetic substitution (``$(...)``,
-    ``$[...]``, backticks) and parameter expansion (``$VAR``, ``${...}``), which
-    are rejected even inside double quotes because Bash still expands them there;
-    and control operators (``; & | < > ( )`` and newline), which are rejected only
-    when unquoted. Subshell parentheses are included so ``(cmd)`` cannot run a
-    command behind a permissive pattern. An unterminated quote fails closed
-    (returns ``True``) rather than relying on Bash to reject it downstream.
-    """
-    quote: str | None = None
-    escaped = False
-    index = 0
-
-    while index < len(cmd):
-        char = cmd[index]
-        if quote == "'":
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-
-        if quote == "ansi_c":
-            if char == "\\" and index + 1 < len(cmd):
-                index += 2
-                continue
-            if char == "'":
-                quote = None
-            index += 1
-            continue
-
-        if escaped:
-            escaped = False
-            index += 1
-            continue
-        if char == "\\":
-            escaped = True
-            index += 1
-            continue
-
-        if quote is None and char == "$" and cmd[index + 1 : index + 2] == "'":
-            quote = "ansi_c"
-            index += 2
-            continue
-
-        if char == "'" and quote is None:
-            quote = char
-            index += 1
-            continue
-        if char == '"':
-            quote = None if quote == char else char
-            index += 1
-            continue
-
-        next_char = cmd[index + 1 : index + 2]
-        if char == "`" or (char == "$" and next_char in ("(", "[")):
-            return True
-        if (
-            char == "$"
-            and next_char
-            and (
-                next_char == "{"
-                or next_char.isdigit()
-                or next_char in "@*#?$!-"
-                or _SHELL_NAME.match(cmd, index + 1) is not None
-            )
-        ):
-            return True
-        if quote is None and char in ";&|<>()\n":
-            return True
-        index += 1
-
-    return quote is not None
+    head = "'" + argv[0].replace("'", "'\"'\"'") + "'"
+    return " ".join([head, *(shlex.quote(arg) for arg in argv[1:])])
 
 
 class CodeExecutionParams(BaseModel):
@@ -380,10 +175,11 @@ class CodeExecToolProvider(ToolProvider, ABC):
     - upload_files(): Upload files from local or another exec env (uses primitives)
 
     All code execution providers support an optional allowlist of command patterns.
-    If provided, a command is allowed only when it is a single simple command (no
-    pipes, separators, redirects, subshells, expansions, or leading assignment /
-    keyword) and matches at least one pattern from the start of the command.
-    If None, all commands are allowed.
+    If provided, commands are parsed with shlex and executed directly, without a
+    shell: no pipes, separators, redirects, subshells, expansions, or globbing --
+    arguments are passed literally. A command runs only when a pattern matches the
+    parsed command from its start. If None, all commands are allowed and run
+    through a shell as usual.
 
     Usage with Agent:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -406,12 +202,13 @@ class CodeExecToolProvider(ToolProvider, ABC):
 
         Args:
             allowed_commands: Optional list of regex patterns matched from the
-                             start of the command. If provided, a command is
-                             allowed only when it is a single simple command and
-                             matches at least one pattern; commands containing
-                             shell control syntax, expansions, or a leading
-                             assignment / keyword are rejected regardless of
-                             pattern match. If None, all commands are allowed.
+                             start of the parsed command. If provided, commands
+                             are shlex-parsed and executed without a shell, with
+                             literal arguments (no expansion or globbing); shell
+                             operators, unparseable quoting, and assignment
+                             prefixes are rejected regardless of pattern match.
+                             If None, all commands are allowed and run through a
+                             shell.
             shell_timeout: Per-command wall-clock timeout (seconds) applied to
                            every ``code_exec`` invocation from the LLM. Defaults
                            to ``SHELL_TIMEOUT``. Callers should set this to match
@@ -430,33 +227,41 @@ class CodeExecToolProvider(ToolProvider, ABC):
         """Return the temporary directory for this execution environment, if any."""
         return None
 
-    def _command_rejection_reason(self, cmd: str) -> RejectionReason | None:
-        """Return why a command is rejected by the allowlist, or None if allowed.
+    def _prepare_command(self, cmd: str) -> tuple[list[str] | None, CommandResult | None]:
+        """Validate cmd against the allowlist and parse it for direct execution.
 
-        Applies three gates in order: (1) backslash-newline line continuations are
-        removed as Bash would remove them; (2) the command is rejected if it starts
-        with an assignment or a command-prefixing keyword, or contains disallowed
-        shell syntax; (3) otherwise it is allowed iff some pattern matches from the
-        start of the normalized command.
+        Returns ``(argv, rejection)``. With no allowlist configured this is
+        ``(None, None)`` and the backend runs ``cmd`` through a shell unchanged.
+        With an allowlist, ``cmd`` is parsed into argv with :func:`shlex.split`
+        and either ``(argv, None)`` is returned -- the backend must execute argv
+        directly, without a shell, so quoting is resolved exactly once and no
+        expansion ever happens -- or ``(None, rejection)``. Patterns are matched
+        against ``shlex.join(argv)``, the canonical form of what will actually
+        execute, so quoting tricks in the command word cannot forge a match.
         """
         if self._compiled_allowed is None:
-            return None  # No allowlist = allow all
-        cmd = _remove_shell_line_continuations(cmd)
-        if _starts_with_shell_assignment(cmd):
-            return "shell_assignment"
-        if _starts_with_shell_keyword(cmd):
-            return "shell_keyword"
-        if _contains_disallowed_shell_syntax(cmd):
-            return "shell_syntax"
-        if any(p.match(cmd) for p in self._compiled_allowed):
-            return None
-        return "no_pattern_match"
+            return None, None
+        try:
+            argv = shlex.split(cmd)
+        except ValueError:
+            return None, self._rejection(cmd, "shell_syntax")
+        if not argv:
+            return None, self._rejection(cmd, "empty_command")
+        if any(token in _BARE_OPERATOR_TOKENS for token in argv):
+            return None, self._rejection(cmd, "shell_syntax")
+        # An unquoted newline separates commands under a shell but is plain
+        # whitespace to shlex; reject it rather than silently fusing two
+        # commands into one argv. Quoted newlines survive inside a token.
+        if "\n" in cmd and not any("\n" in token for token in argv):
+            return None, self._rejection(cmd, "shell_syntax")
+        if "=" in argv[0]:
+            return None, self._rejection(cmd, "shell_assignment")
+        if not any(p.match(shlex.join(argv)) for p in self._compiled_allowed):
+            return None, self._rejection(cmd, "no_pattern_match")
+        return argv, None
 
-    def _allowlist_rejection(self, cmd: str) -> CommandResult | None:
-        """Return a rejection CommandResult if the allowlist blocks cmd, else None."""
-        reason = self._command_rejection_reason(cmd)
-        if reason is None:
-            return None
+    def _rejection(self, cmd: str, reason: RejectionReason) -> CommandResult:
+        """Build the CommandResult for an allowlist rejection."""
         logger.debug("command rejected (%s): %r", reason, cmd)
         return CommandResult(
             exit_code=1,

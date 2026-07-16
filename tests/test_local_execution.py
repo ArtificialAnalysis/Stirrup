@@ -1,6 +1,5 @@
 """Tests for LocalCodeExecToolProvider backend."""
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -9,23 +8,6 @@ import pytest
 from anyio.to_thread import run_sync
 
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
-
-
-def _bash_recursively_expands_array_index(probe_dir: Path) -> bool:
-    marker = probe_dir / "array-expansion-marker"
-    env = os.environ.copy()
-    env["STIRRUP_TEST_INDEX"] = "$(touch array-expansion-marker)"
-    subprocess.run(
-        ["bash", "-c", 'printf %s "${VALUES[STIRRUP_TEST_INDEX]}"'],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=probe_dir,
-        env=env,
-    )
-    supported = marker.exists()
-    marker.unlink(missing_ok=True)
-    return supported
 
 
 class TestLocalCodeExecToolProvider:
@@ -147,29 +129,27 @@ class TestLocalCodeExecToolProvider:
     @pytest.mark.parametrize(
         ("allowed_pattern", "command"),
         [
+            # Assignment prefixes.
             (r".*", "MODE=test echo allowed"),
             (r".*", "MODE+=test echo allowed"),
             (r"^echo", "echo=x touch forbidden.txt"),
             (r"^echo", "echo[0]=x touch forbidden.txt"),
-            (r"^echo", "echo[1 + 1]=x touch forbidden.txt"),
-            (r"^echo", "echo <(printf bypassed)"),
-            (r"^echo", "echo >(printf bypassed)"),
+            # Unquoted shell operators.
             (r"^echo", "echo allowed && printf bypassed"),
             (r"^echo", "echo allowed || printf bypassed"),
             (r"^echo", "echo allowed | cat"),
             (r"^echo", "echo allowed > output.txt"),
             (r"^echo", "echo allowed < input.txt"),
+            (r"^echo", "echo allowed & printf bypassed"),
             (r"^echo", "echo allowed\nprintf bypassed"),
-            (r"^echo", "echo $(printf bypassed)"),
-            (r"^echo", "echo `printf bypassed`"),
-            (r"^echo", 'echo "$STIRRUP_TEST_VALUE"'),
-            (r"^echo", 'echo "${VALUES[STIRRUP_TEST_INDEX]}"'),
-            (r"^echo", "echo $?"),
-            (r"^echo", "echo $[VALUES[STIRRUP_TEST_INDEX]]"),
-            (r"^echo", r"echo $'it\'s safe'; touch forbidden.txt"),
-            (r"^echo", 'echo "it\'s safe"; touch forbidden.txt'),
-            (r"^echo", "echo $\\\n(touch forbidden.txt)"),
+            # Bash-only quoting that the parser cannot represent fails closed.
+            (r"^echo", r"echo $'it\'s; literal'"),
+            # The pattern must match the executed command, not a quoted inner string.
             (r"echo.*", "bash -c 'echo allowed; touch forbidden.txt'"),
+            # A prefix word shifts the executed command out from under the pattern.
+            (r"^echo", "time echo allowed"),
+            # Line continuations are not collapsed; the mangled word fails the pattern.
+            (r"^echo", "ec\\\nho allowed"),
         ],
     )
     async def test_run_command_allowlist_rejects_shell_features(
@@ -209,24 +189,25 @@ class TestLocalCodeExecToolProvider:
         "command",
         [
             "(touch forbidden.txt)",
-            "time touch forbidden.txt",
             "coproc touch forbidden.txt",
             "! touch forbidden.txt",
+            "echo[1 + 1]=x touch forbidden.txt",
         ],
     )
-    async def test_run_command_allowlist_blocks_command_prefixes_and_grouping(
+    async def test_run_command_allowlist_shell_only_words_fail_without_side_effects(
         self,
         command: str,
     ) -> None:
-        # A permissive pattern still must not let a subshell or a command-prefixing
-        # keyword run a command other than the vetted first word.
+        # Without a shell there are no subshells, keywords, or compound
+        # assignments: the first word is looked up as a binary, fails to exec,
+        # and nothing else runs.
         provider = LocalCodeExecToolProvider(allowed_commands=[r".*"])
 
         async with provider:
             result = await provider.run_command(command)
             side_effect_exists = await provider.file_exists("forbidden.txt")
 
-        assert result.error_kind == "command_not_allowed"
+        assert result.exit_code != 0
         assert side_effect_exists is False
 
     @pytest.mark.parametrize(
@@ -273,7 +254,7 @@ class TestLocalCodeExecToolProvider:
 
         assert syntax_result.error_kind == "command_not_allowed"
         assert syntax_result.advice is not None
-        assert "shell control syntax" in syntax_result.advice
+        assert "without a shell" in syntax_result.advice
         assert assignment_result.error_kind == "command_not_allowed"
         assert assignment_result.advice is not None
         assert "assignment" in assignment_result.advice
@@ -283,9 +264,15 @@ class TestLocalCodeExecToolProvider:
         [
             ("echo 'a;b && c || d | e > f < g\n$() `x`'", "a;b && c || d | e > f < g\n$() `x`\n"),
             ('echo "it\'s ; literal"', "it's ; literal\n"),
-            (r"echo $'it\'s; literal'", "it's; literal\n"),
             (r"echo a\;b \$VALUE \${VALUE}", "a;b $VALUE ${VALUE}\n"),
-            ("ec\\\nho allowed", "allowed\n"),
+            # Without a shell there is no expansion: variables, substitution,
+            # and globs are passed through as literal argument bytes.
+            ('echo "$HOME"', "$HOME\n"),
+            ("echo $HOME", "$HOME\n"),
+            ("echo $(printf bypassed)", "$(printf bypassed)\n"),
+            ("echo `printf bypassed`", "`printf bypassed`\n"),
+            ("echo *", "*\n"),
+            ("echo 'line1\nline2'", "line1\nline2\n"),
         ],
     )
     async def test_run_command_allowlist_allows_literal_shell_characters(
@@ -301,14 +288,26 @@ class TestLocalCodeExecToolProvider:
         assert result.error_kind is None
         assert result.stdout == expected_stdout
 
-    async def test_run_command_allowlist_blocks_recursive_array_expansion_side_effect(
+    async def test_run_command_allowlist_matches_parsed_command_word(self) -> None:
+        # Patterns are matched against the parsed command, so quoting inside
+        # the command word can neither hide a match nor forge one.
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo\b"])
+
+        async with provider:
+            quoted = await provider.run_command("ec'ho' allowed")
+            forged = await provider.run_command("echo''x allowed")
+
+        assert quoted.error_kind is None
+        assert quoted.stdout == "allowed\n"
+        assert forged.error_kind == "command_not_allowed"
+
+    async def test_run_command_allowlist_does_not_expand_hostile_environment(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        if not await run_sync(_bash_recursively_expands_array_index, tmp_path):
-            pytest.skip("installed Bash does not recursively expand array index values")
-
+        # Under Bash, some versions recursively expand array indices, so an
+        # attacker-controlled variable could execute code. Without a shell the
+        # expansion never happens and the text is echoed back verbatim.
         monkeypatch.setenv("STIRRUP_TEST_INDEX", "$(touch forbidden.txt)")
         provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
 
@@ -316,7 +315,8 @@ class TestLocalCodeExecToolProvider:
             result = await provider.run_command('echo "${VALUES[STIRRUP_TEST_INDEX]}"')
             side_effect_exists = await provider.file_exists("forbidden.txt")
 
-        assert result.error_kind == "command_not_allowed"
+        assert result.error_kind is None
+        assert result.stdout == "${VALUES[STIRRUP_TEST_INDEX]}\n"
         assert side_effect_exists is False
 
     async def test_save_output_files(self, temp_output_dir: Path) -> None:

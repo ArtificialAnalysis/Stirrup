@@ -594,8 +594,10 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             timeout = self._shell_timeout
         container = self._container  # Capture for lambda type narrowing
 
-        # Check allowlist
-        if (rejection := self._allowlist_rejection(cmd)) is not None:
+        # Check allowlist; with one configured, the command was parsed to argv
+        # and must run without a shell so no expansion can occur.
+        argv, rejection = self._prepare_command(cmd)
+        if rejection is not None:
             return rejection
 
         # Enforce the timeout inside the container via coreutils `timeout(1)`.
@@ -604,7 +606,11 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         # parented to container PID 1 when the client gives up (moby/moby#9098).
         # Exit 124 == SIGTERM expiry, 137 == --kill-after SIGKILL; both map to
         # error_kind="timeout" for the caller.
-        wrapped = f"timeout --kill-after=5s {timeout}s bash -c {shlex.quote(cmd)}"
+        if argv is not None:
+            exec_cmd = ["timeout", "--kill-after=5s", f"{timeout}s", *argv]
+        else:
+            wrapped = f"timeout --kill-after=5s {timeout}s bash -c {shlex.quote(cmd)}"
+            exec_cmd = ["bash", "-c", wrapped]
 
         try:
             # Outer fail_after is a safety net for a stalled docker socket; the
@@ -612,7 +618,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             with fail_after(timeout + 10):
                 exec_result = await to_thread.run_sync(
                     lambda: container.exec_run(
-                        cmd=["bash", "-c", wrapped],
+                        cmd=exec_cmd,
                         workdir=self._working_dir,
                         demux=True,  # Separate stdout/stderr
                     )

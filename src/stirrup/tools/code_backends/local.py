@@ -67,9 +67,11 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         """Initialize LocalCodeExecToolProvider configuration.
 
         Args:
-            allowed_commands: Optional list of regex patterns. If provided, only
-                             commands matching at least one pattern are allowed.
-                             If None, all commands are allowed.
+            allowed_commands: Optional list of regex patterns. If provided,
+                             commands are shlex-parsed, matched against the
+                             patterns, and executed without a shell (literal
+                             arguments, no expansion). If None, all commands
+                             are allowed and run through bash.
             temp_base_dir: Optional base directory for creating the execution environment
                           temp directory. If None, uses the system default temp directory.
             description: Optional description of the tool. If None, uses the default description.
@@ -294,8 +296,10 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         if timeout is None:
             timeout = self._shell_timeout
 
-        # Check allowlist
-        if (rejection := self._allowlist_rejection(cmd)) is not None:
+        # Check allowlist; with one configured, the command was parsed to argv
+        # and must run without a shell so no expansion can occur.
+        argv, rejection = self._prepare_command(cmd)
+        if rejection is not None:
             return rejection
 
         # Check for absolute paths (local environment is not sandboxed)
@@ -306,13 +310,13 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         process = None
         try:
             with anyio.fail_after(timeout):
-                # start_new_session=True puts bash at the head of its own session,
-                # so pgid == child pid and we can killpg the whole tree on timeout.
-                # Without it, process.kill() only terminates root bash, leaving
-                # grandchildren reparented to init (same bug shape as the docker
-                # orphan leak that motivated this PR).
+                # start_new_session=True puts the child at the head of its own
+                # session, so pgid == child pid and we can killpg the whole tree
+                # on timeout. Without it, process.kill() only terminates the
+                # root process, leaving grandchildren reparented to init (same
+                # bug shape as the docker orphan leak that motivated this PR).
                 process = await anyio.open_process(
-                    ["bash", "-c", cmd],
+                    argv if argv is not None else ["bash", "-c", cmd],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=self._temp_dir,

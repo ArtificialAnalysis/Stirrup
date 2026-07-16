@@ -116,9 +116,12 @@ class TestE2BCodeExecToolProvider:
             new=AsyncMock(return_value=mock_sandbox),
         ):
             async with provider as _:
-                # Allowed command
+                # Allowed command: re-quoted from parsed argv, with the command
+                # word force-quoted so the sandbox shell cannot treat it as a
+                # keyword or assignment.
                 result = await provider.run_command("echo 'allowed'")
                 assert result.error_kind is None
+                assert mock_sandbox.commands.run.call_args.args[0] == "'echo' allowed"
 
                 # Disallowed command
                 result = await provider.run_command("rm -rf /")

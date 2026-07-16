@@ -28,6 +28,7 @@ from .base import (
     SaveOutputFilesResult,
     UploadedFile,
     UploadFilesResult,
+    _quote_argv_for_shell,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,9 +97,12 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         Args:
             timeout: Execution environment lifetime in seconds (default: 10 minutes).
             template: Optional E2B template name/alias.
-            allowed_commands: Optional list of regex patterns. If provided, only
-                             commands matching at least one pattern are allowed.
-                             If None, all commands are allowed.
+            allowed_commands: Optional list of regex patterns. If provided,
+                             commands are shlex-parsed, matched against the
+                             patterns, and re-quoted so the sandbox shell
+                             executes exactly the parsed argv (literal
+                             arguments, no expansion). If None, all commands
+                             are allowed and run through the shell unchanged.
             sandbox_kwargs: Additional keyword arguments forwarded to
                             ``AsyncSandbox.create`` (e.g. ``allow_internet_access=False``,
                             ``metadata={...}``, ``envs={...}``). ``timeout`` and
@@ -286,9 +290,14 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         if timeout is None:
             timeout = self._shell_timeout
 
-        # Check allowlist
-        if (rejection := self._allowlist_rejection(cmd)) is not None:
+        # Check allowlist; with one configured, the command was parsed to argv.
+        # The E2B API only takes a shell string, so re-quote the parsed argv:
+        # the sandbox shell then executes exactly argv, with no expansion.
+        argv, rejection = self._prepare_command(cmd)
+        if rejection is not None:
             return rejection
+        if argv is not None:
+            cmd = _quote_argv_for_shell(argv)
 
         try:
             r = await self._sbx.commands.run(cmd, timeout=timeout, request_timeout=self._request_timeout)
