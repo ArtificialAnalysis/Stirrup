@@ -67,11 +67,11 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         """Initialize LocalCodeExecToolProvider configuration.
 
         Args:
-            allowed_commands: Optional list of regex patterns. If provided,
-                             commands are shlex-parsed, matched against the
-                             patterns, and executed without a shell (literal
-                             arguments, no expansion). If None, all commands
-                             are allowed and run through bash.
+            allowed_commands: Optional list of regex patterns. When set,
+                             commands are matched against the patterns and run
+                             without a shell, with literal arguments. When
+                             None, all commands are allowed and run through
+                             bash.
             temp_base_dir: Optional base directory for creating the execution environment
                           temp directory. If None, uses the system default temp directory.
             description: Optional description of the tool. If None, uses the default description.
@@ -296,8 +296,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         if timeout is None:
             timeout = self._shell_timeout
 
-        # Check allowlist; with one configured, the command was parsed to argv
-        # and must run without a shell so no expansion can occur.
+        # With an allowlist, the parsed argv must run directly (no shell).
         argv, rejection = self._prepare_command(cmd)
         if rejection is not None:
             return rejection

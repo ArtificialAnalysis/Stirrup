@@ -594,8 +594,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             timeout = self._shell_timeout
         container = self._container  # Capture for lambda type narrowing
 
-        # Check allowlist; with one configured, the command was parsed to argv
-        # and must run without a shell so no expansion can occur.
+        # With an allowlist, the parsed argv must run directly (no shell).
         argv, rejection = self._prepare_command(cmd)
         if rejection is not None:
             return rejection

@@ -22,43 +22,38 @@ SHELL_TIMEOUT = 60 * 5
 # Reason a command is rejected by the allowlist; each key maps to advice below.
 RejectionReason = Literal["empty_command", "no_pattern_match", "shell_syntax", "shell_assignment"]
 
-# Characters that form shell operators (separators, pipes, redirects, subshell
-# parens, substitution backticks, and newline as a command separator). Unquoted
-# runs of these mean the model expected a shell to interpret them; without a
-# shell they would be passed as literal arguments and silently do nothing, so
-# such commands are rejected with advice instead.
+# Shell operator characters: separators, pipes, redirects, subshell parens,
+# backticks, and newline. Appearing unquoted, they mean the command expects a
+# shell — but allowlisted commands run without one, so we reject rather than
+# pass the operator through as a do-nothing literal argument.
 _SHELL_PUNCTUATION = ";<>|&()`\n"
 
-# Reason codes mapped to the advice the LLM (or operator) sees, so a rejection
-# explains which rule fired instead of always blaming a pattern mismatch.
+# Advice shown to the model for each rejection reason.
 _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
     "empty_command": "The command is empty.",
     "no_pattern_match": (
-        "The command does not match any configured allowlist pattern. Patterns are "
-        "matched against the parsed command with shell quoting normalized."
+        "The command does not match any allowlist pattern. Patterns are matched "
+        "against the parsed command, so quoting does not affect matching."
     ),
     "shell_syntax": (
-        "Allowlisted commands run directly without a shell, so shell operators "
-        "(;, &&, ||, |, redirects, $(...) or backtick substitution, newlines between "
-        "commands) and Bash-only quoting are not supported. Run a single command "
-        "with literal arguments."
+        "Allowlisted commands run without a shell. Shell syntax such as ;, &&, |, "
+        "redirects, $(...), backticks, or multiple lines is not supported. Run one "
+        "command with literal arguments."
     ),
     "shell_assignment": (
-        "The command begins with a shell variable assignment such as NAME=value, "
-        "which is not supported. Run a single command without an assignment prefix."
+        "Assignment prefixes such as NAME=value are not supported. Run the command without the leading assignment."
     ),
 }
 
 
 def _unquoted_operator_tokens(cmd: str) -> list[str]:
-    """Return the unquoted shell-operator tokens in cmd (empty when none).
+    """Return any unquoted shell operator tokens in cmd.
 
-    Lexes with shlex punctuation mode: runs of :data:`_SHELL_PUNCTUATION`
-    characters become their own tokens unless quoted or escaped, so attached
-    forms (``>out.txt``, ``foo;rm``) are caught while quoted literals
-    (``'a;b'``, ``--format='%h;%s'``) stay inside their words. Newline is
-    excluded from whitespace so an unquoted one surfaces as an operator token.
-    Raises ValueError on unbalanced quotes, like :func:`shlex.split`.
+    Uses shlex punctuation mode, which splits runs of operator characters into
+    their own tokens unless they are quoted or escaped. This catches operators
+    attached to a word (``>out.txt``, ``foo;rm``) while leaving quoted literals
+    (``'a;b'``, ``--format='%h;%s'``) alone. Newline counts as an operator, not
+    whitespace. Raises ValueError on unbalanced quotes.
     """
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
     lex.whitespace = " \t\r"
@@ -178,12 +173,11 @@ class CodeExecToolProvider(ToolProvider, ABC):
     - save_output_files(): Save files to local dir or another exec env (uses primitives)
     - upload_files(): Upload files from local or another exec env (uses primitives)
 
-    All code execution providers support an optional allowlist of command patterns.
-    If provided, commands are parsed with shlex and executed directly, without a
-    shell: no pipes, separators, redirects, subshells, expansions, or globbing --
-    arguments are passed literally. A command runs only when a pattern matches the
-    parsed command from its start. If None, all commands are allowed and run
-    through a shell as usual.
+    All providers accept an optional allowlist of command patterns. With an
+    allowlist, each command is parsed with shlex, matched against the patterns,
+    and executed without a shell: arguments are passed literally, and shell
+    syntax such as pipes, redirects, and expansions is rejected. Without an
+    allowlist, all commands are allowed and run through a shell.
 
     Usage with Agent:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -205,13 +199,11 @@ class CodeExecToolProvider(ToolProvider, ABC):
         """Initialize execution environment with optional command allowlist.
 
         Args:
-            allowed_commands: Optional list of regex patterns matched from the
-                             start of the parsed command. If provided, commands
-                             are shlex-parsed and executed without a shell, with
-                             literal arguments (no expansion or globbing); shell
-                             operators, unparseable quoting, and assignment
-                             prefixes are rejected regardless of pattern match.
-                             If None, all commands are allowed and run through a
+            allowed_commands: Optional list of regex patterns, matched from the
+                             start of the parsed command. When set, commands run
+                             without a shell: arguments are literal and shell
+                             syntax is rejected (see ``_prepare_command``). When
+                             None, all commands are allowed and run through a
                              shell.
             shell_timeout: Per-command wall-clock timeout (seconds) applied to
                            every ``code_exec`` invocation from the LLM. Defaults
@@ -232,16 +224,19 @@ class CodeExecToolProvider(ToolProvider, ABC):
         return None
 
     def _prepare_command(self, cmd: str) -> tuple[list[str] | None, CommandResult | None]:
-        """Validate cmd against the allowlist and parse it for direct execution.
+        """Check cmd against the allowlist and parse it for execution.
 
-        Returns ``(argv, rejection)``. With no allowlist configured this is
-        ``(None, None)`` and the backend runs ``cmd`` through a shell unchanged.
-        With an allowlist, ``cmd`` is parsed into argv with :func:`shlex.split`
-        and either ``(argv, None)`` is returned -- the backend must execute argv
-        directly, without a shell, so quoting is resolved exactly once and no
-        expansion ever happens -- or ``(None, rejection)``. Patterns are matched
-        against ``shlex.join(argv)``, the canonical form of what will actually
-        execute, so quoting tricks in the command word cannot forge a match.
+        Returns ``(argv, rejection)``, where at most one side is set:
+
+        - ``(None, None)``: no allowlist configured. Run ``cmd`` through a
+          shell as usual.
+        - ``(None, rejection)``: the command was rejected. Return the rejection.
+        - ``(argv, None)``: the command is allowed. Execute ``argv`` directly,
+          with no shell involved.
+
+        Patterns are matched against ``shlex.join(argv)`` — the canonical form
+        of what will actually run — so quoting tricks cannot make a pattern see
+        a different command than the one executed.
         """
         if self._compiled_allowed is None:
             return None, None

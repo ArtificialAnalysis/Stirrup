@@ -35,12 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 def _quote_argv_for_shell(argv: list[str]) -> str:
-    """Render parsed argv as a shell command string that executes exactly argv.
+    """Render argv as a shell command string that runs exactly those arguments.
 
-    Every argument is quoted with :func:`shlex.quote`; the command word is
-    additionally force-quoted so a shell cannot interpret it as a reserved word
-    (``time``), an assignment, or any other special form -- it is always looked
-    up as a plain command, matching the no-shell backends.
+    Every argument is quoted. The command word is quoted even when it would
+    not normally need it, so the shell cannot treat it as a reserved word
+    (``time``) or an assignment — only as a plain command lookup. This matches
+    the behavior of the backends that skip the shell entirely.
     """
     head = "'" + argv[0].replace("'", "'\"'\"'") + "'"
     return f"{head} {shlex.join(argv[1:])}" if len(argv) > 1 else head
@@ -109,12 +109,12 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         Args:
             timeout: Execution environment lifetime in seconds (default: 10 minutes).
             template: Optional E2B template name/alias.
-            allowed_commands: Optional list of regex patterns. If provided,
-                             commands are shlex-parsed, matched against the
-                             patterns, and re-quoted so the sandbox shell
-                             executes exactly the parsed argv (literal
-                             arguments, no expansion). If None, all commands
-                             are allowed and run through the shell unchanged.
+            allowed_commands: Optional list of regex patterns. When set,
+                             commands are matched against the patterns and
+                             re-quoted so the sandbox shell runs exactly the
+                             parsed arguments, with nothing expanded. When
+                             None, all commands are allowed and run through
+                             the shell unchanged.
             sandbox_kwargs: Additional keyword arguments forwarded to
                             ``AsyncSandbox.create`` (e.g. ``allow_internet_access=False``,
                             ``metadata={...}``, ``envs={...}``). ``timeout`` and
@@ -302,9 +302,9 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         if timeout is None:
             timeout = self._shell_timeout
 
-        # Check allowlist; with one configured, the command was parsed to argv.
-        # The E2B API only takes a shell string, so re-quote the parsed argv:
-        # the sandbox shell then executes exactly argv, with no expansion.
+        # With an allowlist, run the parsed argv. E2B only accepts a command
+        # string, so re-quote the argv; the sandbox shell then runs exactly
+        # those arguments with nothing to expand.
         argv, rejection = self._prepare_command(cmd)
         if rejection is not None:
             return rejection

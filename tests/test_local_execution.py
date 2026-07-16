@@ -206,9 +206,9 @@ class TestLocalCodeExecToolProvider:
         self,
         command: str,
     ) -> None:
-        # Without a shell there are no subshells, keywords, or compound
-        # assignments: the first word is looked up as a binary, fails to exec,
-        # and nothing else runs.
+        # Without a shell there are no keywords or compound assignments: the
+        # first word is looked up as a binary, fails to exec, and nothing
+        # else runs.
         provider = LocalCodeExecToolProvider(allowed_commands=[r".*"])
 
         async with provider:
@@ -230,8 +230,7 @@ class TestLocalCodeExecToolProvider:
         self,
         command: str,
     ) -> None:
-        # An unterminated quote hides later metacharacters from the scanner, so it
-        # must fail closed rather than rely on Bash to reject it downstream.
+        # An unterminated quote cannot be parsed, so it must fail closed.
         provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
 
         async with provider:

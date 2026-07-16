@@ -64,35 +64,40 @@ provider = LocalCodeExecToolProvider(
 )
 ```
 
-The `allowed_commands` allowlist is enforced identically by every backend
-(`LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`, and
-`E2BCodeExecToolProvider`); the rules below apply to all of them.
+The allowlist works the same way in every backend (`LocalCodeExecToolProvider`,
+`DockerCodeExecToolProvider`, and `E2BCodeExecToolProvider`).
 
-When `allowed_commands` is configured, commands are not run through a shell.
-Each invocation is parsed into an argument vector with POSIX shlex rules,
-matched against the patterns, and executed directly, so shell interpretation
-can never disagree with what was vetted. Patterns are matched against the
-parsed command with quoting normalized (`echo 'a'` is matched as `echo a`),
-anchored at the start but not at the end, so `ls` also allows `lsblk`; use
-`\Z` or a fuller pattern such as `git(\s.*)?\Z` to pin the command word.
+When an allowlist is set, commands do not go through a shell. Stirrup parses
+each command into an argument list, checks it against your patterns, and
+executes it directly. What was vetted is exactly what runs — there is no shell
+that could reinterpret the command afterwards.
 
-Because no shell is involved:
+**Pattern matching.** Patterns are regexes matched against the parsed command,
+starting from the first character. Quoting is normalized before matching, so
+`echo 'a'` is matched as `echo a`. Matching is not anchored at the end: `ls`
+also allows `lsblk`. To pin the command word exactly, use a pattern like
+`git(\s.*)?\Z`.
 
-- arguments are passed literally: `$VAR`, `${...}`, and globs such as `*.py`
-  are never expanded — `echo "$HOME"` prints `$HOME`
-- unquoted shell operator syntax is rejected with advice: separators (`;`,
-  `&`, newlines), pipes, redirects, `&&`/`||` chains, subshell parentheses,
-  and `$(...)`/backtick substitution — even attached to a word (`>out.txt`)
-- a leading shell assignment such as `MODE=test command` is rejected
-- quoting that cannot be parsed — Bash-only forms such as `$'...'`, or an
-  unterminated quote — is rejected
+**What works.** A single command with plain or quoted arguments. Quoted shell
+characters are just text: `echo 'a;b'` and `grep 'foo$' file` do what they
+look like.
 
-Quoted and escaped characters remain ordinary literal arguments, so
-`echo 'a;b'` and `grep 'foo$' file` work when their command is allowlisted.
-Commands such as `env`, `sh`, and `bash` must themselves be allowlisted; doing
-so also delegates control of the commands they launch. Use an allowlisted
-script when environment setup is needed. Setting `allowed_commands=None`
-allows unrestricted Bash syntax.
+**What is different without a shell:**
+
+- Nothing is expanded. `$VAR`, `${...}`, and globs like `*.py` reach the
+  command as-is — `echo "$HOME"` prints `$HOME`.
+- Shell operators are rejected, and the model is told why: `;`, `&`, `|`,
+  `&&`, `||`, redirects, newlines between commands, subshells, and
+  `$(...)`/backtick substitution. This includes operators attached to a word,
+  like `>out.txt`.
+- Leading assignments (`MODE=test command`) are rejected.
+- Anything that can't be parsed — unterminated quotes, Bash-only `$'...'` —
+  is rejected.
+
+**Caveats.** Allowlisting `bash`, `sh`, or `env` hands over control of
+whatever they run. If a task needs environment setup, allowlist a script
+instead. `allowed_commands=None` (the default) skips all of this and runs
+commands through Bash unrestricted.
 
 > **Note:** because patterns are start-anchored, a pattern like `python` no
 > longer matches `python` appearing later in the command. Adjust existing
