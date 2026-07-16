@@ -339,14 +339,112 @@ class TestLocalCodeExecToolProvider:
             assert result.saved[0].output_path == temp_output_dir / "output.txt"
             assert (temp_output_dir / "output.txt").read_text().strip() == "test content"
 
-            # Original file should be moved (not exist in temp)
+            # Saving copies the output; the execution environment remains intact.
             assert provider.temp_dir is not None
-            assert not (provider.temp_dir / "output.txt").exists()
+            assert (provider.temp_dir / "output.txt").exists()
 
             # Test failure case - non-existent file
             result = await provider.save_output_files(["nonexistent.txt"], temp_output_dir)
             assert len(result.failed) == 1
             assert "nonexistent.txt" in result.failed
+
+    async def test_save_output_files_preserves_nested_paths(self, temp_output_dir: Path) -> None:
+        provider = LocalCodeExecToolProvider()
+
+        async with provider:
+            await provider.write_file_bytes("left/report.txt", b"left")
+            await provider.write_file_bytes("right/report.txt", b"right")
+
+            result = await provider.save_output_files(
+                ["left/report.txt", "right/report.txt"],
+                temp_output_dir,
+            )
+
+            assert result.failed == {}
+            assert (temp_output_dir / "left/report.txt").read_bytes() == b"left"
+            assert (temp_output_dir / "right/report.txt").read_bytes() == b"right"
+
+    async def test_save_output_files_rejects_duplicate_destinations(self, temp_output_dir: Path) -> None:
+        # Two spellings of one destination: the first claims it, the second is
+        # rejected instead of silently overwriting.
+        provider = LocalCodeExecToolProvider()
+
+        async with provider:
+            await provider.write_file_bytes("report.txt", b"first")
+            assert provider.temp_dir is not None
+            absolute_spelling = str(provider.temp_dir / "report.txt")
+
+            result = await provider.save_output_files(["report.txt", absolute_spelling], temp_output_dir)
+
+        assert [saved.source_path for saved in result.saved] == ["report.txt"]
+        assert "collision" in result.failed[absolute_spelling]
+        assert (temp_output_dir / "report.txt").read_bytes() == b"first"
+
+    async def test_save_output_files_treats_exact_duplicates_as_idempotent(self, temp_output_dir: Path) -> None:
+        provider = LocalCodeExecToolProvider()
+
+        async with provider:
+            await provider.write_file_bytes("report.txt", b"data")
+            result = await provider.save_output_files(["report.txt", "report.txt"], temp_output_dir)
+
+        assert result.failed == {}
+        assert [saved.source_path for saved in result.saved] == ["report.txt"]
+
+    async def test_save_output_files_uses_nested_directory_case_policy(
+        self,
+        temp_output_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        nested_output = temp_output_dir / "nested"
+        nested_output.mkdir()
+        monkeypatch.setattr(
+            "stirrup.tools.code_backends.base._is_case_sensitive_filesystem",
+            lambda directory: directory.name != "nested",
+        )
+        provider = LocalCodeExecToolProvider()
+
+        async with provider:
+            await provider.write_file_bytes("nested/Report.txt", b"data")
+            await provider.write_file_bytes("nested/report.txt", b"data")
+            result = await provider.save_output_files(
+                ["nested/Report.txt", "nested/report.txt"],
+                temp_output_dir,
+            )
+
+        assert [saved.source_path for saved in result.saved] == ["nested/Report.txt"]
+        assert "collision" in result.failed["nested/report.txt"]
+
+    async def test_save_output_files_bad_paths_do_not_abort_batch(self, temp_output_dir: Path) -> None:
+        # Traversal and out-of-root sources land in `failed`; the rest of the
+        # batch still saves.
+        provider = LocalCodeExecToolProvider()
+
+        async with provider:
+            await provider.write_file_bytes("good.txt", b"ok")
+            result = await provider.save_output_files(
+                ["nested/../escape.txt", "/etc/passwd", "good.txt"],
+                temp_output_dir,
+            )
+
+        assert "traversal" in result.failed["nested/../escape.txt"]
+        assert "outside known execution roots" in result.failed["/etc/passwd"]
+        assert (temp_output_dir / "good.txt").read_bytes() == b"ok"
+        assert not (temp_output_dir / "escape.txt").exists()
+
+    async def test_save_output_files_rejects_symlink_escape(self, temp_output_dir: Path, tmp_path: Path) -> None:
+        # A symlink inside the execution env pointing outside it must not be
+        # followed by the copy.
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"host secret")
+        provider = LocalCodeExecToolProvider()
+
+        async with provider:
+            assert provider.temp_dir is not None
+            (provider.temp_dir / "leak.txt").symlink_to(secret)
+            result = await provider.save_output_files(["leak.txt"], temp_output_dir)
+
+        assert list(result.failed) == ["leak.txt"]
+        assert not (temp_output_dir / "leak.txt").exists()
 
     async def test_upload_files(self, sample_file: Path, sample_dir: Path) -> None:
         """Test uploading files to the execution environment."""

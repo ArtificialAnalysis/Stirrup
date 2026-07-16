@@ -149,8 +149,10 @@ parent = Agent(
 
 1. Sub-agent creates files in its execution environment
 2. Sub-agent calls finish tool with `paths` listing the files
-3. Files are automatically transferred to parent's execution environment
+3. Files are copied into the parent's execution environment (the sub-agent's copies remain)
 4. Parent can reference these files in subsequent operations
+
+Transfer is best-effort: a path that doesn't exist, isn't a regular file, escapes the execution root, or collides with another output is skipped. The sub-agent's result message lists both the transferred files and any that failed, so the parent model isn't told to rely on a file that never arrived.
 
 ## Multiple Sub-Agents
 

@@ -245,6 +245,9 @@ class TestDockerCodeExecToolProvider:
                 assert len(result.saved) == 1
                 assert (temp_output_dir / "output.txt").read_text() == "test content"
 
+                # Saving copies; the source stays in the execution environment.
+                assert test_file.exists()
+
                 # Create another file for absolute path test
                 test_file2 = provider.temp_dir / "output2.txt"
                 test_file2.write_text("test content 2")
@@ -253,6 +256,30 @@ class TestDockerCodeExecToolProvider:
                 abs_path = f"{DEFAULT_WORKING_DIR}/output2.txt"
                 result = await provider.save_output_files([abs_path], temp_output_dir)
                 assert len(result.saved) == 1
+
+    async def test_save_output_files_rejects_symlink_escape(
+        self, mock_docker_client: MagicMock, tmp_path: Path, temp_output_dir: Path
+    ) -> None:
+        # A symlink created inside the mount pointing outside it must land in
+        # `failed`, not resolve to the host file it targets.
+        provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
+
+        with (
+            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+        ):
+            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+            async with provider as _:
+                secret = tmp_path / "secret.txt"
+                secret.write_text("host secret")
+                assert provider.temp_dir is not None
+                (provider.temp_dir / "leak.txt").symlink_to(secret)
+
+                result = await provider.save_output_files(["leak.txt"], temp_output_dir)
+
+        assert "outside execution environment" in result.failed["leak.txt"]
+        assert not (temp_output_dir / "leak.txt").exists()
 
     async def test_upload_files(
         self, mock_docker_client: MagicMock, tmp_path: Path, sample_file: Path, sample_dir: Path

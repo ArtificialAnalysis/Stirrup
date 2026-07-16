@@ -79,6 +79,43 @@ class SimpleExecProvider(CodeExecToolProvider):
             f.write(content)
 ```
 
+## Output Paths
+
+`save_output_files()` preserves safe relative paths below the requested output
+directory. For example, `left/report.txt` and `right/report.txt` remain distinct
+instead of both becoming `report.txt`. Traversal and destination collisions are
+reported in `SaveOutputFilesResult.failed`; within a single call, a file already
+written by an earlier requested output is never silently overwritten by a later
+one (the first requested output wins). Absolute source paths are accepted only
+when they are beneath a backend-declared root; unmatched absolute paths are
+rejected rather than flattened to a basename. Source paths use POSIX semantics,
+since execution environments are Linux. Host output collection supports macOS
+and Linux; Windows hosts are not supported.
+
+All built-in backends copy outputs and leave sources in the execution
+environment. Local and Docker capture requested sources before writing any
+destination and replace completed destination files atomically. In each
+`SavedFile`, `output_path` is a concrete `Path` for a local destination and a
+`PurePosixPath` for a path inside another execution environment.
+
+Custom backends with absolute sandbox paths should override
+`output_source_roots()` to return `OutputSourceRoot` entries so paths beneath a
+known sandbox root can be preserved relative to that root. When a root is a
+directory on the host filesystem, set its `host_path` to enable canonical
+(symlink-aware) matching — for example accepting `/tmp/...` spellings of a
+`/private/tmp/...` root on macOS. Roots must be absolute paths.
+
+If backend metadata exposes symlink targets, override `resolve_output_source()`
+to inspect every source path component, ensure every resolved target stays
+inside an execution root before the output is read, and return the resolved
+path to read.
+
+Backends that support cross-environment transfers should override
+`output_destination_identity()` when they can resolve destination symlinks.
+The method must reject destinations outside `output_root` and return the
+canonical identity used for duplicate detection. Hard-link and concurrent
+filesystem-mutation detection are intentionally outside this contract.
+
 ## Command Allowlist
 
 Restrict what commands can be executed:

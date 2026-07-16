@@ -136,6 +136,12 @@ class TestE2BCodeExecToolProvider:
             new=AsyncMock(return_value=mock_sandbox),
         ):
             async with provider as _:
+                realpath_result = MagicMock(
+                    exit_code=0,
+                    stdout="/home/user/output.txt\0",
+                    stderr="",
+                )
+                mock_sandbox.commands.run.return_value = realpath_result
                 result = await provider.save_output_files(["/home/user/output.txt"], temp_output_dir)
 
                 assert len(result.saved) == 1
@@ -147,6 +153,49 @@ class TestE2BCodeExecToolProvider:
                 mock_sandbox.files.exists = AsyncMock(return_value=False)
                 result = await provider.save_output_files(["/nonexistent.txt"], temp_output_dir)
                 assert len(result.failed) == 1
+
+    async def test_save_output_files_rejects_invalid_sources(
+        self, mock_sandbox: MagicMock, temp_output_dir: Path
+    ) -> None:
+        """Each resolve_output_source rejection path lands in `failed`."""
+        provider = E2BCodeExecToolProvider()
+
+        with patch(
+            "stirrup.tools.code_backends.e2b.AsyncSandbox.create",
+            new=AsyncMock(return_value=mock_sandbox),
+        ):
+            async with provider as _:
+                # realpath resolves outside the working root (e.g. a symlink)
+                mock_sandbox.commands.run = AsyncMock(
+                    return_value=MagicMock(exit_code=0, stdout="/etc/passwd\0", stderr="")
+                )
+                result = await provider.save_output_files(["/home/user/leak.txt"], temp_output_dir)
+                assert "outside E2B execution root" in result.failed["/home/user/leak.txt"]
+
+                # realpath exits nonzero (missing or unreadable file)
+                mock_sandbox.commands.run = AsyncMock(
+                    side_effect=CommandExitException(stderr="", stdout="", exit_code=1, error=None)
+                )
+                result = await provider.save_output_files(["missing.txt"], temp_output_dir)
+                assert "Could not resolve" in result.failed["missing.txt"]
+
+                # realpath output malformed (no NUL-terminated path)
+                mock_sandbox.commands.run = AsyncMock(return_value=MagicMock(exit_code=0, stdout="", stderr=""))
+                result = await provider.save_output_files(["weird.txt"], temp_output_dir)
+                assert "Could not resolve" in result.failed["weird.txt"]
+
+                # resolves to a directory, not a file
+                mock_sandbox.commands.run = AsyncMock(
+                    return_value=MagicMock(exit_code=0, stdout="/home/user/data\0", stderr="")
+                )
+                directory_info = MagicMock()
+                directory_info.type = FileType.DIR
+                mock_sandbox.files.get_info = AsyncMock(return_value=directory_info)
+                result = await provider.save_output_files(["data"], temp_output_dir)
+                assert "not a file" in result.failed["data"]
+
+                # nothing was written to the output directory
+                assert list(temp_output_dir.iterdir()) == []
 
     async def test_upload_files(self, mock_sandbox: MagicMock, sample_file: Path, sample_dir: Path) -> None:
         """Test uploading files to E2B sandbox."""

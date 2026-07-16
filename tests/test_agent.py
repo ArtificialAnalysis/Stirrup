@@ -1,6 +1,7 @@
 """Tests for agent core functionality."""
 
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -1258,3 +1259,187 @@ async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     assert finish_params.reason == "Completed"
     assert client.call_count == 5
     assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+async def test_root_agent_saves_declared_outputs_and_records_failures(tmp_path: Path) -> None:
+    """Output transfer runs at session exit: saved files land in output_dir and
+    failures are recorded on last_output_files_result, not silently dropped.
+
+    The failing path exists at finish time (so the finish tool accepts it) but
+    uses a traversal spelling that the transfer rejects — the seam where
+    failure surfacing actually matters.
+    """
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses = [
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["real.txt", "nested/../sneaky.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+            request_start_time=100.0,
+            request_end_time=100.4,
+        )
+    ]
+
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    output_dir = tmp_path / "outputs"
+    async with agent.session(output_dir=output_dir) as session:
+        await provider.write_file_bytes("real.txt", b"data")
+        await provider.write_file_bytes("sneaky.txt", b"sneaky")
+        await provider.write_file_bytes("nested/anchor.txt", b"")
+        finish_params, _, _ = await session.run([SystemMessage(content="sys"), UserMessage(content="task")])
+
+    assert finish_params is not None
+    assert (output_dir / "real.txt").read_bytes() == b"data"
+    assert not (output_dir / "sneaky.txt").exists()
+
+    result = session.last_output_files_result
+    assert result is not None
+    assert [saved.source_path for saved in result.saved] == ["real.txt"]
+    assert "traversal" in result.failed["nested/../sneaky.txt"]
+
+
+async def test_root_session_resets_stale_output_result(tmp_path: Path) -> None:
+    """A later root run with no declared outputs must not expose the previous
+    run's last_output_files_result."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses = [
+        AssistantMessage(
+            content="first",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["real.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="second",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": []}',
+                    tool_call_id="call_2",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+    output_dir = tmp_path / "outputs"
+
+    async with agent.session(output_dir=output_dir) as session:
+        await provider.write_file_bytes("real.txt", b"data")
+        await session.run([SystemMessage(content="sys"), UserMessage(content="task")])
+    completed_session = session
+    completed_result = session.last_output_files_result
+    assert completed_result is not None
+
+    async with agent.session(output_dir=output_dir) as session:
+        await session.run([SystemMessage(content="sys"), UserMessage(content="task")])
+    assert session.last_output_files_result is None
+    assert completed_session.last_output_files_result is completed_result
+
+
+async def test_failed_reused_session_does_not_export_previous_finish_paths(tmp_path: Path) -> None:
+    """Only finish parameters produced by the current session may drive output saving."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses: list[AssistantMessage | Exception] = [
+        AssistantMessage(
+            content="first",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["report.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        RuntimeError("second session failed before finish"),
+    ]
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+    output_dir = tmp_path / "outputs"
+
+    async with agent.session(output_dir=output_dir, cache_on_interrupt=False) as session:
+        await provider.write_file_bytes("report.txt", b"first")
+        await session.run([SystemMessage(content="sys"), UserMessage(content="first")])
+
+    with pytest.raises(RuntimeError, match="failed before finish"):
+        async with agent.session(output_dir=output_dir, cache_on_interrupt=False) as failed_session:
+            await provider.write_file_bytes("report.txt", b"second")
+            await failed_session.run([SystemMessage(content="sys"), UserMessage(content="second")])
+
+    assert (output_dir / "report.txt").read_bytes() == b"first"
+    assert failed_session.last_output_files_result is None
+
+
+async def test_failed_second_run_in_same_session_does_not_reuse_first_finish(tmp_path: Path) -> None:
+    """Each run must replace the session's pending finish state before doing work."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses: list[AssistantMessage | Exception] = [
+        AssistantMessage(
+            content="first",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["report.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        RuntimeError("second run failed before finish"),
+    ]
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+    output_dir = tmp_path / "outputs"
+
+    with pytest.raises(RuntimeError, match="failed before finish"):
+        async with agent.session(output_dir=output_dir, cache_on_interrupt=False) as session:
+            await provider.write_file_bytes("report.txt", b"data")
+            await session.run([SystemMessage(content="sys"), UserMessage(content="first")])
+            await session.run([SystemMessage(content="sys"), UserMessage(content="second")])
+
+    assert not (output_dir / "report.txt").exists()
+    assert session.last_output_files_result is None

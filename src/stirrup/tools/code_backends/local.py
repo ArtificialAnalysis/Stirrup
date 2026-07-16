@@ -19,10 +19,12 @@ from .base import (
     CodeExecToolProvider,
     CodeExecutionParams,
     CommandResult,
-    SavedFile,
+    OutputSourceRoot,
     SaveOutputFilesResult,
     UploadedFile,
     UploadFilesResult,
+    _host_output_destination_identity,
+    _save_host_output_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -372,11 +374,11 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         output_dir: Path | str,
         dest_env: "CodeExecToolProvider | None" = None,
     ) -> SaveOutputFilesResult:
-        """Move files from the temp directory to a destination.
+        """Copy files from the temp directory to a destination.
 
-        When dest_env is None (local filesystem), files are MOVED (not copied) -
-        originals are deleted from the execution environment.
-        Existing files in output_dir are silently overwritten.
+        Source files remain in the execution environment. Existing destination
+        files are atomically replaced, while duplicate destinations within one
+        call are rejected and reported in ``failed``.
 
         When dest_env is provided (cross-environment transfer), files are copied
         using the base class implementation via read/write primitives.
@@ -402,56 +404,22 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         if dest_env is not None:
             return await super().save_output_files(paths, output_dir, dest_env)
 
-        # Local filesystem - use optimized move operation
-        output_dir_path = Path(output_dir)
-        output_dir_path.mkdir(parents=True, exist_ok=True)
+        return _save_host_output_files(
+            paths,
+            output_dir,
+            source_roots=self.output_source_roots(),
+            resolve_source=self._resolve_and_validate_path,
+        )
 
-        result = SaveOutputFilesResult()
+    def output_source_roots(self) -> tuple[OutputSourceRoot, ...]:
+        """Return absolute execution roots accepted when resolving output paths."""
+        return (OutputSourceRoot.for_host(self._temp_dir),) if self._temp_dir is not None else ()
 
-        for source_path_str in paths:
-            try:
-                source_path = Path(source_path_str)
-                if not source_path.is_absolute():
-                    source_path = self._temp_dir / source_path
-
-                # Security: ensure path is within temp directory
-                try:
-                    source_path.resolve().relative_to(self._temp_dir.resolve())
-                except ValueError:
-                    result.failed[source_path_str] = "Path is outside execution environment directory"
-                    logger.warning("Attempted to access path outside execution environment: %s", source_path_str)
-                    continue
-
-                if not source_path.exists():
-                    result.failed[source_path_str] = "File does not exist"
-                    logger.warning("Execution environment file does not exist: %s", source_path_str)
-                    continue
-
-                if not source_path.is_file():
-                    result.failed[source_path_str] = "Path is not a file"
-                    logger.warning("Execution environment path is not a file: %s", source_path_str)
-                    continue
-
-                file_size = source_path.stat().st_size
-                dest_path = output_dir_path / source_path.name
-
-                # Move file (overwrites if exists)
-                shutil.move(str(source_path), str(dest_path))
-                logger.debug("Moved file: %s -> %s", source_path, dest_path)
-
-                result.saved.append(
-                    SavedFile(
-                        source_path=source_path_str,
-                        output_path=dest_path,
-                        size=file_size,
-                    ),
-                )
-
-            except Exception as exc:
-                result.failed[source_path_str] = str(exc)
-                logger.exception("Failed to move file: %s", source_path_str)
-
-        return result
+    async def output_destination_identity(self, destination: str, output_root: Path | str) -> str:
+        """Validate a cross-environment destination and return its host identity."""
+        resolved_destination = self._resolve_and_validate_path(destination)
+        resolved_root = self._resolve_and_validate_path(str(output_root))
+        return _host_output_destination_identity(resolved_destination, resolved_root)
 
     async def upload_files(
         self,

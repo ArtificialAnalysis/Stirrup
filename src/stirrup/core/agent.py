@@ -44,7 +44,7 @@ from stirrup.core.models import (
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
 from stirrup.tools import DEFAULT_TOOLS
-from stirrup.tools.code_backends.base import CodeExecToolProvider
+from stirrup.tools.code_backends.base import CodeExecToolProvider, SaveOutputFilesResult
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL
 from stirrup.tools.finish import FinishParams as SimpleFinishParams
@@ -84,6 +84,11 @@ class SessionState:
     uploaded_file_paths: list[str] = field(default_factory=list)  # Paths of files uploaded to exec_env
     skills_metadata: list[SkillMetadata] = field(default_factory=list)  # Loaded skills metadata
     logger: AgentLoggerBase | None = None  # Logger for pause/resume during user input
+    run_started: bool = False
+    finish_params: Any = None
+    run_metadata: dict[str, Any] = field(default_factory=dict)
+    output_files_result: SaveOutputFilesResult | None = None
+    shared_output_paths: list[str] = field(default_factory=list)
 
 
 _SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("session_state")
@@ -419,10 +424,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._active_tools[tool.name] = tool
         self._active_tools.update(self._finish_tools)
         self._has_tool_providers = any(isinstance(t, ToolProvider) for t in self._tools)
-
-        self._last_finish_params: Any = None  # FinishParams type parameter
-        self._last_run_metadata: dict[str, list[Any]] = {}
-        self._transferred_paths: list[str] = []  # Paths transferred to parent (for subagents)
 
         # Cache state for resumption (set during run(), used in __aexit__ for caching on interrupt)
         self._current_task_hash: str | None = None
@@ -937,7 +938,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._original_sigint = signal.getsignal(signal.SIGINT)
                 signal.signal(signal.SIGINT, self._handle_interrupt)
 
-            return SessionAgent.from_agent(self)
+            return SessionAgent.from_agent(self, state)
 
         except Exception:
             await exit_stack.__aexit__(None, None, None)
@@ -961,8 +962,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             # Cache state on non-success exit (only at root level)
             should_cache = (
                 state.depth == 0
+                and state.run_started
                 and self._cache_on_interrupt
-                and (exc_type is not None or self._last_finish_params is None)
+                and (exc_type is not None or state.finish_params is None)
                 and self._current_task_hash is not None
                 and self._current_run_state is not None
             )
@@ -974,7 +976,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 should_cache,
                 state.depth,
                 exc_type,
-                self._last_finish_params is not None,
+                state.finish_params is not None,
                 self._current_task_hash,
                 self._current_run_state is not None,
             )
@@ -1001,8 +1003,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     signal.signal(signal.SIGINT, original_handler)
                 self._logger.info(f"Cached state for task {self._current_task_hash}")
             # Save files from finish_params.paths based on depth
-            if state.output_dir and self._last_finish_params and state.exec_env:
-                paths = getattr(self._last_finish_params, "paths", None)
+            if state.output_dir and state.finish_params and state.exec_env:
+                paths = getattr(state.finish_params, "paths", None)
                 if paths:
                     if state.depth == 0:
                         # ROOT AGENT: Save to local filesystem
@@ -1016,23 +1018,30 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             output_path,
                         )
                         result = await state.exec_env.save_output_files(paths, output_path, dest_env=None)
+                        state.output_files_result = result
                         logger.debug(
                             "[%s] ROOT AGENT: Saved %d file(s), failed %d",
                             self._name,
                             len(result.saved),
                             len(result.failed),
                         )
+                        for failed_source, reason in result.failed.items():
+                            logger.warning(
+                                "[%s] ROOT AGENT: Output file not saved: %s (%s)",
+                                self._name,
+                                failed_source,
+                                reason,
+                            )
                     else:
                         # SUBAGENT: Handle file transfer based on exec_env ownership
                         if not state.exec_env_owned:
-                            # SHARED EXEC ENV: Files already in parent's env - no transfer needed
-                            # Just record the paths for reporting to parent
-                            self._transferred_paths = list(paths)
+                            # SHARED EXEC ENV: Files already in parent's env - no transfer needed.
+                            state.shared_output_paths = list(dict.fromkeys(paths))
                             logger.debug(
                                 "[%s] SUBAGENT (depth=%d, shared_exec_env): Files already in parent env: %s",
                                 self._name,
                                 state.depth,
-                                self._transferred_paths,
+                                state.shared_output_paths,
                             )
                         elif state.parent_exec_env:
                             # SEPARATE EXEC ENV: Transfer to parent's exec env
@@ -1047,14 +1056,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             result = await state.exec_env.save_output_files(
                                 paths, state.output_dir, dest_env=state.parent_exec_env
                             )
-                            # Store transferred paths for returning to parent
-                            self._transferred_paths = [str(sf.output_path) for sf in result.saved]
+                            state.output_files_result = result
                             logger.debug(
                                 "[%s] SUBAGENT: Transferred %d file(s) to parent, failed %d. Paths: %s",
                                 self._name,
                                 len(result.saved),
                                 len(result.failed),
-                                self._transferred_paths,
+                                [str(saved.output_path) for saved in result.saved],
                             )
                             if result.failed:
                                 logger.warning("Failed to transfer some files to parent env: %s", result.failed)
@@ -1071,8 +1079,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 del self._original_sigint
 
             # Exit logger context
-            self._logger.finish_params = self._last_finish_params
-            self._logger.run_metadata = self._last_run_metadata
+            self._logger.finish_params = state.finish_params
+            self._logger.run_metadata = state.run_metadata
             self._logger.output_dir = str(state.output_dir) if state.output_dir else None
             self._logger.__exit__(exc_type, exc_val, exc_tb)
 
@@ -1343,6 +1351,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 f"Use `async with agent.session(...) as session: await session.run(...)` instead."
             )
 
+        session_state = _SESSION_STATE.get(None) if isinstance(self, SessionAgent) else None
+        if session_state is not None:
+            session_state.run_started = True
+            session_state.finish_params = None
+            session_state.run_metadata = {}
+            session_state.output_files_result = None
+            session_state.shared_output_paths = []
+
         # Compute task hash for caching/resume
         task_hash = compute_task_hash(init_msgs)
         self._current_task_hash = task_hash
@@ -1493,9 +1509,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
         run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
         run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]
-        # Store for __aexit__ to access (on instance for this agent)
-        self._last_finish_params = finish_params
-        self._last_run_metadata = run_metadata
+        if session_state is not None:
+            session_state.finish_params = finish_params
+            session_state.run_metadata = run_metadata
 
         # Clear cache on successful completion (finish_params is set)
         if finish_params is not None and cache_manager.clear_on_success:
@@ -1568,59 +1584,60 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     output_dir=".",  # Path in parent's exec env
                     input_files=list(params.input_files) if params.input_files else None,  # ty: ignore[invalid-argument-type]
                 ) as agent_session:
-                    # Override logger depth for proper indentation in console output
                     agent_session._logger.depth = sub_agent_depth  # noqa: SLF001
-
                     finish_params, msg_history, run_metadata = await agent_session.run(init_msgs)
+                    completed_state = _SESSION_STATE.get()
 
-                    # Extract the last assistant message with actual content (not just tool calls)
-                    last_assistant_msg: AssistantMessage | None = None
-                    for msg_group in reversed(msg_history):
-                        for msg in reversed(msg_group):
-                            if isinstance(msg, AssistantMessage) and msg.content:
-                                last_assistant_msg = msg
-                                break
-                        if last_assistant_msg:
+                # Output transfer happens during session exit, so compose the response afterwards.
+                last_assistant_msg: AssistantMessage | None = None
+                for msg_group in reversed(msg_history):
+                    for msg in reversed(msg_group):
+                        if isinstance(msg, AssistantMessage) and msg.content:
+                            last_assistant_msg = msg
                             break
+                    if last_assistant_msg:
+                        break
 
-                    # Build content from the assistant message and/or finish params
-                    content_parts: list[str] = []
+                content_parts: list[str] = []
+                if last_assistant_msg and last_assistant_msg.content:
+                    content = last_assistant_msg.content
+                    if isinstance(content, list):
+                        content = "\n".join(str(block) for block in content)
+                    content_parts.append(content)
 
-                    if last_assistant_msg and last_assistant_msg.content:
-                        content = last_assistant_msg.content
-                        if isinstance(content, list):
-                            content = "\n".join(str(block) for block in content)
-                        content_parts.append(content)
+                if finish_params is not None:
+                    finish_dict = finish_params.model_dump()
+                    if finish_dict:
+                        content_parts.append(f"Finish params: {finish_dict}")
 
-                    # Include finish params if available (they often contain the actual result)
-                    if finish_params is not None:
-                        finish_dict = finish_params.model_dump()
-                        if finish_dict:
-                            content_parts.append(f"Finish params: {finish_dict}")
+                available_paths = completed_state.shared_output_paths
+                transfer_failures: dict[str, str] = {}
+                if completed_state.output_files_result is not None:
+                    available_paths = [str(saved.output_path) for saved in completed_state.output_files_result.saved]
+                    transfer_failures = completed_state.output_files_result.failed
 
-                    # Report files transferred to parent's exec env (set in __aexit__)
-                    transferred_paths = agent_session._transferred_paths  # noqa: SLF001
-                    if transferred_paths:
-                        content_parts.append(f"Files available in your environment: {transferred_paths}")
-
-                    if not content_parts:
-                        result_content = "<sub_agent_result>\n<error>No assistant message or finish params found</error>\n</sub_agent_result>"
-                    else:
-                        content = "\n".join(content_parts)
-                        result_content = (
-                            f"<sub_agent_result>"
-                            f"\n<response>{content}</response>"
-                            f"\n<finished>{finish_params is not None}</finished>"
-                            f"\n</sub_agent_result>"
-                        )
-
-                    # Create subagent metadata with token usage, message history, and run metadata
-                    sub_metadata = SubAgentMetadata(
-                        message_history=msg_history,
-                        run_metadata=run_metadata,
+                if available_paths:
+                    content_parts.append(f"Files available in your environment: {available_paths}")
+                if transfer_failures:
+                    content_parts.append(
+                        "Files that FAILED to transfer to your environment "
+                        "(referencing them will yield missing or wrong data): "
+                        f"{transfer_failures}"
                     )
 
-                    return ToolResult(content=result_content, metadata=sub_metadata)
+                if not content_parts:
+                    result_content = "<sub_agent_result>\n<error>No assistant message or finish params found</error>\n</sub_agent_result>"
+                else:
+                    content = "\n".join(content_parts)
+                    result_content = (
+                        f"<sub_agent_result>"
+                        f"\n<response>{content}</response>"
+                        f"\n<finished>{finish_params is not None}</finished>"
+                        f"\n</sub_agent_result>"
+                    )
+
+                sub_metadata = SubAgentMetadata(message_history=msg_history, run_metadata=run_metadata)
+                return ToolResult(content=result_content, metadata=sub_metadata)
 
             except Exception as e:
                 # On error, return empty metadata
@@ -1676,9 +1693,23 @@ class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, Fini
     distinction rather than just a runtime flag.
     """
 
+    __slots__ = ("_output_state",)
+
+    _output_state: SessionState
+
+    @property
+    def last_output_files_result(self) -> SaveOutputFilesResult | None:
+        """Return this session's output-saving result."""
+        return self._output_state.output_files_result
+
     @classmethod
-    def from_agent(cls, agent: Agent[FinishParams, FinishMeta]) -> "SessionAgent[FinishParams, FinishMeta]":
-        """Create a SessionAgent sharing the given Agent's ``__dict__``."""
-        sa: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
-        sa.__dict__ = agent.__dict__
-        return sa
+    def from_agent(
+        cls,
+        agent: Agent[FinishParams, FinishMeta],
+        output_state: SessionState,
+    ) -> "SessionAgent[FinishParams, FinishMeta]":
+        """Create a SessionAgent sharing configuration but retaining its own result state."""
+        session_agent: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
+        session_agent.__dict__ = agent.__dict__
+        session_agent._output_state = output_state
+        return session_agent

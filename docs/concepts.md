@@ -182,6 +182,8 @@ async with agent.session(output_dir="./results") as session:
 
 The agent signals which files to save by including their paths in `finish_params.paths` when calling the finish tool.
 
+Saving is best-effort: a declared path may fail (it doesn't exist, isn't a regular file, escapes the execution root, or collides with another output). After the session, `session.last_output_files_result` reports what happened — `.saved` lists the files written and `.failed` maps each rejected source path to the reason. Files are copied, so the originals stay in the execution environment.
+
 ### Loading Skills
 
 Skills are modular packages that extend agent capabilities with domain-specific instructions and scripts. Pass a skills directory to make them available:
