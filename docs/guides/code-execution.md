@@ -78,10 +78,11 @@ anchored at the start but not at the end, so `ls` also allows `lsblk`; use
 
 Because no shell is involved:
 
-- arguments are passed literally: `$VAR`, `$(...)`, backticks, and globs such
-  as `*.py` are never expanded — `echo "$HOME"` prints `$HOME`
-- shell operators are rejected with advice: separators (`;`, `&`), pipes,
-  redirects, `&&`/`||` chains, and unquoted newlines between commands
+- arguments are passed literally: `$VAR`, `${...}`, and globs such as `*.py`
+  are never expanded — `echo "$HOME"` prints `$HOME`
+- unquoted shell operator syntax is rejected with advice: separators (`;`,
+  `&`, newlines), pipes, redirects, `&&`/`||` chains, subshell parentheses,
+  and `$(...)`/backtick substitution — even attached to a word (`>out.txt`)
 - a leading shell assignment such as `MODE=test command` is rejected
 - quoting that cannot be parsed — Bash-only forms such as `$'...'`, or an
   unterminated quote — is rejected

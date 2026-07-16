@@ -15,6 +15,7 @@ except ImportError as e:
     ) from e
 
 import logging
+import shlex
 
 from stirrup.constants import SANDBOX_REQUEST_TIMEOUT, SANDBOX_TIMEOUT
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
@@ -28,10 +29,21 @@ from .base import (
     SaveOutputFilesResult,
     UploadedFile,
     UploadFilesResult,
-    _quote_argv_for_shell,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _quote_argv_for_shell(argv: list[str]) -> str:
+    """Render parsed argv as a shell command string that executes exactly argv.
+
+    Every argument is quoted with :func:`shlex.quote`; the command word is
+    additionally force-quoted so a shell cannot interpret it as a reserved word
+    (``time``), an assignment, or any other special form -- it is always looked
+    up as a plain command, matching the no-shell backends.
+    """
+    head = "'" + argv[0].replace("'", "'\"'\"'") + "'"
+    return f"{head} {shlex.join(argv[1:])}" if len(argv) > 1 else head
 
 
 def make_create_gate(max_rate: float, time_period: float = 1) -> AbstractAsyncContextManager[object]:

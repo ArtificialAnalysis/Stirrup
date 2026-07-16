@@ -134,14 +134,23 @@ class TestLocalCodeExecToolProvider:
             (r".*", "MODE+=test echo allowed"),
             (r"^echo", "echo=x touch forbidden.txt"),
             (r"^echo", "echo[0]=x touch forbidden.txt"),
-            # Unquoted shell operators.
+            # Unquoted shell operators, spaced or attached to a word.
             (r"^echo", "echo allowed && printf bypassed"),
             (r"^echo", "echo allowed || printf bypassed"),
             (r"^echo", "echo allowed | cat"),
             (r"^echo", "echo allowed > output.txt"),
             (r"^echo", "echo allowed < input.txt"),
             (r"^echo", "echo allowed & printf bypassed"),
+            (r"^echo", "echo allowed >output.txt"),
+            (r"^echo", "echo allowed;printf bypassed"),
+            (r"^echo", "echo allowed 2>&1"),
             (r"^echo", "echo allowed\nprintf bypassed"),
+            (r"^printf", "printf 'a\nb'\nls"),
+            # Unquoted substitution and subshell syntax.
+            (r"^echo", "echo $(printf bypassed)"),
+            (r"^echo", "echo `printf bypassed`"),
+            (r"^echo", "echo <(printf bypassed)"),
+            (r".*", "(touch forbidden.txt)"),
             # Bash-only quoting that the parser cannot represent fails closed.
             (r"^echo", r"echo $'it\'s; literal'"),
             # The pattern must match the executed command, not a quoted inner string.
@@ -188,7 +197,6 @@ class TestLocalCodeExecToolProvider:
     @pytest.mark.parametrize(
         "command",
         [
-            "(touch forbidden.txt)",
             "coproc touch forbidden.txt",
             "! touch forbidden.txt",
             "echo[1 + 1]=x touch forbidden.txt",
@@ -265,12 +273,10 @@ class TestLocalCodeExecToolProvider:
             ("echo 'a;b && c || d | e > f < g\n$() `x`'", "a;b && c || d | e > f < g\n$() `x`\n"),
             ('echo "it\'s ; literal"', "it's ; literal\n"),
             (r"echo a\;b \$VALUE \${VALUE}", "a;b $VALUE ${VALUE}\n"),
-            # Without a shell there is no expansion: variables, substitution,
-            # and globs are passed through as literal argument bytes.
+            # Without a shell there is no expansion: variables and globs are
+            # passed through as literal argument bytes.
             ('echo "$HOME"', "$HOME\n"),
             ("echo $HOME", "$HOME\n"),
-            ("echo $(printf bypassed)", "$(printf bypassed)\n"),
-            ("echo `printf bypassed`", "`printf bypassed`\n"),
             ("echo *", "*\n"),
             ("echo 'line1\nline2'", "line1\nline2\n"),
         ],

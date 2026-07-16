@@ -22,13 +22,12 @@ SHELL_TIMEOUT = 60 * 5
 # Reason a command is rejected by the allowlist; each key maps to advice below.
 RejectionReason = Literal["empty_command", "no_pattern_match", "shell_syntax", "shell_assignment"]
 
-# Tokens that are almost certainly a shell operator the model expected a shell
-# to interpret (``a | b``, ``a && b``, ``a > f``). Without a shell they would be
-# passed to the command as literal arguments and silently do nothing, so they
-# are rejected with advice instead.
-_BARE_OPERATOR_TOKENS = frozenset(
-    {";", ";;", "&", "&&", "|", "||", "|&", "<", ">", ">>", "<<", "<<<", ">&", "<&", "(", ")"}
-)
+# Characters that form shell operators (separators, pipes, redirects, subshell
+# parens, substitution backticks, and newline as a command separator). Unquoted
+# runs of these mean the model expected a shell to interpret them; without a
+# shell they would be passed as literal arguments and silently do nothing, so
+# such commands are rejected with advice instead.
+_SHELL_PUNCTUATION = ";<>|&()`\n"
 
 # Reason codes mapped to the advice the LLM (or operator) sees, so a rejection
 # explains which rule fired instead of always blaming a pattern mismatch.
@@ -40,8 +39,9 @@ _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
     ),
     "shell_syntax": (
         "Allowlisted commands run directly without a shell, so shell operators "
-        "(;, &&, ||, |, redirects, newlines between commands) and Bash-only quoting "
-        "are not supported. Run a single command with literal arguments."
+        "(;, &&, ||, |, redirects, $(...) or backtick substitution, newlines between "
+        "commands) and Bash-only quoting are not supported. Run a single command "
+        "with literal arguments."
     ),
     "shell_assignment": (
         "The command begins with a shell variable assignment such as NAME=value, "
@@ -50,16 +50,20 @@ _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
 }
 
 
-def _quote_argv_for_shell(argv: list[str]) -> str:
-    """Render parsed argv as a shell command string that executes exactly argv.
+def _unquoted_operator_tokens(cmd: str) -> list[str]:
+    """Return the unquoted shell-operator tokens in cmd (empty when none).
 
-    Every argument is quoted with :func:`shlex.quote`; the command word is
-    additionally force-quoted so a shell cannot interpret it as a reserved word
-    (``time``), an assignment, or any other special form -- it is always looked
-    up as a plain command, matching the no-shell backends.
+    Lexes with shlex punctuation mode: runs of :data:`_SHELL_PUNCTUATION`
+    characters become their own tokens unless quoted or escaped, so attached
+    forms (``>out.txt``, ``foo;rm``) are caught while quoted literals
+    (``'a;b'``, ``--format='%h;%s'``) stay inside their words. Newline is
+    excluded from whitespace so an unquoted one surfaces as an operator token.
+    Raises ValueError on unbalanced quotes, like :func:`shlex.split`.
     """
-    head = "'" + argv[0].replace("'", "'\"'\"'") + "'"
-    return " ".join([head, *(shlex.quote(arg) for arg in argv[1:])])
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    return [token for token in lex if token and all(c in _SHELL_PUNCTUATION for c in token)]
 
 
 class CodeExecutionParams(BaseModel):
@@ -243,20 +247,17 @@ class CodeExecToolProvider(ToolProvider, ABC):
             return None, None
         try:
             argv = shlex.split(cmd)
+            operator_tokens = _unquoted_operator_tokens(cmd)
         except ValueError:
             return None, self._rejection(cmd, "shell_syntax")
         if not argv:
             return None, self._rejection(cmd, "empty_command")
-        if any(token in _BARE_OPERATOR_TOKENS for token in argv):
-            return None, self._rejection(cmd, "shell_syntax")
-        # An unquoted newline separates commands under a shell but is plain
-        # whitespace to shlex; reject it rather than silently fusing two
-        # commands into one argv. Quoted newlines survive inside a token.
-        if "\n" in cmd and not any("\n" in token for token in argv):
+        if operator_tokens:
             return None, self._rejection(cmd, "shell_syntax")
         if "=" in argv[0]:
             return None, self._rejection(cmd, "shell_assignment")
-        if not any(p.match(shlex.join(argv)) for p in self._compiled_allowed):
+        canonical = shlex.join(argv)
+        if not any(p.match(canonical) for p in self._compiled_allowed):
             return None, self._rejection(cmd, "no_pattern_match")
         return argv, None
 
