@@ -18,8 +18,9 @@ Fetches a web page and returns its content as markdown.
 
 !!! note "Fetch security"
     Web fetch resolves and validates every destination and redirect, rejects non-public
-    addresses, and ignores environment proxy settings. Search and fetch use separate
-    clients so cookies and transport state are not shared across those operations.
+    addresses, ignores environment proxy settings, and neither sends nor retains cookies.
+    Its transport and state are isolated from search, and provider cleanup is safe even
+    when startup is interrupted.
 
 ::: stirrup.tools.web.FetchWebPageParams
 

@@ -1,7 +1,7 @@
 """Web tools for fetching pages and searching the web.
 
 This module provides web_fetch and web_search tools with a WebToolProvider
-class that manages their separate HTTP client lifecycles.
+that isolates fetch transport and state from search and safely cleans up resources.
 
 Example usage:
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -68,16 +68,6 @@ _WEB_FETCH_MAX_ADDRESS_ATTEMPTS = 6
 _WEB_FETCH_MAX_BODY_BYTES = 1024 * 1024
 _WEB_FETCH_BODY_CHUNK_BYTES = 64 * 1024
 # Keep IANA special-purpose policy stable across supported ``ipaddress`` versions.
-_EXPLICITLY_PUBLIC_NETWORKS = (
-    ipaddress.ip_network("192.0.0.9/32"),
-    ipaddress.ip_network("192.0.0.10/32"),
-    ipaddress.ip_network("2001:1::1/128"),
-    ipaddress.ip_network("2001:1::2/128"),
-    ipaddress.ip_network("2001:3::/32"),
-    ipaddress.ip_network("2001:4:112::/48"),
-    ipaddress.ip_network("2001:20::/28"),
-    ipaddress.ip_network("2001:30::/28"),
-)
 _EXPLICITLY_NON_PUBLIC_NETWORKS = (
     ipaddress.ip_network("192.0.0.0/24"),
     ipaddress.ip_network("192.88.99.0/24"),  # Deprecated 6to4 Relay Anycast
@@ -124,9 +114,6 @@ class _WebFetchError(Exception):
 def _ensure_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         _ensure_public_ip(address.ipv4_mapped)
-        return
-
-    if any(address in network for network in _EXPLICITLY_PUBLIC_NETWORKS):
         return
 
     # is_global rejects private, loopback, link-local, and unspecified addresses.
@@ -207,15 +194,13 @@ def _get_fetch_web_page_tool(
         if content_encoding != "identity":
             raise _WebFetchError(f"Unsupported Content-Encoding in web fetch response: {content_encoding}")
 
-        body_parts: list[bytes] = []
-        body_size = 0
+        body = bytearray()
         async for chunk in response.aiter_bytes(chunk_size=_WEB_FETCH_BODY_CHUNK_BYTES):
-            remaining_bytes = _WEB_FETCH_MAX_BODY_BYTES - body_size
-            body_parts.append(chunk[:remaining_bytes])
-            body_size += min(len(chunk), remaining_bytes)
-            if body_size == _WEB_FETCH_MAX_BODY_BYTES:
+            remaining_bytes = _WEB_FETCH_MAX_BODY_BYTES - len(body)
+            body.extend(chunk[:remaining_bytes])
+            if len(body) == _WEB_FETCH_MAX_BODY_BYTES:
                 break
-        return b"".join(body_parts)
+        return bytes(body)
 
     async def _send_request(
         logical_url: httpx.URL,
@@ -474,12 +459,12 @@ def _get_websearch_tool(
 
 
 class WebToolProvider(ToolProvider):
-    """Provides web tools (web_fetch, web_search) with managed HTTP clients.
+    """Provides web tools (web_fetch, web_search) with managed HTTP resources.
 
     WebToolProvider implements the Tool lifecycle protocol (has_lifecycle=True),
-    so it can be used directly in Agent's tools list. Web fetch uses a dedicated
-    client that ignores environment proxies and does not send or retain cookies.
-    Web search uses a separate client with normal proxy and redirect behavior.
+    so it can be used directly in Agent's tools list. Web fetch ignores environment
+    proxies and does not send or retain cookies; its transport and state are isolated
+    from web search. Provider resources are safely cleaned up after interrupted startup.
 
     Usage as Tool in Agent (preferred):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient

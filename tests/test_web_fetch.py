@@ -265,6 +265,8 @@ async def test_web_provider_shields_partial_startup_cleanup_from_cancellation(mo
         "10.0.0.1",
         "169.254.169.254",
         "192.0.0.8",
+        "192.0.0.9",
+        "192.0.0.10",
         "192.0.0.170",
         "192.0.0.171",
         "192.88.99.2",
@@ -275,6 +277,12 @@ async def test_web_provider_shields_partial_startup_cleanup_from_cancellation(mo
         "[fd00::1]",
         "[fe80::1]",
         "[ff02::1]",
+        "[2001:1::1]",
+        "[2001:1::2]",
+        "[2001:3::1]",
+        "[2001:4:112::1]",
+        "[2001:20::1]",
+        "[2001:30::1]",
         "[2001:db8::1]",
         "[2002::1]",
         "[64:ff9b:1::1]",
@@ -296,21 +304,6 @@ async def test_web_fetch_rejects_non_public_ip_literals(host: str) -> None:
 
     assert result.success is False
     assert requests == []
-
-
-@pytest.mark.parametrize("host", ["192.0.0.9", "192.0.0.10", "[2001:3::1]", "[2001:20::1]"])
-async def test_web_fetch_allows_globally_reachable_special_ip_literals(host: str) -> None:
-    requests: list[httpx.Request] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return html_response(request)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), f"https://{host}/page")
-
-    assert result.success is True
-    assert len(requests) == 1
 
 
 @pytest.mark.parametrize(
