@@ -30,7 +30,7 @@ from typing import Annotated, Any
 
 import httpx
 import trafilatura
-from anyio import fail_after, to_thread
+from anyio import CancelScope, fail_after, to_thread
 from pydantic import BaseModel, Field
 from tenacity import (
     AsyncRetrying,
@@ -57,15 +57,33 @@ DEFAULT_WEBFETCH_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",
+    "Accept-Encoding": "identity",
 }
 WEB_FETCH_TIMEOUT = 60 * 3
 WEB_FETCH_MAX_REDIRECTS = 10
 WEB_FETCH_RETRY_WAIT = wait_exponential(multiplier=1, min=1, max=10)
-# These IANA special-purpose ranges are not consistently classified by
-# ``ipaddress`` across Stirrup's supported Python versions.
+# Six attempts preserve three retries for common dual-stack hosts while
+# preventing large DNS answers from multiplying work across retries.
+_WEB_FETCH_MAX_ADDRESS_ATTEMPTS = 6
+_WEB_FETCH_MAX_BODY_BYTES = 1024 * 1024
+_WEB_FETCH_BODY_CHUNK_BYTES = 64 * 1024
+# Keep IANA special-purpose policy stable across supported ``ipaddress`` versions.
+_EXPLICITLY_PUBLIC_NETWORKS = (
+    ipaddress.ip_network("192.0.0.9/32"),
+    ipaddress.ip_network("192.0.0.10/32"),
+    ipaddress.ip_network("2001:1::1/128"),
+    ipaddress.ip_network("2001:1::2/128"),
+    ipaddress.ip_network("2001:3::/32"),
+    ipaddress.ip_network("2001:4:112::/48"),
+    ipaddress.ip_network("2001:20::/28"),
+    ipaddress.ip_network("2001:30::/28"),
+)
 _EXPLICITLY_NON_PUBLIC_NETWORKS = (
+    ipaddress.ip_network("192.0.0.0/24"),
     ipaddress.ip_network("192.88.99.0/24"),  # Deprecated 6to4 Relay Anycast
+    ipaddress.ip_network("64:ff9b:1::/48"),
+    ipaddress.ip_network("2001::/23"),
+    ipaddress.ip_network("2002::/16"),
     ipaddress.ip_network("3fff::/20"),  # Documentation
 )
 WEB_SEARCH_TIMEOUT = 60 * 3
@@ -104,6 +122,13 @@ class _WebFetchError(Exception):
 
 
 def _ensure_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        _ensure_public_ip(address.ipv4_mapped)
+        return
+
+    if any(address in network for network in _EXPLICITLY_PUBLIC_NETWORKS):
+        return
+
     # is_global rejects private, loopback, link-local, and unspecified addresses.
     # ipaddress still labels some reserved, multicast, and legacy IPv6 site-local
     # addresses as global, so reject those explicitly.
@@ -119,7 +144,7 @@ def _ensure_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) ->
         raise _WebFetchError(f"Destination resolves to a non-public IP address: {address}")
 
 
-async def _resolve_public_addresses(url: httpx.URL, timeout: float) -> tuple[str, ...]:
+async def _resolve_public_addresses(url: httpx.URL) -> tuple[str, ...]:
     """Resolve a URL and reject the entire destination if any address is non-public."""
     if url.scheme not in {"http", "https"} or not url.host:
         raise _WebFetchError("fetch_web_page only supports absolute http:// or https:// URLs.")
@@ -133,18 +158,15 @@ async def _resolve_public_addresses(url: httpx.URL, timeout: float) -> tuple[str
         literal_address = ipaddress.ip_address(host)
     except ValueError:
         try:
-            with fail_after(timeout):
-                address_info = await to_thread.run_sync(
-                    partial(
-                        socket.getaddrinfo,
-                        host,
-                        port,
-                        type=socket.SOCK_STREAM,
-                    ),
-                    abandon_on_cancel=True,
-                )
-        except TimeoutError as exc:
-            raise _WebFetchError(f"Timed out resolving destination host {host}.") from exc
+            address_info = await to_thread.run_sync(
+                partial(
+                    socket.getaddrinfo,
+                    host,
+                    port,
+                    type=socket.SOCK_STREAM,
+                ),
+                abandon_on_cancel=True,
+            )
         except OSError as exc:
             raise _WebFetchError(f"Could not resolve destination host {host}: {exc}") from exc
 
@@ -174,58 +196,102 @@ def _get_fetch_web_page_tool(
 
     Args:
         client: Dedicated fetch client managed by ``WebToolProvider``
-        timeout: Maximum time in seconds for each request stage, including DNS resolution
+        timeout: Total deadline in seconds for fetching and extracting the page
 
     Returns:
         Tool configured to fetch web pages and extract clean markdown content
     """
 
+    async def _read_response_body(response: httpx.Response) -> bytes:
+        content_encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+        if content_encoding != "identity":
+            raise _WebFetchError(f"Unsupported Content-Encoding in web fetch response: {content_encoding}")
+
+        body_parts: list[bytes] = []
+        body_size = 0
+        async for chunk in response.aiter_bytes(chunk_size=_WEB_FETCH_BODY_CHUNK_BYTES):
+            remaining_bytes = _WEB_FETCH_MAX_BODY_BYTES - body_size
+            body_parts.append(chunk[:remaining_bytes])
+            body_size += min(len(chunk), remaining_bytes)
+            if body_size == _WEB_FETCH_MAX_BODY_BYTES:
+                break
+        return b"".join(body_parts)
+
     async def _send_request(
         logical_url: httpx.URL,
-        public_addresses: tuple[str, ...],
-    ) -> httpx.Response:
-        """Try validated addresses in order after retryable transport failures."""
-        for address_index, destination_address in enumerate(public_addresses):
-            connection_url = logical_url.copy_with(host=destination_address)
-            request = client.build_request(
-                "GET",
-                connection_url,
-                headers={
-                    **DEFAULT_WEBFETCH_HEADERS,
-                    "Connection": "close",
-                    "Host": logical_url.netloc.decode("ascii"),
-                },
-                extensions={"sni_hostname": logical_url.raw_host.decode("ascii")},
-            )
-            request.headers.pop("cookie", None)
+        destination_address: str,
+    ) -> tuple[httpx.Response, bytes | None]:
+        connection_url = logical_url.copy_with(host=destination_address)
+        request = client.build_request(
+            "GET",
+            connection_url,
+            headers={
+                **DEFAULT_WEBFETCH_HEADERS,
+                "Connection": "close",
+                "Host": logical_url.netloc.decode("ascii"),
+            },
+            extensions={"sni_hostname": logical_url.raw_host.decode("ascii")},
+        )
+        request.headers.pop("cookie", None)
+        response: httpx.Response | None = None
+        try:
+            response = await client.send(request, follow_redirects=False, stream=True)
+            if response.has_redirect_location:
+                return response, None
+            response.raise_for_status()
+            return response, await _read_response_body(response)
+        finally:
             try:
-                return await client.send(request, follow_redirects=False)
-            except (httpx.TimeoutException, httpx.NetworkError):
-                if address_index == len(public_addresses) - 1:
-                    raise
+                if response is not None:
+                    with CancelScope(shield=True):
+                        await response.aclose()
             finally:
                 # Fetch never sends or retains cookies. The client is dedicated to
                 # this tool, so clearing the whole jar also handles HTTPX's special
                 # domain representation for IPv6 literals.
                 client.cookies.clear()
 
-        raise RuntimeError("Web fetch address loop completed without a response.")
+    async def _request_hop(
+        logical_url: httpx.URL,
+        public_addresses: tuple[str, ...],
+    ) -> tuple[httpx.Response, bytes | None]:
+        """Try validated addresses with a fixed attempt budget for this hop."""
+        address_attempts = 0
+        retryer = AsyncRetrying(
+            retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
+            stop=stop_after_attempt(3),
+            wait=WEB_FETCH_RETRY_WAIT,
+            reraise=True,
+        )
+        async for retry_attempt in retryer:
+            with retry_attempt:
+                last_error: httpx.TimeoutException | httpx.NetworkError | None = None
+                for destination_address in public_addresses:
+                    address_attempts += 1
+                    try:
+                        return await _send_request(logical_url, destination_address)
+                    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                        last_error = exc
+                        if address_attempts >= _WEB_FETCH_MAX_ADDRESS_ATTEMPTS:
+                            raise _WebFetchError(
+                                f"Could not fetch destination after {address_attempts} address attempts."
+                            ) from exc
+                if last_error is not None:
+                    raise last_error
 
-    async def _fetch_with_redirects(url: str) -> httpx.Response:
+        raise RuntimeError("Web fetch retry loop completed without a response.")
+
+    async def _fetch_with_redirects(url: str) -> bytes:
         current_url = httpx.URL(url).copy_with(fragment=None)
         redirects_followed = 0
 
         while True:
-            public_addresses = await _resolve_public_addresses(current_url, timeout)
-            response = await AsyncRetrying(
-                retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
-                stop=stop_after_attempt(3),
-                wait=WEB_FETCH_RETRY_WAIT,
-                reraise=True,
-            )(_send_request, current_url, public_addresses)
+            public_addresses = await _resolve_public_addresses(current_url)
+            response, body = await _request_hop(current_url, public_addresses)
             if not response.has_redirect_location:
-                response.raise_for_status()
-                return response
+                if body is None:
+                    raise RuntimeError("Web fetch completed without a response body.")
+                return body
 
             if redirects_followed >= WEB_FETCH_MAX_REDIRECTS:
                 raise _WebFetchError(f"Too many redirects (maximum {WEB_FETCH_MAX_REDIRECTS}).")
@@ -236,20 +302,31 @@ def _get_fetch_web_page_tool(
     async def fetch_web_page_executor(params: FetchWebPageParams) -> ToolResult[WebFetchMetadata]:
         """Fetch web page and extract main content as markdown using trafilatura."""
         try:
-            response = await _fetch_with_redirects(params.url)
-            body_md = trafilatura.extract(response.text, output_format="markdown") or ""
+            with fail_after(timeout):
+                response_body = await _fetch_with_redirects(params.url)
+                body_md = (
+                    await to_thread.run_sync(
+                        partial(trafilatura.extract, response_body, output_format="markdown"),
+                        abandon_on_cancel=True,
+                    )
+                    or ""
+                )
             return ToolResult(
                 content=f"<web_fetch><url>{params.url}</url><body>"
                 f"{truncate_msg(body_md, MAX_LENGTH_WEB_FETCH_HTML)}</body></web_fetch>",
                 metadata=WebFetchMetadata(pages_fetched=[params.url]),
             )
+        except TimeoutError:
+            error_message = f"Web fetch timed out after {timeout:g} seconds."
         except (httpx.HTTPError, httpx.InvalidURL, _WebFetchError) as exc:
-            return ToolResult(
-                content=f"<web_fetch><url>{params.url}</url><error>"
-                f"{truncate_msg(str(exc), MAX_LENGTH_WEB_FETCH_HTML)}</error></web_fetch>",
-                success=False,
-                metadata=WebFetchMetadata(pages_fetched=[params.url]),
-            )
+            error_message = str(exc)
+
+        return ToolResult(
+            content=f"<web_fetch><url>{params.url}</url><error>"
+            f"{truncate_msg(error_message, MAX_LENGTH_WEB_FETCH_HTML)}</error></web_fetch>",
+            success=False,
+            metadata=WebFetchMetadata(pages_fetched=[params.url]),
+        )
 
     return Tool[FetchWebPageParams, WebFetchMetadata](
         name="fetch_web_page",
@@ -431,7 +508,7 @@ class WebToolProvider(ToolProvider):
         """Initialize WebToolProvider.
 
         Args:
-            timeout: HTTP timeout in seconds (default: 180)
+            timeout: Total web fetch timeout and per-operation web search timeout in seconds (default: 180)
             brave_api_key: Brave Search API key for web_search tool.
                           If None, uses BRAVE_API_KEY environment variable.
                           Web search is only available if API key is provided.
@@ -466,7 +543,8 @@ class WebToolProvider(ToolProvider):
         except BaseException:
             self._fetch_client = None
             self._search_client = None
-            await stack.aclose()
+            with CancelScope(shield=True):
+                await stack.aclose()
             raise
         self._client_stack = stack
         return tools
