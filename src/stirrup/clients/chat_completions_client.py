@@ -12,14 +12,7 @@ import os
 from time import perf_counter
 from typing import Any
 
-from openai import (
-    APIConnectionError,
-    APITimeoutError,
-    AsyncOpenAI,
-    InternalServerError,
-    RateLimitError,
-)
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from openai import AsyncOpenAI
 
 from stirrup.clients.utils import to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
@@ -47,7 +40,7 @@ class ChatCompletionsClient(LLMClient):
     Supports custom base_url for OpenAI-compatible providers (vLLM, Ollama,
     Azure OpenAI, local models, etc.).
 
-    Includes automatic retries for transient failures and token usage tracking.
+    Delegates retries for transient failures to the OpenAI SDK and tracks token usage.
 
     Example:
         >>> # Standard OpenAI usage
@@ -114,27 +107,12 @@ class ChatCompletionsClient(LLMClient):
         """Model identifier."""
         return self._model
 
-    @retry(
-        retry=retry_if_exception_type(
-            (
-                APIConnectionError,
-                APITimeoutError,
-                RateLimitError,
-                InternalServerError,
-            )
-        ),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-    )
     async def generate(
         self,
         messages: list[ChatMessage],
         tools: dict[str, Tool],
     ) -> AssistantMessage:
         """Generate assistant response with optional tool calls.
-
-        Retries up to 3 times on transient errors (connection, timeout, rate limit,
-        internal server errors) with exponential backoff.
 
         Args:
             messages: List of conversation messages.
