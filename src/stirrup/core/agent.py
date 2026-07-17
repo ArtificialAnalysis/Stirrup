@@ -1267,9 +1267,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
             reject_all_finish_calls = len(finish_call_names) > 1
 
-            tool_messages = []
             for tool_call in assistant_message.tool_calls:
-                if reject_all_finish_calls and tool_call.name in self._finish_tools:
+                if finish_params is not None:
+                    tool_message = ToolMessage(
+                        content=(
+                            f"Skipped tool '{tool_call.name}' because a finish tool "
+                            "completed successfully earlier in the same turn."
+                        ),
+                        tool_call_id=tool_call.tool_call_id,
+                        name=tool_call.name,
+                        success=False,
+                    )
+                elif reject_all_finish_calls and tool_call.name in self._finish_tools:
                     now = perf_counter()
                     tool_message = ToolMessage(
                         content=(
@@ -1285,18 +1294,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         tool_start_time=now,
                         tool_end_time=now,
                     )
-                    tool_messages.append(tool_message)
-                    self._logger.tool_result(tool_message)
-                    continue
+                else:
+                    tool_message = await self.run_tool(tool_call, run_metadata)
+                    if tool_message.success and tool_message.name in self._finish_tools:
+                        finish_tool = self._finish_tools[tool_message.name]
+                        finish_params = finish_tool.parameters.model_validate_json(tool_call.arguments)
 
-                tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
-
-                if tool_message.success and tool_message.name in self._finish_tools:
-                    finish_tool = self._finish_tools[tool_message.name]
-                    finish_params = finish_tool.parameters.model_validate_json(tool_call.arguments)
-
-                # Log tool result immediately
                 self._logger.tool_result(tool_message)
 
         return assistant_message, tool_messages, finish_params
