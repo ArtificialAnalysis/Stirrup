@@ -128,6 +128,10 @@ For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, us
 
 ### OpenAI-Compatible APIs
 
+When `base_url` is omitted, clients use `OPENAI_BASE_URL` or OpenAI's standard
+endpoint. When `api_key` is omitted, exact OpenAI/OpenRouter HTTPS endpoints use
+their provider environment key; custom and HTTP endpoints require an explicit key.
+
 ```python
 # Create client using Deepseek's OpenAI-compatible endpoint
 client = ChatCompletionsClient(

@@ -8,7 +8,6 @@ This is the default client for Stirrup.
 """
 
 import logging
-import os
 from time import perf_counter
 from typing import Any
 
@@ -21,7 +20,7 @@ from openai import (
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import to_openai_messages, to_openai_tools
+from stirrup.clients.utils import _resolve_openai_endpoint_and_api_key, to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -78,10 +77,13 @@ class ChatCompletionsClient(LLMClient):
         Args:
             model: Model identifier (e.g., 'gpt-5', 'gpt-4o', 'o1-preview').
             max_tokens: Maximum context window size in tokens. Defaults to 64,000.
-            base_url: API base URL. If None, uses OpenAI's standard URL.
-                Use for OpenAI-compatible providers (e.g., 'http://localhost:8000/v1').
-            api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
-                environment variable.
+            base_url: API base URL. If None, reads ``OPENAI_BASE_URL`` before
+                using OpenAI's standard URL. Use for OpenAI-compatible providers
+                (e.g., 'http://localhost:8000/v1').
+            api_key: API key for authentication. Explicit values take precedence.
+                If None, exact OpenAI and OpenRouter HTTPS endpoints use
+                ``OPENAI_API_KEY`` and ``OPENROUTER_API_KEY``, respectively.
+                Custom and HTTP endpoints require an explicit key.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
@@ -94,12 +96,10 @@ class ChatCompletionsClient(LLMClient):
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
 
-        # Initialize AsyncOpenAI client
-        # Read from OPENROUTER_API_KEY if no api_key provided
-        resolved_api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        endpoint, resolved_api_key = _resolve_openai_endpoint_and_api_key(base_url, api_key)
         self._client = AsyncOpenAI(
             api_key=resolved_api_key,
-            base_url=base_url,
+            base_url=endpoint,
             timeout=timeout,
             max_retries=max_retries,
         )

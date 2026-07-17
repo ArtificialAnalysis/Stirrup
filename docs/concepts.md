@@ -214,8 +214,8 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 |-----------|------|---------|-------------|
 | `model` | `str` | required | Model identifier (e.g., `"gpt-5"`, `"deepseek-chat"`) |
 | `max_tokens` | `int` | `64_000` | Context window size |
-| `base_url` | `str \| None` | `None` | Custom API URL (for Deepseek, vLLM, etc.) |
-| `api_key` | `str \| None` | `None` | API key (defaults to `OPENROUTER_API_KEY` env var) |
+| `base_url` | `str \| None` | `None` | API URL. Falls back to `OPENAI_BASE_URL`, then OpenAI's standard URL |
+| `api_key` | `str \| None` | `None` | API key. Exact OpenAI/OpenRouter HTTPS endpoints use their provider environment key; other endpoints require an explicit key |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
 | `max_retries` | `int` | `2` | Number of retries for transient errors |
 

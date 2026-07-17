@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pytest import MonkeyPatch
 
 from stirrup.clients.open_responses_client import (
     OpenResponsesClient,
@@ -283,6 +284,19 @@ class TestResponseParsing:
 
 class TestOpenResponsesClient:
     """Tests for OpenResponsesClient class."""
+
+    async def test_resolver_wiring_strips_responses_suffix(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+        client = OpenResponsesClient(
+            model="gpt-4o",
+            base_url="https://openrouter.ai/api/v1/responses/",
+        )
+
+        try:
+            assert str(client._client.base_url) == "https://openrouter.ai/api/v1/"  # noqa: SLF001
+            assert client._client.auth_headers == {"Authorization": "Bearer openrouter-key"}  # noqa: SLF001
+        finally:
+            await client._client.close()  # noqa: SLF001
 
     def test_client_properties(self) -> None:
         """Test client property accessors."""

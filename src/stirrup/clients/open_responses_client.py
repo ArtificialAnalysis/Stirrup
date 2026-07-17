@@ -6,7 +6,6 @@ the Responses API via the `base_url` parameter.
 """
 
 import logging
-import os
 from time import perf_counter
 from typing import Any
 
@@ -19,6 +18,7 @@ from openai import (
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from stirrup.clients.utils import _resolve_openai_endpoint_and_api_key
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -295,10 +295,12 @@ class OpenResponsesClient(LLMClient):
         Args:
             model: Model identifier (e.g., 'gpt-4o', 'o1-preview').
             max_tokens: Maximum output tokens. Defaults to 64,000.
-            base_url: API base URL. If None, uses OpenAI's standard URL.
-                Use for OpenAI-compatible providers.
-            api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
-                environment variable.
+            base_url: API base URL. If None, reads ``OPENAI_BASE_URL`` before
+                using OpenAI's standard URL. Use for OpenAI-compatible providers.
+            api_key: API key for authentication. Explicit values take precedence.
+                If None, exact OpenAI and OpenRouter HTTPS endpoints use
+                ``OPENAI_API_KEY`` and ``OPENROUTER_API_KEY``, respectively.
+                Custom and HTTP endpoints require an explicit key.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
@@ -313,17 +315,16 @@ class OpenResponsesClient(LLMClient):
         self._default_instructions = instructions
         self._kwargs = kwargs or {}
 
-        # Initialize AsyncOpenAI client
-        resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        endpoint, resolved_api_key = _resolve_openai_endpoint_and_api_key(base_url, api_key)
 
-        # Strip /responses suffix if present - SDK appends it automatically
-        resolved_base_url = base_url
-        if resolved_base_url and resolved_base_url.rstrip("/").endswith("/responses"):
-            resolved_base_url = resolved_base_url.rstrip("/").removesuffix("/responses")
+        # The SDK appends /responses itself.
+        if endpoint.path.rstrip("/").endswith("/responses"):
+            path = endpoint.path.rstrip("/").removesuffix("/responses")
+            endpoint = endpoint.copy_with(path=path)
 
         self._client = AsyncOpenAI(
             api_key=resolved_api_key,
-            base_url=resolved_base_url,
+            base_url=endpoint,
             timeout=timeout,
             max_retries=max_retries,
         )
