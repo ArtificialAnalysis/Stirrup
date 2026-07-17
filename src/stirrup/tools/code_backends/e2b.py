@@ -15,6 +15,7 @@ except ImportError as e:
     ) from e
 
 import logging
+import shlex
 
 from stirrup.constants import SANDBOX_REQUEST_TIMEOUT, SANDBOX_TIMEOUT
 from stirrup.core.models import ImageContentBlock, Tool, ToolUseCountMetadata
@@ -31,6 +32,18 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _quote_argv_for_shell(argv: list[str]) -> str:
+    """Render argv as a shell command string that runs exactly those arguments.
+
+    Every argument is quoted. The command word is quoted even when it would
+    not normally need it, so the shell cannot treat it as a reserved word
+    (``time``) or an assignment — only as a plain command lookup. This matches
+    the behavior of the backends that skip the shell entirely.
+    """
+    head = "'" + argv[0].replace("'", "'\"'\"'") + "'"
+    return f"{head} {shlex.join(argv[1:])}" if len(argv) > 1 else head
 
 
 def make_create_gate(max_rate: float, time_period: float = 1) -> AbstractAsyncContextManager[object]:
@@ -96,9 +109,12 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         Args:
             timeout: Execution environment lifetime in seconds (default: 10 minutes).
             template: Optional E2B template name/alias.
-            allowed_commands: Optional list of regex patterns. If provided, only
-                             commands matching at least one pattern are allowed.
-                             If None, all commands are allowed.
+            allowed_commands: Optional list of regex patterns. When set,
+                             commands are matched against the patterns and
+                             re-quoted so the sandbox shell runs exactly the
+                             parsed arguments, with nothing expanded. When
+                             None, all commands are allowed and run through
+                             the shell unchanged.
             sandbox_kwargs: Additional keyword arguments forwarded to
                             ``AsyncSandbox.create`` (e.g. ``allow_internet_access=False``,
                             ``metadata={...}``, ``envs={...}``). ``timeout`` and
@@ -286,15 +302,14 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         if timeout is None:
             timeout = self._shell_timeout
 
-        # Check allowlist
-        if not self._check_allowed(cmd):
-            return CommandResult(
-                exit_code=1,
-                stdout="",
-                stderr=f"Command not allowed: '{cmd}' does not match any allowed patterns",
-                error_kind="command_not_allowed",
-                advice="Only commands matching the allowlist patterns are permitted.",
-            )
+        # With an allowlist, run the parsed argv. E2B only accepts a command
+        # string, so re-quote the argv; the sandbox shell then runs exactly
+        # those arguments with nothing to expand.
+        argv, rejection = self._prepare_command(cmd)
+        if rejection is not None:
+            return rejection
+        if argv is not None:
+            cmd = _quote_argv_for_shell(argv)
 
         try:
             r = await self._sbx.commands.run(cmd, timeout=timeout, request_timeout=self._request_timeout)

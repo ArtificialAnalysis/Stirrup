@@ -67,9 +67,11 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         """Initialize LocalCodeExecToolProvider configuration.
 
         Args:
-            allowed_commands: Optional list of regex patterns. If provided, only
-                             commands matching at least one pattern are allowed.
-                             If None, all commands are allowed.
+            allowed_commands: Optional list of regex patterns. When set,
+                             commands are matched against the patterns and run
+                             without a shell, with literal arguments. When
+                             None, all commands are allowed and run through
+                             bash.
             temp_base_dir: Optional base directory for creating the execution environment
                           temp directory. If None, uses the system default temp directory.
             description: Optional description of the tool. If None, uses the default description.
@@ -294,15 +296,10 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         if timeout is None:
             timeout = self._shell_timeout
 
-        # Check allowlist
-        if not self._check_allowed(cmd):
-            return CommandResult(
-                exit_code=1,
-                stdout="",
-                stderr=f"Command not allowed: '{cmd}' does not match any allowed patterns",
-                error_kind="command_not_allowed",
-                advice="Only commands matching the allowlist patterns are permitted.",
-            )
+        # With an allowlist, the parsed argv must run directly (no shell).
+        argv, rejection = self._prepare_command(cmd)
+        if rejection is not None:
+            return rejection
 
         # Check for absolute paths (local environment is not sandboxed)
         absolute_path_error = self._check_absolute_paths(cmd)
@@ -312,13 +309,13 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         process = None
         try:
             with anyio.fail_after(timeout):
-                # start_new_session=True puts bash at the head of its own session,
-                # so pgid == child pid and we can killpg the whole tree on timeout.
-                # Without it, process.kill() only terminates root bash, leaving
-                # grandchildren reparented to init (same bug shape as the docker
-                # orphan leak that motivated this PR).
+                # start_new_session=True puts the child at the head of its own
+                # session, so pgid == child pid and we can killpg the whole tree
+                # on timeout. Without it, process.kill() only terminates the
+                # root process, leaving grandchildren reparented to init (same
+                # bug shape as the docker orphan leak that motivated this PR).
                 process = await anyio.open_process(
-                    ["bash", "-c", cmd],
+                    argv if argv is not None else ["bash", "-c", cmd],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=self._temp_dir,

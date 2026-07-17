@@ -64,6 +64,45 @@ provider = LocalCodeExecToolProvider(
 )
 ```
 
+The allowlist works the same way in every backend (`LocalCodeExecToolProvider`,
+`DockerCodeExecToolProvider`, and `E2BCodeExecToolProvider`).
+
+When an allowlist is set, commands do not go through a shell. Stirrup parses
+each command into an argument list, checks it against your patterns, and
+executes it directly. What was vetted is exactly what runs — there is no shell
+that could reinterpret the command afterwards.
+
+**Pattern matching.** Patterns are regexes matched against the parsed command,
+starting from the first character. Quoting is normalized before matching, so
+`echo 'a'` is matched as `echo a`. Matching is not anchored at the end: `ls`
+also allows `lsblk`. To pin the command word exactly, use a pattern like
+`git(\s.*)?\Z`.
+
+**What works.** A single command with plain or quoted arguments. Quoted shell
+characters are just text: `echo 'a;b'` and `grep 'foo$' file` do what they
+look like.
+
+**What is different without a shell:**
+
+- Nothing is expanded. `$VAR`, `${...}`, and globs like `*.py` reach the
+  command as-is — `echo "$HOME"` prints `$HOME`.
+- Shell operators are rejected, and the model is told why: `;`, `&`, `|`,
+  `&&`, `||`, redirects, newlines between commands, subshells, and
+  `$(...)`/backtick substitution. This includes operators attached to a word,
+  like `>out.txt`.
+- Leading assignments (`MODE=test command`) are rejected.
+- Anything that can't be parsed — unterminated quotes, Bash-only `$'...'` —
+  is rejected.
+
+**Caveats.** Allowlisting `bash`, `sh`, or `env` hands over control of
+whatever they run. If a task needs environment setup, allowlist a script
+instead. `allowed_commands=None` (the default) skips all of this and runs
+commands through Bash unrestricted.
+
+> **Note:** because patterns are start-anchored, a pattern like `python` no
+> longer matches `python` appearing later in the command. Adjust existing
+> patterns that relied on substring matching.
+
 ## DockerCodeExecToolProvider
 
 Executes code in a Docker container for better isolation.

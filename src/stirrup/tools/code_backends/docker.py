@@ -594,15 +594,10 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             timeout = self._shell_timeout
         container = self._container  # Capture for lambda type narrowing
 
-        # Check allowlist
-        if not self._check_allowed(cmd):
-            return CommandResult(
-                exit_code=1,
-                stdout="",
-                stderr=f"Command not allowed: '{cmd}' does not match any allowed patterns",
-                error_kind="command_not_allowed",
-                advice="Only commands matching the allowlist patterns are permitted.",
-            )
+        # With an allowlist, the parsed argv must run directly (no shell).
+        argv, rejection = self._prepare_command(cmd)
+        if rejection is not None:
+            return rejection
 
         # Enforce the timeout inside the container via coreutils `timeout(1)`.
         # It runs the command in its own process group and sends SIGKILL to the
@@ -610,7 +605,11 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         # parented to container PID 1 when the client gives up (moby/moby#9098).
         # Exit 124 == SIGTERM expiry, 137 == --kill-after SIGKILL; both map to
         # error_kind="timeout" for the caller.
-        wrapped = f"timeout --kill-after=5s {timeout}s bash -c {shlex.quote(cmd)}"
+        if argv is not None:
+            exec_cmd = ["timeout", "--kill-after=5s", f"{timeout}s", *argv]
+        else:
+            wrapped = f"timeout --kill-after=5s {timeout}s bash -c {shlex.quote(cmd)}"
+            exec_cmd = ["bash", "-c", wrapped]
 
         try:
             # Outer fail_after is a safety net for a stalled docker socket; the
@@ -618,7 +617,7 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             with fail_after(timeout + 10):
                 exec_result = await to_thread.run_sync(
                     lambda: container.exec_run(
-                        cmd=["bash", "-c", wrapped],
+                        cmd=exec_cmd,
                         workdir=self._working_dir,
                         demux=True,  # Separate stdout/stderr
                     )
