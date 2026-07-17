@@ -1,11 +1,16 @@
 """Base types and abstract class for code execution backends."""
 
 import logging
+import os
 import re
 import shlex
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
+from stat import S_IMODE
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
@@ -44,6 +49,131 @@ _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
         "Assignment prefixes such as NAME=value are not supported. Run the command without the leading assignment."
     ),
 }
+
+
+@dataclass(frozen=True)
+class OutputSourceRoot:
+    """An absolute execution-environment root accepted when resolving output paths.
+
+    Attributes:
+        path: Absolute POSIX root path (execution environments are Linux).
+        host_path: Set when this root is a directory on the host filesystem.
+            Enables canonical (symlink-aware) resolution, e.g. accepting
+            ``/tmp/...`` spellings of a ``/private/tmp/...`` root on macOS.
+    """
+
+    path: str
+    host_path: Path | None = None
+
+    @classmethod
+    def for_host(cls, path: Path) -> "OutputSourceRoot":
+        """Build a root backed by the host filesystem."""
+        return cls(path=str(path), host_path=path)
+
+
+def _safe_output_relative_path(
+    source_path: str,
+    *,
+    source_roots: tuple[OutputSourceRoot, ...] = (),
+) -> PurePosixPath:
+    """Return a safe POSIX path relative to an output destination.
+
+    Relative paths retain their directory structure. Absolute paths are made
+    relative to the first matching backend root; for host-backed roots a
+    symlink-equivalent (canonical) spelling of the root is also accepted.
+
+    Raises:
+        ValueError: If the path is empty, contains NUL or traversal, does not
+            identify a file, or is absolute but outside every declared root.
+    """
+    if not source_path or "\x00" in source_path:
+        raise ValueError("Output source path is empty or invalid")
+
+    source = PurePosixPath(source_path)
+    if ".." in source.parts:
+        raise ValueError(f"Output source path contains traversal: {source_path}")
+    if not source.name:
+        raise ValueError(f"Output source path does not identify a file: {source_path}")
+
+    relative = _relative_to_canonical_host_root(source_path, source_roots)
+    if relative is None:
+        relative = source
+        if source.is_absolute():
+            for root in (PurePosixPath(item.path) for item in source_roots):
+                try:
+                    relative = source.relative_to(root)
+                except ValueError:
+                    continue
+                break
+            else:
+                raise ValueError(f"Output source path is outside known execution roots: {source_path}")
+
+    if not relative.name or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Output source path cannot be safely preserved: {source_path}")
+    return relative
+
+
+def _relative_to_canonical_host_root(
+    source_path: str,
+    source_roots: tuple[OutputSourceRoot, ...],
+) -> PurePosixPath | None:
+    """Preserve a lexical suffix beneath an equivalent canonical host root."""
+    source = Path(source_path)
+    if not source.is_absolute():
+        return None
+
+    for root in source_roots:
+        if root.host_path is None:
+            continue
+        canonical_root = root.host_path.resolve(strict=False)
+        for ancestor in (source, *source.parents):
+            if ancestor.resolve(strict=False) == canonical_root:
+                return PurePosixPath(*source.relative_to(ancestor).parts)
+    return None
+
+
+def _is_case_sensitive_filesystem(directory: Path) -> bool:
+    """Probe whether names differing only by case are distinct in ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor, probe_name = tempfile.mkstemp(prefix=".stirrup-Case-Probe-", dir=directory)
+    os.close(descriptor)
+    probe = Path(probe_name)
+    alternate = probe.with_name(probe.name.swapcase())
+    try:
+        return not alternate.exists() or not os.path.samefile(probe, alternate)
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def _host_output_destination_identity(destination: Path, output_root: Path) -> str:
+    """Validate a host destination and return its filesystem-aware identity."""
+    resolved_root = output_root.resolve(strict=False)
+    resolved_destination = destination.resolve(strict=False)
+    try:
+        resolved_destination.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"Output destination escapes output directory: {destination}") from exc
+
+    probe_directory = resolved_destination.parent
+    while not probe_directory.exists() and probe_directory != resolved_root:
+        probe_directory = probe_directory.parent
+
+    identity = str(resolved_destination)
+    return identity if _is_case_sensitive_filesystem(probe_directory) else identity.casefold()
+
+
+def _reserve_output_destination(
+    destination: Path,
+    reserved: dict[str, str],
+    *,
+    claimant: str,
+    output_root: Path,
+) -> None:
+    """Reserve one canonical destination path for ``claimant``."""
+    identity = _host_output_destination_identity(destination, output_root)
+    if identity in reserved:
+        raise ValueError(f"Output destination collision: {destination} (already claimed by {reserved[identity]})")
+    reserved[identity] = claimant
 
 
 def _unquoted_operator_tokens(cmd: str) -> list[str]:
@@ -92,8 +222,19 @@ class SavedFile:
     """Information about a file saved from the execution environment."""
 
     source_path: str  # Original path in execution environment
-    output_path: Path  # Path where file was saved
+    output_path: PurePath  # Concrete locally; PurePosixPath in another execution environment
     size: int
+
+
+@dataclass(frozen=True)
+class _CapturedOutputFile:
+    """One host-backed output captured before destination writes begin."""
+
+    source_path: str
+    output_path: Path
+    snapshot_path: Path
+    size: int
+    mode: int
 
 
 @dataclass
@@ -102,6 +243,105 @@ class SaveOutputFilesResult:
 
     saved: list[SavedFile] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)  # source_path -> error message
+
+
+def _atomic_copy(snapshot: Path, destination: Path, mode: int) -> None:
+    """Copy a snapshot into place without exposing a partial destination."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # The temp name must stay valid even when the destination name is already
+    # at the filesystem's maximum length.
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".stirrup-out-", dir=destination.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        shutil.copyfile(snapshot, temporary_path)
+        temporary_path.chmod(mode)
+        temporary_path.replace(destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _atomic_write_bytes(content: bytes, destination: Path) -> None:
+    """Write bytes atomically to a local output destination."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # The temp name must stay valid even when the destination name is already
+    # at the filesystem's maximum length.
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".stirrup-out-", dir=destination.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as temporary_file:
+            temporary_file.write(content)
+        temporary_path.replace(destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _save_host_output_files(
+    paths: list[str],
+    output_dir: Path | str,
+    *,
+    source_roots: tuple[OutputSourceRoot, ...],
+    resolve_source: Callable[[str], Path],
+) -> SaveOutputFilesResult:
+    """Copy host-backed outputs while preserving safe source-relative paths.
+
+    Sources are captured before any destination is written so an output
+    directory may overlap the execution directory without request ordering
+    changing the copied bytes. Sources remain in the execution environment.
+    """
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    result = SaveOutputFilesResult()
+    planned_destinations: dict[str, str] = {}
+    captured_files: list[_CapturedOutputFile] = []
+
+    with tempfile.TemporaryDirectory(prefix="stirrup-output-snapshot-") as snapshot_dir_str:
+        snapshot_dir = Path(snapshot_dir_str)
+        for index, source_path in enumerate(dict.fromkeys(paths)):
+            try:
+                relative_path = _safe_output_relative_path(source_path, source_roots=source_roots)
+                source_fs_path = resolve_source(source_path)
+                if not source_fs_path.exists():
+                    raise FileNotFoundError("File does not exist")
+                if not source_fs_path.is_file():
+                    raise ValueError("Path is not a file")
+
+                destination = output_root.joinpath(*relative_path.parts)
+                _reserve_output_destination(
+                    destination,
+                    planned_destinations,
+                    claimant=source_path,
+                    output_root=output_root,
+                )
+                source_stat = source_fs_path.stat()
+                snapshot_path = snapshot_dir / str(index)
+                shutil.copyfile(source_fs_path, snapshot_path)
+                captured_files.append(
+                    _CapturedOutputFile(
+                        source_path=source_path,
+                        output_path=destination,
+                        snapshot_path=snapshot_path,
+                        size=snapshot_path.stat().st_size,
+                        mode=S_IMODE(source_stat.st_mode),
+                    )
+                )
+            except (ValueError, FileNotFoundError) as exc:
+                result.failed[source_path] = str(exc)
+                logger.warning("Rejected output file %s: %s", source_path, exc)
+            except Exception as exc:
+                result.failed[source_path] = str(exc)
+                logger.exception("Failed to capture output file: %s", source_path)
+
+        for captured in captured_files:
+            try:
+                _atomic_copy(captured.snapshot_path, captured.output_path, captured.mode)
+                result.saved.append(SavedFile(captured.source_path, captured.output_path, captured.size))
+            except Exception as exc:
+                result.failed[captured.source_path] = str(exc)
+                logger.exception("Failed to save captured file: %s", captured.source_path)
+
+    return result
 
 
 @dataclass
@@ -172,6 +412,11 @@ class CodeExecToolProvider(ToolProvider, ABC):
     Default implementations are provided for:
     - save_output_files(): Save files to local dir or another exec env (uses primitives)
     - upload_files(): Upload files from local or another exec env (uses primitives)
+
+    Overridable output-path hooks (see the extending docs for the contract):
+    - output_source_roots(): Declare absolute roots for resolving output paths
+    - resolve_output_source(): Resolve/reject a source before it is read
+    - output_destination_identity(): Reject escapes and identify cross-env destinations
 
     All providers accept an optional allowlist of command patterns. With an
     allowlist, each command is parsed with shlex, matched against the patterns,
@@ -376,6 +621,43 @@ class CodeExecToolProvider(ToolProvider, ABC):
         """
         ...
 
+    def output_source_roots(self) -> tuple[OutputSourceRoot, ...]:
+        """Return the absolute execution roots accepted when resolving output paths.
+
+        Each root is an absolute path and, for directories on the host
+        filesystem, carries its host path (see :class:`OutputSourceRoot`).
+        Backends with absolute sandbox or container paths should override this
+        so sources beneath a known root can be preserved relative to it.
+        """
+        return ()
+
+    async def resolve_output_source(self, source_path: str) -> str:
+        """Prepare an output source and return the backend path that is safe to read.
+
+        The default implementation returns the path unchanged. Backends whose
+        files may require preparation before host reads, or whose metadata
+        exposes symlink targets, should override this to prepare access, resolve
+        every component, and reject sources whose target escapes an execution
+        root.
+
+        Raises:
+            ValueError: If the source is invalid or escapes the execution root
+                (overriding backends only).
+        """
+        return source_path
+
+    async def output_destination_identity(self, destination: str, output_root: Path | str) -> str:
+        """Validate a cross-environment destination and return its canonical identity."""
+        normalized_destination = PurePosixPath(destination)
+        normalized_root = PurePosixPath(str(output_root))
+        if ".." in normalized_destination.parts:
+            raise ValueError(f"Output destination escapes output directory: {destination}")
+        try:
+            normalized_destination.relative_to(normalized_root)
+        except ValueError as exc:
+            raise ValueError(f"Output destination escapes output directory: {destination}") from exc
+        return normalized_destination.as_posix()
+
     async def save_output_files(
         self,
         paths: list[str],
@@ -383,6 +665,17 @@ class CodeExecToolProvider(ToolProvider, ABC):
         dest_env: "CodeExecToolProvider | None" = None,
     ) -> SaveOutputFilesResult:
         """Save files from this execution environment to a destination.
+
+        Each source path is preserved relative to ``output_dir``: relative
+        sources keep their directory structure, and absolute sources are made
+        relative to a matching root from ``output_source_roots()``. Sources
+        that are empty, contain traversal, fall outside every declared root,
+        or fail ``resolve_output_source()`` are rejected, and a second source
+        that resolves to an already-claimed destination is rejected rather
+        than overwriting it (first requested output wins). Every rejection is
+        recorded in ``SaveOutputFilesResult.failed`` as ``source_path ->
+        reason``. All implementations copy files and leave sources in place.
+        Host-backed providers preserve file modes.
 
         Args:
             paths: List of file paths in this execution environment to save.
@@ -397,38 +690,61 @@ class CodeExecToolProvider(ToolProvider, ABC):
         """
         result = SaveOutputFilesResult()
         output_dir_str = str(output_dir)
+        reserved_destinations: dict[str, str] = {}
+        local_output_root = Path(output_dir)
+        if dest_env is None:
+            local_output_root.mkdir(parents=True, exist_ok=True)
 
-        for source_path in paths:
+        for source_path in dict.fromkeys(paths):
             try:
-                content = await self.read_file_bytes(source_path)
-                filename = Path(source_path).name
-                dest_path = f"{output_dir_str}/{filename}"
+                relative_path = _safe_output_relative_path(
+                    source_path,
+                    source_roots=self.output_source_roots(),
+                )
+                resolved_source_path = await self.resolve_output_source(source_path)
+                content = await self.read_file_bytes(resolved_source_path)
 
-                if dest_env:
+                if dest_env is not None:
                     # Transfer to another exec env (cross-environment)
+                    destination = PurePosixPath(output_dir_str) / relative_path
+                    identity = await dest_env.output_destination_identity(destination.as_posix(), output_dir)
+                    if identity in reserved_destinations:
+                        raise ValueError(
+                            f"Output destination collision: {destination} "
+                            f"(already claimed by {reserved_destinations[identity]})"
+                        )
+                    reserved_destinations[identity] = source_path
                     logger.debug(
                         "CROSS-ENV TRANSFER: %s (%d bytes) -> %s (dest_env: %s)",
                         source_path,
                         len(content),
-                        dest_path,
+                        destination,
                         type(dest_env).__name__,
                     )
-                    await dest_env.write_file_bytes(dest_path, content)
-                    result.saved.append(SavedFile(source_path, Path(dest_path), len(content)))
+                    await dest_env.write_file_bytes(destination.as_posix(), content)
+                    result.saved.append(SavedFile(source_path, destination, len(content)))
                 else:
                     # Save to local filesystem
-                    output_path = Path(output_dir) / filename
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    destination = local_output_root.joinpath(*relative_path.parts)
+                    _reserve_output_destination(
+                        destination,
+                        reserved_destinations,
+                        claimant=source_path,
+                        output_root=local_output_root,
+                    )
                     logger.debug(
                         "SAVE TO LOCAL: %s (%d bytes) -> %s",
                         source_path,
                         len(content),
-                        output_path,
+                        destination,
                     )
-                    output_path.write_bytes(content)
-                    result.saved.append(SavedFile(source_path, output_path, len(content)))
+                    _atomic_write_bytes(content, destination)
+                    result.saved.append(SavedFile(source_path, destination, len(content)))
+            except (ValueError, FileNotFoundError) as e:
+                logger.warning("TRANSFER FAILED: %s -> %s: %s", source_path, output_dir_str, e)
+                result.failed[source_path] = str(e)
             except Exception as e:
-                logger.debug("TRANSFER FAILED: %s -> %s: %s", source_path, output_dir_str, e)
+                logger.exception("TRANSFER FAILED: %s -> %s", source_path, output_dir_str)
                 result.failed[source_path] = str(e)
 
         return result
