@@ -54,6 +54,23 @@ class MockLLMClient(LLMClient):
         return response
 
 
+class RecordingParams(BaseModel):
+    label: str
+
+
+def recording_tool(name: str, executions: list[str], *, success: bool = True) -> Tool[RecordingParams, None]:
+    def record(params: RecordingParams) -> ToolResult:
+        executions.append(params.label)
+        return ToolResult(content=params.label, success=success)
+
+    return Tool[RecordingParams, None](
+        name=name,
+        description="Record an execution label",
+        parameters=RecordingParams,
+        executor=record,  # ty: ignore[invalid-argument-type]
+    )
+
+
 def _sample_png_block() -> ImageContentBlock:
     img = Image.new("RGB", (1, 1), color=(255, 0, 0))
     buffer = BytesIO()
@@ -108,6 +125,86 @@ async def test_agent_basic_finish() -> None:
     assert "token_usage" in run_metadata
     assert len(message_history) == 1  # One turn
     assert client.call_count == 1
+
+
+async def test_successful_finish_stops_later_tool_calls() -> None:
+    executions: list[str] = []
+    record = recording_tool("record", executions)
+    finish = recording_tool("finish", executions)
+    response = AssistantMessage(
+        content="Run tools in order",
+        tool_calls=[
+            ToolCall(name="record", arguments='{"label": "before-1"}', tool_call_id="call_before_1"),
+            ToolCall(name="record", arguments='{"label": "before-2"}', tool_call_id="call_before_2"),
+            ToolCall(name="finish", arguments='{"label": "finish"}', tool_call_id="call_finish"),
+            ToolCall(name="record", arguments='{"label": "after-1"}', tool_call_id="call_after_1"),
+            ToolCall(name="record", arguments='{"label": "after-2"}', tool_call_id="call_after_2"),
+        ],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[record],
+        finish_tool=finish,
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert executions == ["before-1", "before-2", "finish"]
+    assert finish_params == RecordingParams(label="finish")
+    assert [message.tool_call_id for message in tool_messages] == [
+        "call_before_1",
+        "call_before_2",
+        "call_finish",
+        "call_after_1",
+        "call_after_2",
+    ]
+    assert [message.success for message in tool_messages] == [True, True, True, False, False]
+    assert all("Skipped" in str(message.content) for message in tool_messages[3:])
+    assert all(message.tool_duration is None for message in tool_messages[3:])
+
+
+@pytest.mark.parametrize(
+    ("finish_arguments", "finish_succeeds", "expected_executions", "args_was_valid"),
+    [
+        pytest.param("{}", True, ["after"], False, id="invalid"),
+        pytest.param('{"label": "finish"}', False, ["finish", "after"], True, id="unsuccessful"),
+    ],
+)
+async def test_nonterminal_finish_allows_later_tool_calls(
+    finish_arguments: str,
+    finish_succeeds: bool,
+    expected_executions: list[str],
+    args_was_valid: bool,
+) -> None:
+    executions: list[str] = []
+    record = recording_tool("record", executions)
+    finish = recording_tool("finish", executions, success=finish_succeeds)
+    response = AssistantMessage(
+        content="Recover after a nonterminal finish call",
+        tool_calls=[
+            ToolCall(name="finish", arguments=finish_arguments, tool_call_id="call_finish"),
+            ToolCall(name="record", arguments='{"label": "after"}', tool_call_id="call_after"),
+        ],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[record],
+        finish_tool=finish,
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert executions == expected_executions
+    assert finish_params is None
+    assert [message.tool_call_id for message in tool_messages] == ["call_finish", "call_after"]
+    assert [message.success for message in tool_messages] == [False, True]
+    assert tool_messages[0].args_was_valid is args_was_valid
 
 
 async def test_agent_max_turns() -> None:
