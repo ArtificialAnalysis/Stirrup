@@ -258,46 +258,16 @@ class TestDockerCodeExecToolProvider:
                 result = await provider.save_output_files([abs_path], temp_output_dir)
                 assert len(result.saved) == 1
 
+    @pytest.mark.parametrize("cross_environment", [False, True], ids=["direct-host", "cross-environment"])
     async def test_save_output_files_repairs_inaccessible_declared_file_parents(
         self,
         mock_docker_client: MagicMock,
         tmp_path: Path,
         temp_output_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
-
-        with (
-            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
-            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-        ):
-            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
-
-            async with provider:
-                assert provider.temp_dir is not None
-                locked_parent = provider.temp_dir / "root-owned"
-                locked_parent.mkdir()
-                (locked_parent / "report.txt").write_bytes(b"report")
-                locked_parent.chmod(0)
-
-                async def repair_access(cmd: str, *, timeout: int | None = None) -> CommandResult:  # noqa: ARG001
-                    locked_parent.chmod(0o700)
-                    return CommandResult(exit_code=0, stdout="", stderr="")
-
-                monkeypatch.setattr(provider, "_run_command_unchecked", repair_access)
-                result = await provider.save_output_files(["root-owned/report.txt"], temp_output_dir)
-
-        assert result.failed == {}
-        assert (temp_output_dir / "root-owned/report.txt").read_bytes() == b"report"
-
-    async def test_cross_environment_save_repairs_inaccessible_declared_file_parents(
-        self,
-        mock_docker_client: MagicMock,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        cross_environment: bool,
     ) -> None:
         source = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
-        destination = LocalCodeExecToolProvider(temp_base_dir=tmp_path)
 
         with (
             patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
@@ -305,7 +275,7 @@ class TestDockerCodeExecToolProvider:
         ):
             mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
-            async with source, destination:
+            async with source:
                 assert source.temp_dir is not None
                 locked_parent = source.temp_dir / "root-owned"
                 locked_parent.mkdir()
@@ -317,16 +287,21 @@ class TestDockerCodeExecToolProvider:
                     return CommandResult(exit_code=0, stdout="", stderr="")
 
                 monkeypatch.setattr(source, "_run_command_unchecked", repair_access)
-                result = await source.save_output_files(
-                    ["root-owned/report.txt"],
-                    "received",
-                    dest_env=destination,
-                )
+                if cross_environment:
+                    destination = LocalCodeExecToolProvider(temp_base_dir=tmp_path)
+                    async with destination:
+                        result = await source.save_output_files(
+                            ["root-owned/report.txt"], "received", dest_env=destination
+                        )
+                        assert destination.temp_dir is not None
+                        output = destination.temp_dir / "received/root-owned/report.txt"
+                        output_bytes = output.read_bytes()
+                else:
+                    result = await source.save_output_files(["root-owned/report.txt"], temp_output_dir)
+                    output_bytes = (temp_output_dir / "root-owned/report.txt").read_bytes()
 
-                assert destination.temp_dir is not None
-                transferred = destination.temp_dir / "received/root-owned/report.txt"
-                assert result.failed == {}
-                assert transferred.read_bytes() == b"report"
+        assert result.failed == {}
+        assert output_bytes == b"report"
 
     async def test_save_output_files_rejects_symlink_escape(
         self, mock_docker_client: MagicMock, tmp_path: Path, temp_output_dir: Path

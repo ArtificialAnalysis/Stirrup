@@ -53,8 +53,13 @@ class TestSafeOutputRelativePath:
             _safe_output_relative_path(".", source_roots=(POSIX_ROOT,))
 
 
-class _StubExecProvider(CodeExecToolProvider):
-    """Minimal concrete backend relying entirely on base-class defaults."""
+class _MemoryExecProvider(CodeExecToolProvider):
+    """Minimal test backend with an in-memory filesystem."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.files: dict[str, bytes] = {}
+        self.written: dict[str, bytes] = {}
 
     async def __aenter__(self):  # noqa: ANN204
         return self.get_code_exec_tool()
@@ -66,10 +71,10 @@ class _StubExecProvider(CodeExecToolProvider):
         raise NotImplementedError
 
     async def read_file_bytes(self, path: str) -> bytes:
-        raise NotImplementedError
+        return self.files[path]
 
     async def write_file_bytes(self, path: str, content: bytes) -> None:
-        raise NotImplementedError
+        self.written[path] = content
 
     async def file_exists(self, path: str) -> bool:  # noqa: ARG002
         return False
@@ -88,27 +93,12 @@ class TestBaseOutputHookDefaults:
     """The documented extension-point defaults for backends that don't override them."""
 
     async def test_output_destination_identity_accepts_in_root(self) -> None:
-        identity = await _StubExecProvider().output_destination_identity("outbox/nested/report.txt", "outbox")
+        identity = await _MemoryExecProvider().output_destination_identity("outbox/nested/report.txt", "outbox")
         assert identity == "outbox/nested/report.txt"
 
     async def test_output_destination_identity_rejects_escape(self) -> None:
         with pytest.raises(ValueError, match="escapes output directory"):
-            await _StubExecProvider().output_destination_identity("elsewhere/report.txt", "outbox")
-
-
-class _MemoryExecProvider(_StubExecProvider):
-    """Stub backend with an in-memory filesystem for transfer tests."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.files: dict[str, bytes] = {}
-        self.written: dict[str, bytes] = {}
-
-    async def read_file_bytes(self, path: str) -> bytes:
-        return self.files[path]
-
-    async def write_file_bytes(self, path: str, content: bytes) -> None:
-        self.written[path] = content
+            await _MemoryExecProvider().output_destination_identity("elsewhere/report.txt", "outbox")
 
 
 class TestCrossEnvironmentTransfer:

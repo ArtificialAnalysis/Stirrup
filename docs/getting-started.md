@@ -114,12 +114,6 @@ Save files created by the agent by providing an output directory through the ses
 async with agent.session(output_dir="./results") as session:
     finish_params, _, _ = await session.run("Create a chart")
     # Files in finish_params.paths are saved to ./results/
-
-# Not every declared path necessarily saves (e.g. a missing file or an unsafe
-# path). A result is present when the agent declared outputs to save.
-if result := session.last_output_files_result:
-    print(result.saved)
-    print(result.failed)  # {source_path: reason}
 ```
 
 → See [Receiving Output Files](concepts.md#receiving-output-files-from-the-agent) for details.

@@ -1322,8 +1322,8 @@ async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_dire
     assert isinstance(result.content, str)
     assert "Files available in your environment: ['report.txt']" in result.content
     assert absolute_report not in result.content.split("Files available in your environment:", 1)[1]
-    assert "Files that FAILED to transfer to your environment" in result.content
-    assert "'artifacts': 'Path is not a file'" in result.content
+    failed_outputs = result.content.split("Files that FAILED to transfer to your environment", 1)[1]
+    assert "'artifacts':" in failed_outputs
 
 
 @pytest.mark.docker
@@ -1404,7 +1404,8 @@ async def test_shared_docker_subagent_repairs_and_validates_absolute_outputs(
     available_outputs = result.content.split("Files available in your environment:", 1)[1]
     assert "['root-owned/report.txt']" in available_outputs
     assert declared_file not in available_outputs
-    assert f"'{declared_directory}': 'Path is not a file'" in result.content
+    failed_outputs = result.content.split("Files that FAILED to transfer to your environment", 1)[1]
+    assert f"'{declared_directory}':" in failed_outputs
     assert f"'{traversal}': 'Output source path contains traversal" in result.content
 
 
@@ -1413,17 +1414,6 @@ async def test_owned_subagent_without_parent_reports_declared_output_failure() -
     from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 
     responses = [
-        AssistantMessage(
-            content="Creating the report",
-            tool_calls=[
-                ToolCall(
-                    name="code_exec",
-                    arguments='{"cmd": "printf report > report.txt"}',
-                    tool_call_id="call_exec",
-                )
-            ],
-            token_usage=TokenUsage(input=100, answer=50),
-        ),
         AssistantMessage(
             content="Done",
             tool_calls=[

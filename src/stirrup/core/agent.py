@@ -1049,8 +1049,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                         source_roots=state.exec_env.output_source_roots(),
                                     )
                                     resolved_source = await state.exec_env.resolve_output_source(source_path)
-                                    if await state.exec_env.is_directory(resolved_source):
-                                        raise ValueError("Path is not a file")
                                     content = await state.exec_env.read_file_bytes(resolved_source)
                                     result.saved.append(SavedFile(source_path, relative_path, len(content)))
                                 except Exception as exc:

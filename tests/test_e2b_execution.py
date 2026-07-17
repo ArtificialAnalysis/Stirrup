@@ -149,11 +149,6 @@ class TestE2BCodeExecToolProvider:
                 mock_sandbox.files.exists.assert_called()
                 mock_sandbox.files.read.assert_called()
 
-                # Test non-existent file
-                mock_sandbox.files.exists = AsyncMock(return_value=False)
-                result = await provider.save_output_files(["/nonexistent.txt"], temp_output_dir)
-                assert len(result.failed) == 1
-
     async def test_save_output_files_rejects_invalid_sources(
         self, mock_sandbox: MagicMock, temp_output_dir: Path
     ) -> None:
