@@ -1,14 +1,17 @@
 """Tests for agent core functionality."""
 
+import json
+from collections.abc import Awaitable
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from PIL import Image
 from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
-from stirrup.core.agent import Agent
+from stirrup.core.agent import Agent, SubAgentParams
 from stirrup.core.cache import CacheState
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
@@ -53,6 +56,18 @@ class MockLLMClient(LLMClient):
         if isinstance(response, Exception):
             raise response
         return response
+
+
+async def _finish_without_file_validation(params: FinishParams) -> ToolResult[None]:
+    return ToolResult(content=params.reason)
+
+
+UNVALIDATED_FINISH_TOOL = Tool[FinishParams, None](
+    name=DEFAULT_FINISH_TOOL_NAME,
+    description="Finish without validating declared paths.",
+    parameters=FinishParams,
+    executor=_finish_without_file_validation,
+)
 
 
 def _sample_png_block() -> ImageContentBlock:
@@ -1259,6 +1274,182 @@ async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     assert finish_params.reason == "Completed"
     assert client.call_count == 5
     assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_directory() -> None:
+    """A shared sub-agent reports a usable relative path and never endorses a directory."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    subagent_client = MockLLMClient([])
+    subagent = Agent(
+        client=subagent_client,
+        name="shared-worker",
+        tools=[LocalCodeExecToolProvider()],
+        finish_tool=UNVALIDATED_FINISH_TOOL,
+        share_parent_exec_env=True,
+    )
+    subagent_tool = subagent.to_tool()
+    parent_provider = LocalCodeExecToolProvider()
+    parent = Agent(
+        client=MockLLMClient([]),
+        name="parent",
+        tools=[parent_provider, subagent_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with parent.session():
+        await parent_provider.write_file_bytes("report.txt", b"report")
+        assert parent_provider.temp_dir is not None
+        (parent_provider.temp_dir / "artifacts").mkdir()
+        absolute_report = str(parent_provider.temp_dir / "report.txt")
+        subagent_client.responses.append(
+            AssistantMessage(
+                content="Done",
+                tool_calls=[
+                    ToolCall(
+                        name=DEFAULT_FINISH_TOOL_NAME,
+                        arguments=json.dumps({"reason": "done", "paths": [absolute_report, "artifacts"]}),
+                        tool_call_id="call_finish",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            )
+        )
+        execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
+        assert isinstance(execution, Awaitable)
+        result = await execution
+
+    assert isinstance(result.content, str)
+    assert "Files available in your environment: ['report.txt']" in result.content
+    assert absolute_report not in result.content.split("Files available in your environment:", 1)[1]
+    assert "Files that FAILED to transfer to your environment" in result.content
+    assert "'artifacts': 'Path is not a file'" in result.content
+
+
+@pytest.mark.docker
+async def test_shared_docker_subagent_repairs_and_validates_absolute_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared Docker outputs are repaired, normalized, and still constrained to regular files."""
+    pytest.importorskip("docker")
+
+    from stirrup.tools.code_backends.base import CommandResult
+    from stirrup.tools.code_backends.docker import DEFAULT_WORKING_DIR, DockerCodeExecToolProvider
+
+    mock_docker_client = MagicMock()
+    mock_container = MagicMock()
+    mock_container.short_id = "abc123"
+    mock_docker_client.containers.run.return_value = mock_container
+
+    declared_file = f"{DEFAULT_WORKING_DIR}/root-owned/report.txt"
+    declared_directory = f"{DEFAULT_WORKING_DIR}/artifacts"
+    traversal = f"{DEFAULT_WORKING_DIR}/nested/../escape.txt"
+    subagent = Agent(
+        client=MockLLMClient(
+            [
+                AssistantMessage(
+                    content="Done",
+                    tool_calls=[
+                        ToolCall(
+                            name=DEFAULT_FINISH_TOOL_NAME,
+                            arguments=json.dumps(
+                                {"reason": "done", "paths": [declared_file, declared_directory, traversal]}
+                            ),
+                            tool_call_id="call_finish",
+                        )
+                    ],
+                    token_usage=TokenUsage(input=100, answer=50),
+                )
+            ]
+        ),
+        name="shared-docker-worker",
+        tools=[DockerCodeExecToolProvider.from_image("python:3.12-slim")],
+        finish_tool=UNVALIDATED_FINISH_TOOL,
+        share_parent_exec_env=True,
+    )
+    subagent_tool = subagent.to_tool()
+    parent_provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
+    parent = Agent(
+        client=MockLLMClient([]),
+        name="docker-parent",
+        tools=[parent_provider, subagent_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    with (
+        patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+        patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+    ):
+        mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+        async with parent.session():
+            assert parent_provider.temp_dir is not None
+            locked_parent = parent_provider.temp_dir / "root-owned"
+            locked_parent.mkdir()
+            (locked_parent / "report.txt").write_bytes(b"report")
+            locked_parent.chmod(0)
+            (parent_provider.temp_dir / "artifacts").mkdir()
+
+            async def repair_access(cmd: str, *, timeout: int | None = None) -> CommandResult:  # noqa: ARG001
+                locked_parent.chmod(0o700)
+                return CommandResult(exit_code=0, stdout="", stderr="")
+
+            monkeypatch.setattr(parent_provider, "_run_command_unchecked", repair_access)
+            execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
+            assert isinstance(execution, Awaitable)
+            result = await execution
+
+    assert isinstance(result.content, str)
+    available_outputs = result.content.split("Files available in your environment:", 1)[1]
+    assert "['root-owned/report.txt']" in available_outputs
+    assert declared_file not in available_outputs
+    assert f"'{declared_directory}': 'Path is not a file'" in result.content
+    assert f"'{traversal}': 'Output source path contains traversal" in result.content
+
+
+async def test_owned_subagent_without_parent_reports_declared_output_failure() -> None:
+    """A directly invoked owned sub-agent cannot silently drop declared outputs."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses = [
+        AssistantMessage(
+            content="Creating the report",
+            tool_calls=[
+                ToolCall(
+                    name="code_exec",
+                    arguments='{"cmd": "printf report > report.txt"}',
+                    tool_call_id="call_exec",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["report.txt"]}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+    subagent = Agent(
+        client=MockLLMClient(responses),
+        name="owned-worker",
+        tools=[LocalCodeExecToolProvider()],
+        finish_tool=UNVALIDATED_FINISH_TOOL,
+    )
+
+    execution = subagent.to_tool().executor(SubAgentParams(task="produce output", input_files=[]))
+    assert isinstance(execution, Awaitable)
+    result = await execution
+
+    assert "Files available in your environment" not in result.content
+    assert "Files that FAILED to transfer to your environment" in result.content
+    assert "No parent execution environment is available for transfer" in result.content
 
 
 async def test_root_agent_saves_declared_outputs_and_records_failures(tmp_path: Path) -> None:

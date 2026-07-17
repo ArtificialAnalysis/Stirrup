@@ -348,6 +348,30 @@ class TestLocalCodeExecToolProvider:
             assert len(result.failed) == 1
             assert "nonexistent.txt" in result.failed
 
+    async def test_cross_environment_write_failure_preserves_existing_destination(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = LocalCodeExecToolProvider()
+        destination = LocalCodeExecToolProvider()
+
+        async with source, destination:
+            await source.write_file_bytes("report.txt", b"new data")
+            await destination.write_file_bytes("out/report.txt", b"old data")
+            assert source.temp_dir is not None
+            assert destination.temp_dir is not None
+            destination_path = destination.temp_dir / "out/report.txt"
+
+            def fail_replacement(content: bytes, path: Path) -> None:  # noqa: ARG001
+                raise OSError("simulated replacement failure")
+
+            monkeypatch.setattr("stirrup.tools.code_backends.local._atomic_write_bytes", fail_replacement)
+            result = await source.save_output_files(["report.txt"], "out", dest_env=destination)
+
+            assert "simulated replacement failure" in result.failed["report.txt"]
+            assert destination_path.read_bytes() == b"old data"
+            assert (source.temp_dir / "report.txt").read_bytes() == b"new data"
+
     async def test_save_output_files_preserves_nested_paths(self, temp_output_dir: Path) -> None:
         provider = LocalCodeExecToolProvider()
 

@@ -40,6 +40,7 @@ from .base import (
     UploadFilesResult,
     _host_output_destination_identity,
     _relative_to_canonical_host_root,
+    _safe_output_relative_path,
     _save_host_output_files,
 )
 
@@ -713,9 +714,9 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
 
         Args:
             paths: Specific paths to fix. If None, fixes all files in working_dir.
-                   Paths that don't resolve to a regular file inside the mount
-                   are skipped, so a directory source never triggers a recursive
-                   chown of the whole workspace.
+                   For each regular file inside the mount, repairs that file and
+                   the in-root parents needed for host traversal. Directory
+                   sources are skipped and never trigger a recursive chown.
         """
         if self._container is None or self._temp_dir is None:
             return
@@ -726,25 +727,65 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             host_gid = os.getgid()
 
             if paths:
+                container_root = PurePosixPath(self._working_dir)
+                host_roots = (
+                    PurePosixPath(str(self._temp_dir)),
+                    PurePosixPath(str(self._temp_dir.resolve(strict=False))),
+                )
                 container_paths: list[str] = []
                 for path in paths:
-                    try:
-                        host_path = self._container_path_to_host(path).resolve(strict=False)
-                        relative_path = host_path.relative_to(self._temp_dir.resolve(strict=False))
-                    except ValueError:
+                    if not path or "\x00" in path:
                         continue
-                    # A directory source (e.g. ".") must not trigger a recursive
-                    # chown of the whole mount; it is rejected downstream as
-                    # not-a-file anyway.
-                    if not host_path.is_file():
+                    source_path = PurePosixPath(path)
+                    if ".." in source_path.parts or not source_path.name:
                         continue
-                    container_paths.append(
-                        (PurePosixPath(self._working_dir) / PurePosixPath(relative_path.as_posix())).as_posix()
-                    )
+
+                    relative_path: PurePosixPath | None = None
+                    if source_path.is_absolute():
+                        for host_root in host_roots:
+                            try:
+                                relative_path = source_path.relative_to(host_root)
+                            except ValueError:
+                                continue
+                            break
+                        if relative_path is None:
+                            try:
+                                relative_path = source_path.relative_to(container_root)
+                            except ValueError:
+                                try:
+                                    relative_path = _relative_to_canonical_host_root(
+                                        path,
+                                        (OutputSourceRoot.for_host(self._temp_dir),),
+                                    )
+                                except OSError:
+                                    continue
+                    else:
+                        relative_path = source_path
+
+                    if relative_path is None or not relative_path.name or ".." in relative_path.parts:
+                        continue
+                    container_paths.append((container_root / relative_path).as_posix())
+
                 if not container_paths:
                     return
-                quoted_paths = " ".join(shlex.quote(path) for path in container_paths)
-                chown_cmd = f"chown -R {host_uid}:{host_gid} {quoted_paths} 2>/dev/null || true"
+
+                quoted_paths = " ".join(shlex.quote(path) for path in dict.fromkeys(container_paths))
+                quoted_root = shlex.quote(container_root.as_posix())
+                chown_cmd = (
+                    f"root_path=$(realpath -e -- {quoted_root}) || exit 0\n"
+                    f"for source_path in {quoted_paths}; do\n"
+                    '  resolved_path=$(realpath -e -- "$source_path") || continue\n'
+                    '  case "$resolved_path" in "$root_path"/*) ;; *) continue ;; esac\n'
+                    '  [ -f "$resolved_path" ] || continue\n'
+                    f'  chown {host_uid}:{host_gid} -- "$resolved_path" 2>/dev/null || true\n'
+                    "  parent_path=${resolved_path%/*}\n"
+                    '  while [ "$parent_path" != "$root_path" ]; do\n'
+                    '    case "$parent_path" in "$root_path"/*) ;; *) break ;; esac\n'
+                    f'    chown {host_uid}:{host_gid} -- "$parent_path" 2>/dev/null || true\n'
+                    "    parent_path=${parent_path%/*}\n"
+                    "  done\n"
+                    "done"
+                )
                 await self._run_command_unchecked(chown_cmd, timeout=10)
             else:
                 # Fix all files in working directory
@@ -809,6 +850,18 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         if self._temp_dir is not None:
             roots += (OutputSourceRoot.for_host(self._temp_dir),)
         return roots
+
+    async def resolve_output_source(self, source_path: str) -> str:
+        """Repair host access and require a regular file inside the mounted root."""
+        _safe_output_relative_path(source_path, source_roots=self.output_source_roots())
+        await self._fix_file_ownership([source_path])
+
+        host_path = self._container_path_to_host(source_path)
+        if not host_path.exists():
+            raise FileNotFoundError(f"File not found: {source_path}")
+        if not host_path.is_file():
+            raise ValueError("Path is not a file")
+        return source_path
 
     async def output_destination_identity(self, destination: str, output_root: Path | str) -> str:
         """Validate a cross-environment destination and return its host identity."""

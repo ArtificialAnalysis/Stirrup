@@ -23,6 +23,7 @@ from .base import (
     SaveOutputFilesResult,
     UploadedFile,
     UploadFilesResult,
+    _atomic_write_bytes,
     _host_output_destination_identity,
     _save_host_output_files,
 )
@@ -214,8 +215,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
 
         """
         resolved = self._resolve_and_validate_path(path)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_bytes(content)
+        _atomic_write_bytes(content, resolved)
 
     async def file_exists(self, path: str) -> bool:
         """Check if a file exists in the temp directory.

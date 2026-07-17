@@ -44,7 +44,12 @@ from stirrup.core.models import (
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
 from stirrup.tools import DEFAULT_TOOLS
-from stirrup.tools.code_backends.base import CodeExecToolProvider, SaveOutputFilesResult
+from stirrup.tools.code_backends.base import (
+    CodeExecToolProvider,
+    SavedFile,
+    SaveOutputFilesResult,
+    _safe_output_relative_path,
+)
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL
 from stirrup.tools.finish import FinishParams as SimpleFinishParams
@@ -88,7 +93,6 @@ class SessionState:
     finish_params: Any = None
     run_metadata: dict[str, Any] = field(default_factory=dict)
     output_files_result: SaveOutputFilesResult | None = None
-    shared_output_paths: list[str] = field(default_factory=list)
 
 
 _SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("session_state")
@@ -1035,13 +1039,35 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     else:
                         # SUBAGENT: Handle file transfer based on exec_env ownership
                         if not state.exec_env_owned:
-                            # SHARED EXEC ENV: Files already in parent's env - no transfer needed.
-                            state.shared_output_paths = list(dict.fromkeys(paths))
+                            # SHARED EXEC ENV: Validate declared files in place before
+                            # telling the parent they are available.
+                            result = SaveOutputFilesResult()
+                            for source_path in dict.fromkeys(paths):
+                                try:
+                                    relative_path = _safe_output_relative_path(
+                                        source_path,
+                                        source_roots=state.exec_env.output_source_roots(),
+                                    )
+                                    resolved_source = await state.exec_env.resolve_output_source(source_path)
+                                    if await state.exec_env.is_directory(resolved_source):
+                                        raise ValueError("Path is not a file")
+                                    content = await state.exec_env.read_file_bytes(resolved_source)
+                                    result.saved.append(SavedFile(source_path, relative_path, len(content)))
+                                except Exception as exc:
+                                    result.failed[source_path] = str(exc)
+                                    logger.warning(
+                                        "[%s] SUBAGENT: Shared output file is unavailable: %s (%s)",
+                                        self._name,
+                                        source_path,
+                                        exc,
+                                    )
+                            state.output_files_result = result
                             logger.debug(
-                                "[%s] SUBAGENT (depth=%d, shared_exec_env): Files already in parent env: %s",
+                                "[%s] SUBAGENT (depth=%d, shared_exec_env): Validated %d file(s), failed %d",
                                 self._name,
                                 state.depth,
-                                state.shared_output_paths,
+                                len(result.saved),
+                                len(result.failed),
                             )
                         elif state.parent_exec_env:
                             # SEPARATE EXEC ENV: Transfer to parent's exec env
@@ -1067,6 +1093,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             if result.failed:
                                 logger.warning("Failed to transfer some files to parent env: %s", result.failed)
                         else:
+                            reason = "No parent execution environment is available for transfer"
+                            state.output_files_result = SaveOutputFilesResult(
+                                failed={source_path: reason for source_path in dict.fromkeys(paths)}
+                            )
                             logger.warning(
                                 "Subagent at depth %d has exec_env but no parent_exec_env. "
                                 "Files will not be transferred.",
@@ -1357,7 +1387,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             session_state.finish_params = None
             session_state.run_metadata = {}
             session_state.output_files_result = None
-            session_state.shared_output_paths = []
 
         # Compute task hash for caching/resume
         task_hash = compute_task_hash(init_msgs)
@@ -1610,7 +1639,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     if finish_dict:
                         content_parts.append(f"Finish params: {finish_dict}")
 
-                available_paths = completed_state.shared_output_paths
+                available_paths: list[str] = []
                 transfer_failures: dict[str, str] = {}
                 if completed_state.output_files_result is not None:
                     available_paths = [str(saved.output_path) for saved in completed_state.output_files_result.saved]

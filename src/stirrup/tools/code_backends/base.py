@@ -632,11 +632,12 @@ class CodeExecToolProvider(ToolProvider, ABC):
         return ()
 
     async def resolve_output_source(self, source_path: str) -> str:
-        """Return the backend path that is safe to read for an output source.
+        """Prepare an output source and return the backend path that is safe to read.
 
         The default implementation returns the path unchanged. Backends whose
-        file metadata exposes symlink targets should override this to resolve
-        every component and reject sources whose target escapes an execution
+        files may require preparation before host reads, or whose metadata
+        exposes symlink targets, should override this to prepare access, resolve
+        every component, and reject sources whose target escapes an execution
         root.
 
         Raises:
