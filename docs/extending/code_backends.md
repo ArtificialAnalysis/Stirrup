@@ -20,6 +20,12 @@ The base class provides:
 - `allowed_commands` - Optional regex patterns to restrict commands
 - File upload/download utilities
 
+Custom backends and subclasses of built-in backends own their configured runtime
+state. They can be reused sequentially, but overlapping sessions must use
+separate backend instances. Stirrup rejects overlap on the same configured
+instance before entering resources. Exact built-in backends are reconstructed
+privately for each session.
+
 ## Minimal Implementation
 
 ```python

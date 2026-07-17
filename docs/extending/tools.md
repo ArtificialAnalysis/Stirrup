@@ -53,6 +53,11 @@ class WeatherToolProvider:
             await self._client.aclose()
 ```
 
+Custom providers are reusable sequentially. For overlapping sessions, construct
+one provider instance per concurrent owner; sharing the same configured object
+is rejected before resources are entered. This also applies to subclasses of
+built-in providers.
+
 ## Tools with State
 
 ```python

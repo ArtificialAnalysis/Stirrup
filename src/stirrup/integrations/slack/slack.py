@@ -348,10 +348,10 @@ class SlackBot:
             client = copy.copy(client)
             client._model = model_override  # type: ignore[attr-defined]  # noqa: SLF001
 
-        # Deep copy tools so each concurrent run gets its own ToolProvider instances
-        # (ToolProviders have lifecycle state that can't be shared across sessions).
+        # Keep configured coordination objects shared. Agent sessions privately
+        # detach exact built-in lifecycle state and guard custom objects from overlap.
         tools: list[Tool | ToolProvider] = (
-            copy.deepcopy(config.tools)
+            list(config.tools)
             if config.tools is not None
             else [
                 DockerCodeExecToolProvider.from_dockerfile(_DEFAULT_DOCKERFILE),

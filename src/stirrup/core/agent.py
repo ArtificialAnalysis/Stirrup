@@ -1,17 +1,18 @@
-# Context var for passing parent depth to sub-agent executors
 import contextvars
+import copy
 import glob as glob_module
 import inspect
 import logging
 import re
 import signal
+import threading
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
 from pathlib import Path
 from time import perf_counter
 from types import TracebackType
-from typing import Annotated, Any, Self, overload
+from typing import Annotated, Any, overload
 
 import anyio
 from pydantic import BaseModel, Field, ValidationError
@@ -50,7 +51,10 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL
 from stirrup.tools.finish import FinishParams as SimpleFinishParams
 from stirrup.utils.logging import AgentLogger, AgentLoggerBase
 
-_PARENT_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar("parent_depth", default=0)
+_ACTIVE_SESSION_RESERVATIONS: dict[tuple[str, int | str], object] = {}
+_SESSION_RESERVATIONS_LOCK = threading.Lock()
+_ACTIVE_SIGINT_SESSION_COUNT = 0
+_ORIGINAL_SIGINT_HANDLER: Any = None
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,7 @@ class SessionState:
     """
 
     exit_stack: AsyncExitStack
+    owner: "SessionAgent[Any, Any] | None" = None
     exec_env: CodeExecToolProvider | None = None
     output_dir: str | None = None  # String path (contextual: local for root, in parent env for subagent)
     parent_exec_env: CodeExecToolProvider | None = None
@@ -86,7 +91,7 @@ class SessionState:
     logger: AgentLoggerBase | None = None  # Logger for pause/resume during user input
 
 
-_SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("session_state")
+_SESSION_STATE: contextvars.ContextVar[SessionState | None] = contextvars.ContextVar("session_state", default=None)
 
 __all__ = [
     "Agent",
@@ -95,6 +100,216 @@ __all__ = [
 ]
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _handle_interrupt_signal(_signum: int, _frame: object) -> None:
+    """Turn SIGINT into an exception so active sessions can cache on exit."""
+    raise KeyboardInterrupt("Agent interrupted - state will be cached")
+
+
+def _install_interrupt_handler() -> bool:
+    """Install one process handler for main-thread root sessions."""
+    global _ACTIVE_SIGINT_SESSION_COUNT, _ORIGINAL_SIGINT_HANDLER
+
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    if _ACTIVE_SIGINT_SESSION_COUNT == 0:
+        _ORIGINAL_SIGINT_HANDLER = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, _handle_interrupt_signal)
+    _ACTIVE_SIGINT_SESSION_COUNT += 1
+    return True
+
+
+def _release_interrupt_handler() -> None:
+    """Restore the process handler after the final root session exits."""
+    global _ACTIVE_SIGINT_SESSION_COUNT, _ORIGINAL_SIGINT_HANDLER
+
+    _ACTIVE_SIGINT_SESSION_COUNT -= 1
+    if _ACTIVE_SIGINT_SESSION_COUNT == 0:
+        signal.signal(signal.SIGINT, _ORIGINAL_SIGINT_HANDLER)
+        _ORIGINAL_SIGINT_HANDLER = None
+
+
+def _reserve_custom_session_resources(resources: list[object]) -> None:
+    """Claim custom lifecycle objects before any session resource is entered."""
+    with _SESSION_RESERVATIONS_LOCK:
+        for resource in resources:
+            if ("custom", id(resource)) in _ACTIVE_SESSION_RESERVATIONS:
+                raise RuntimeError(
+                    f"Overlapping sessions cannot share configured {type(resource).__name__}. "
+                    "Custom providers, custom loggers, and subclasses of built-ins support sequential sessions only."
+                )
+        for resource in resources:
+            _ACTIVE_SESSION_RESERVATIONS[("custom", id(resource))] = resource
+
+
+def _release_custom_session_resources(resources: list[object]) -> None:
+    with _SESSION_RESERVATIONS_LOCK:
+        for resource in resources:
+            _ACTIVE_SESSION_RESERVATIONS.pop(("custom", id(resource)), None)
+
+
+def _reserve_cached_root_run(task_hash: str, owner: object) -> None:
+    """Keep one cache-writing root run active for a task hash."""
+    reservation = ("cache", task_hash)
+    with _SESSION_RESERVATIONS_LOCK:
+        active_owner = _ACTIVE_SESSION_RESERVATIONS.get(reservation)
+        if active_owner is not None:
+            raise RuntimeError(
+                "Concurrent root runs with cache_on_interrupt=True cannot use the same task cache. "
+                "Wait for the active run to finish or set cache_on_interrupt=False."
+            )
+        _ACTIVE_SESSION_RESERVATIONS[reservation] = owner
+
+
+def _release_cached_root_runs(task_hashes: set[str], owner: object) -> None:
+    with _SESSION_RESERVATIONS_LOCK:
+        for task_hash in task_hashes:
+            reservation = ("cache", task_hash)
+            if _ACTIVE_SESSION_RESERVATIONS.get(reservation) is owner:
+                _ACTIVE_SESSION_RESERVATIONS.pop(reservation)
+
+
+def _record_session_cleanup_failure(
+    primary_exception: BaseException | None,
+    phase: str,
+    cleanup_failure: BaseException,
+) -> BaseException:
+    """Keep the first failure and record later cleanup failures on it."""
+    if primary_exception is None:
+        return cleanup_failure
+    primary_exception.add_note(
+        f"{phase} failed during session cleanup: {type(cleanup_failure).__name__}: {cleanup_failure}"
+    )
+    return primary_exception
+
+
+def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, ToolProvider]) -> ToolProvider | None:
+    """Return a fresh runtime owner for an exact built-in provider."""
+    provider_type = type(provider)
+
+    from stirrup.tools.view_image import ViewImageToolProvider
+    from stirrup.tools.web import WebToolProvider
+
+    if isinstance(provider, LocalCodeExecToolProvider) and provider_type is LocalCodeExecToolProvider:
+        detached = copy.copy(provider)
+        detached._allowed_commands = (  # noqa: SLF001
+            list(provider._allowed_commands) if provider._allowed_commands is not None else None  # noqa: SLF001
+        )
+        detached._compiled_allowed = (  # noqa: SLF001
+            list(provider._compiled_allowed) if provider._compiled_allowed is not None else None  # noqa: SLF001
+        )
+        detached._temp_dir = None  # noqa: SLF001
+        return detached
+    if isinstance(provider, WebToolProvider) and provider_type is WebToolProvider:
+        detached = copy.copy(provider)
+        detached._client = None  # noqa: SLF001
+        return detached
+    if isinstance(provider, ViewImageToolProvider) and provider_type is ViewImageToolProvider:
+        detached = copy.copy(provider)
+        configured_exec_env = provider._exec_env  # noqa: SLF001
+        if configured_exec_env is not None:
+            replacement = replacements.get(id(configured_exec_env))
+            detached._exec_env = (  # noqa: SLF001
+                replacement if isinstance(replacement, CodeExecToolProvider) else configured_exec_env
+            )
+        return detached
+
+    if provider_type.__module__ == "stirrup.tools.code_backends.docker":
+        from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider
+
+        if isinstance(provider, DockerCodeExecToolProvider) and provider_type is DockerCodeExecToolProvider:
+            detached = copy.copy(provider)
+            detached._allowed_commands = (  # noqa: SLF001
+                list(provider._allowed_commands) if provider._allowed_commands is not None else None  # noqa: SLF001
+            )
+            detached._compiled_allowed = (  # noqa: SLF001
+                list(provider._compiled_allowed) if provider._compiled_allowed is not None else None  # noqa: SLF001
+            )
+            detached._env_vars = (  # noqa: SLF001
+                list(provider._env_vars) if provider._env_vars is not None else None  # noqa: SLF001
+            )
+            detached._temp_dir = None  # noqa: SLF001
+            detached._client = None  # noqa: SLF001
+            detached._container = None  # noqa: SLF001
+            return detached
+    elif provider_type.__module__ == "stirrup.tools.code_backends.e2b":
+        from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
+
+        if isinstance(provider, E2BCodeExecToolProvider) and provider_type is E2BCodeExecToolProvider:
+            detached = copy.copy(provider)
+            detached._allowed_commands = (  # noqa: SLF001
+                list(provider._allowed_commands) if provider._allowed_commands is not None else None  # noqa: SLF001
+            )
+            detached._compiled_allowed = (  # noqa: SLF001
+                list(provider._compiled_allowed) if provider._compiled_allowed is not None else None  # noqa: SLF001
+            )
+            detached._sandbox_kwargs = dict(provider._sandbox_kwargs)  # noqa: SLF001
+            for key in ("envs", "metadata"):
+                value = detached._sandbox_kwargs.get(key)  # noqa: SLF001
+                if isinstance(value, dict):
+                    detached._sandbox_kwargs[key] = dict(value)  # noqa: SLF001
+            detached._sbx = None  # noqa: SLF001
+            return detached
+    elif provider_type.__module__ == "stirrup.tools.mcp":
+        from stirrup.tools.mcp import MCPToolProvider
+
+        if isinstance(provider, MCPToolProvider) and provider_type is MCPToolProvider:
+            detached = copy.copy(provider)
+            detached._config = provider._config.model_copy(deep=True)  # noqa: SLF001
+            detached._server_names = (  # noqa: SLF001
+                list(provider._server_names) if provider._server_names is not None else None  # noqa: SLF001
+            )
+            detached._servers = {}  # noqa: SLF001
+            detached._tools = {}  # noqa: SLF001
+            detached._exit_stack = None  # noqa: SLF001
+            return detached
+    elif provider_type.__module__ == "stirrup.tools.browser_use":
+        from stirrup.tools.browser_use import BrowserUseToolProvider
+
+        if isinstance(provider, BrowserUseToolProvider) and provider_type is BrowserUseToolProvider:
+            detached = copy.copy(provider)
+            detached._extra_args = (  # noqa: SLF001
+                list(provider._extra_args) if provider._extra_args is not None else None  # noqa: SLF001
+            )
+            detached._session = None  # noqa: SLF001
+            return detached
+
+    return None
+
+
+def _reset_logger_state(session_logger: AgentLoggerBase) -> None:
+    session_logger.name = "agent"
+    session_logger.model = None
+    session_logger.max_turns = None
+    session_logger.depth = 0
+    session_logger.finish_params = None
+    session_logger.run_metadata = None
+    session_logger.output_dir = None
+
+
+def _detach_logger(configured_logger: AgentLoggerBase) -> tuple[AgentLoggerBase, bool]:
+    """Detach exact built-in logger state; identify custom sequential owners."""
+    logger_type = type(configured_logger)
+    if isinstance(configured_logger, AgentLogger) and logger_type is AgentLogger:
+        detached = copy.copy(configured_logger)
+        _reset_logger_state(detached)
+        detached._current_step = 0  # noqa: SLF001
+        detached._tool_calls = 0  # noqa: SLF001
+        detached._input_tokens = 0  # noqa: SLF001
+        detached._output_tokens = 0  # noqa: SLF001
+        detached._live = None  # noqa: SLF001
+        return detached, False
+
+    if logger_type.__module__ == "stirrup.integrations.slack.slack":
+        from stirrup.integrations.slack.slack import SlackLogger
+
+        if isinstance(configured_logger, SlackLogger) and logger_type is SlackLogger:
+            detached = copy.copy(configured_logger)
+            _reset_logger_state(detached)
+            return detached, False
+
+    return configured_logger, True
 
 
 def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessage:
@@ -261,6 +476,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             finish_params, history, metadata = await session.run("Your task here")
     """
 
+    _parent_session_state: SessionState | None
+    _session_state: SessionState | None
+    _session_state_token: contextvars.Token[SessionState | None] | None
+    _interrupt_handler_installed: bool
+    _custom_session_resources: list[object]
+    _custom_resources_reserved: bool
+    _reserved_cache_task_hashes: set[str]
+
     @overload
     def __init__(
         self: "Agent[SimpleFinishParams, ToolUseCountMetadata]",
@@ -371,6 +594,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                    provides better performance (no file copying) and allows
                                    the subagent to see all files in the parent's environment.
                                    Only effective when the agent is used as a subagent via to_tool().
+                                   Custom ViewImageToolProvider/backend pairs are unsupported.
             logger: Optional logger instance. If None, creates AgentLogger() internally.
 
         """
@@ -427,6 +651,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Cache state for resumption (set during run(), used in __aexit__ for caching on interrupt)
         self._current_task_hash: str | None = None
         self._current_run_state: CacheState | None = None
+        self._reserved_cache_task_hashes: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -473,8 +698,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         resume: bool = False,
         clear_cache_on_success: bool = True,
         cache_on_interrupt: bool = True,
-    ) -> Self:
-        """Configure a session and return self for use as async context manager.
+    ) -> "SessionAgent[FinishParams, FinishMeta]":
+        """Create a detached runtime for use as an async context manager.
 
         Args:
             output_dir: Directory to save output files from finish_params.paths
@@ -498,35 +723,31 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             cache_on_interrupt: If True (default), set up a SIGINT handler to cache
                                state on Ctrl+C. Set to False when running agents in
                                threads or subprocesses where signal handlers cannot
-                               be registered from non-main threads.
+                               be registered from non-main threads. Concurrent root runs
+                               in one process must use different task prompts while caching
+                               is enabled.
 
         Returns:
-            Self, for use with `async with agent.session(...) as session:`
+            A fresh SessionAgent for use with `async with agent.session(...) as session:`
 
         Example:
             async with agent.session(output_dir="./output", input_files="data/*.csv") as session:
                 result = await session.run("Analyze the CSV files")
 
         Note:
-            Multiple concurrent sessions from the same Agent instance are supported.
-            Each session maintains isolated state via ContextVar.
+            Exact built-in providers and loggers support overlapping sessions.
+            Custom lifecycle objects support sequential sessions only.
 
         """
-        self._pending_output_dir = Path(output_dir) if output_dir else None
-        self._pending_input_files = input_files
-        self._pending_skills_dir = Path(skills_dir) if skills_dir else None
-        self._resume = resume
-        self._clear_cache_on_success = clear_cache_on_success
-        self._cache_on_interrupt = cache_on_interrupt
-        return self
-
-    def _handle_interrupt(self, _signum: int, _frame: object) -> None:
-        """Handle SIGINT to ensure caching before exit.
-
-        Converts the signal to a KeyboardInterrupt exception so that __aexit__
-        is properly called and can cache the state before cleanup.
-        """
-        raise KeyboardInterrupt("Agent interrupted - state will be cached")
+        return SessionAgent.from_agent(
+            self,
+            output_dir=output_dir,
+            input_files=input_files,
+            skills_dir=skills_dir,
+            resume=resume,
+            clear_cache_on_success=clear_cache_on_success,
+            cache_on_interrupt=cache_on_interrupt,
+        )
 
     def _resolve_input_files(self, input_files: str | Path | list[str | Path]) -> list[Path]:
         """Resolve input file paths, expanding globs and normalizing to Path objects.
@@ -737,35 +958,47 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             # cell_contents can raise ValueError if empty - ignore
 
     async def __aenter__(self) -> "SessionAgent[FinishParams, FinishMeta]":
-        """Enter session context: set up tools, logging, and resources.
+        """Enter this detached session and initialize its resources."""
+        if not isinstance(self, SessionAgent):
+            raise RuntimeError("Use `async with agent.session(...)` to enter an Agent session")
+        if self._session_state is not None:
+            raise RuntimeError("Agent session is already active")
 
-        Returns a SessionAgent wrapping this agent's state, providing access to
-        both static tools and ToolProvider-created tools. The SessionAgent shares
-        this agent's __dict__, so state changes are visible to __aexit__.
-        """
+        _reserve_custom_session_resources(self._custom_session_resources)
+        self._custom_resources_reserved = True
         exit_stack = AsyncExitStack()
-        await exit_stack.__aenter__()
+        try:
+            await exit_stack.__aenter__()
+        except BaseException:
+            _release_custom_session_resources(self._custom_session_resources)
+            self._custom_resources_reserved = False
+            raise
 
-        # Get parent state if exists (for subagent file transfer)
-        parent_state = _SESSION_STATE.get(None)
-
-        current_depth = _PARENT_DEPTH.get()
-
-        # Create session state and store in ContextVar
+        parent_state = self._parent_session_state
+        current_depth = parent_state.depth + 1 if parent_state is not None else 0
         state = SessionState(
             exit_stack=exit_stack,
+            owner=self,
             output_dir=str(self._pending_output_dir) if self._pending_output_dir else None,
             parent_exec_env=parent_state.exec_env if parent_state else None,
             depth=current_depth,
             logger=self._logger,
         )
-        _SESSION_STATE.set(state)
+        self._session_state = state
+        self._session_state_token = _SESSION_STATE.set(state)
+        logger_entered = False
 
         try:
             # === TWO-PASS TOOL INITIALIZATION ===
             # First pass initializes CodeExecToolProvider so that dependent tools
             # (like ViewImageToolProvider) can access state.exec_env in second pass.
             active_tools: list[Tool] = []
+            code_exec_providers = [tool for tool in self._tools if isinstance(tool, CodeExecToolProvider)]
+            if len(code_exec_providers) > 1:
+                raise ValueError(
+                    f"Agent can only have one CodeExecToolProvider, found {len(code_exec_providers)}: "
+                    f"{[type(provider).__name__ for provider in code_exec_providers]}"
+                )
 
             # Check if we should share parent's exec_env (subagent with share_parent_exec_env=True)
             should_share_exec_env = (
@@ -793,14 +1026,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 code_exec_tool = state.exec_env.get_code_exec_tool()
                 active_tools.append(code_exec_tool)
             else:
-                # OWNED EXEC ENV: Initialize our own CodeExecToolProvider (at most one allowed)
-                code_exec_providers = [t for t in self._tools if isinstance(t, CodeExecToolProvider)]
-                if len(code_exec_providers) > 1:
-                    raise ValueError(
-                        f"Agent can only have one CodeExecToolProvider, found {len(code_exec_providers)}: "
-                        f"{[type(p).__name__ for p in code_exec_providers]}"
-                    )
-
+                # OWNED EXEC ENV: Initialize our own CodeExecToolProvider.
                 if code_exec_providers:
                     provider = code_exec_providers[0]
                     result = await exit_stack.enter_async_context(provider)
@@ -916,8 +1142,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     state.skills_metadata = load_skills_metadata(skills_path)
                     logger.debug("[%s __aenter__] Loaded %d skills", self._name, len(state.skills_metadata))
                 self._pending_skills_dir = None  # Clear pending state
-            elif parent_state and parent_state.skills_metadata:
-                # Sub-agent: inherit skills from parent
+            elif parent_state is not None and parent_state.skills_metadata:
+                # Sub-agent: inherit skills from its explicit parent
                 state.skills_metadata = parent_state.skills_metadata
                 logger.debug("[%s __aenter__] Inherited %d skills from parent", self._name, len(state.skills_metadata))
                 # Transfer skills directory from parent's exec_env to sub-agent's exec_env
@@ -929,18 +1155,42 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             self._logger.name = self._name
             self._logger.model = self._client.model_slug
             self._logger.max_turns = self._max_turns
-            # depth is already set (0 for main agent, passed in for sub-agents)
+            self._logger.depth = current_depth
+            self._logger.finish_params = None
+            self._logger.run_metadata = None
+            self._logger.output_dir = None
             self._logger.__enter__()
+            logger_entered = True
 
-            # Set up signal handler for graceful caching on interrupt (root agent only)
             if current_depth == 0 and self._cache_on_interrupt:
-                self._original_sigint = signal.getsignal(signal.SIGINT)
-                signal.signal(signal.SIGINT, self._handle_interrupt)
+                self._interrupt_handler_installed = _install_interrupt_handler()
 
-            return SessionAgent.from_agent(self)
+            return self
 
-        except Exception:
-            await exit_stack.__aexit__(None, None, None)
+        except BaseException as exc:
+            with anyio.CancelScope(shield=True):
+                if logger_entered:
+                    try:
+                        self._logger.__exit__(type(exc), exc, exc.__traceback__)
+                    except BaseException as cleanup_failure:
+                        _record_session_cleanup_failure(exc, "Logger", cleanup_failure)
+                try:
+                    await exit_stack.__aexit__(type(exc), exc, exc.__traceback__)
+                except BaseException as cleanup_failure:
+                    _record_session_cleanup_failure(exc, "Tool provider", cleanup_failure)
+                try:
+                    if self._session_state_token is not None:
+                        _SESSION_STATE.reset(self._session_state_token)
+                        self._session_state_token = None
+                except BaseException as cleanup_failure:
+                    _record_session_cleanup_failure(exc, "Ambient session context", cleanup_failure)
+                self._session_state = None
+                try:
+                    if self._custom_resources_reserved:
+                        _release_custom_session_resources(self._custom_session_resources)
+                        self._custom_resources_reserved = False
+                except BaseException as cleanup_failure:
+                    _record_session_cleanup_failure(exc, "Custom resource reservation", cleanup_failure)
             raise
 
     async def __aexit__(
@@ -955,8 +1205,21 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         - Root agent (depth=0): Saves files to local filesystem output_dir
         - Subagent (depth>0): Transfers files to parent's exec env at output_dir path
         """
-        state = _SESSION_STATE.get()
+        state = self._session_state
+        if state is None:
+            raise RuntimeError("Agent session is not active")
 
+        with anyio.CancelScope(shield=True):
+            await self._exit_session(state, exc_type, exc_val)
+
+    async def _exit_session(
+        self,
+        state: SessionState,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+    ) -> None:
+        """Finalize and release a session inside its shielded teardown scope."""
+        primary_exception = exc_val
         try:
             # Cache state on non-success exit (only at root level)
             should_cache = (
@@ -988,17 +1251,24 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 if self._current_task_hash is None or self._current_run_state is None:
                     raise ValueError("Cache state is unexpectedly None after should_cache check")
 
-                # Temporarily block SIGINT during cache save to prevent interruption
-                original_handler = signal.getsignal(signal.SIGINT)
-                signal.signal(signal.SIGINT, signal.SIG_IGN)
-                try:
+                if threading.current_thread() is threading.main_thread():
+                    # Prevent a second SIGINT from interrupting the cache write.
+                    original_handler = signal.getsignal(signal.SIGINT)
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                    try:
+                        cache_manager.save_state(
+                            self._current_task_hash,
+                            self._current_run_state,
+                            exec_env_dir,
+                        )
+                    finally:
+                        signal.signal(signal.SIGINT, original_handler)
+                else:
                     cache_manager.save_state(
                         self._current_task_hash,
                         self._current_run_state,
                         exec_env_dir,
                     )
-                finally:
-                    signal.signal(signal.SIGINT, original_handler)
                 self._logger.info(f"Cached state for task {self._current_task_hash}")
             # Save files from finish_params.paths based on depth
             if state.output_dir and self._last_finish_params and state.exec_env:
@@ -1064,27 +1334,83 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                 "Files will not be transferred.",
                                 state.depth,
                             )
-        finally:
-            # Restore original signal handler (root agent only)
-            if hasattr(self, "_original_sigint"):
-                signal.signal(signal.SIGINT, self._original_sigint)
-                del self._original_sigint
+        except BaseException as finalization_failure:
+            primary_exception = _record_session_cleanup_failure(
+                primary_exception, "Session finalization", finalization_failure
+            )
 
-            # Exit logger context
+        try:
+            if self._interrupt_handler_installed:
+                _release_interrupt_handler()
+                self._interrupt_handler_installed = False
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Interrupt handler", cleanup_failure)
+
+        try:
             self._logger.finish_params = self._last_finish_params
             self._logger.run_metadata = self._last_run_metadata
             self._logger.output_dir = str(state.output_dir) if state.output_dir else None
-            self._logger.__exit__(exc_type, exc_val, exc_tb)
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(
+                primary_exception, "Logger final state", cleanup_failure
+            )
+        try:
+            current_exc_type = type(primary_exception) if primary_exception is not None else None
+            current_exc_tb = primary_exception.__traceback__ if primary_exception is not None else None
+            self._logger.__exit__(current_exc_type, primary_exception, current_exc_tb)
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Logger", cleanup_failure)
 
-            # Reset active tools to static-only (remove session-initialized tools)
-            self._active_tools = {}
-            for tool in self._tools:
-                if isinstance(tool, Tool):
-                    self._active_tools[tool.name] = tool
+        try:
+            self._active_tools = {tool.name: tool for tool in self._tools if isinstance(tool, Tool)}
             self._active_tools.update(self._finish_tools)
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Active tool reset", cleanup_failure)
 
-            # Cleanup all async resources
-            await state.exit_stack.__aexit__(exc_type, exc_val, exc_tb)
+        try:
+            current_exc_type = type(primary_exception) if primary_exception is not None else None
+            current_exc_tb = primary_exception.__traceback__ if primary_exception is not None else None
+            await state.exit_stack.__aexit__(current_exc_type, primary_exception, current_exc_tb)
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Tool provider", cleanup_failure)
+
+        try:
+            if self._session_state_token is not None:
+                _SESSION_STATE.reset(self._session_state_token)
+                self._session_state_token = None
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(
+                primary_exception, "Ambient session context", cleanup_failure
+            )
+        self._session_state = None
+
+        try:
+            if self._custom_resources_reserved:
+                _release_custom_session_resources(self._custom_session_resources)
+                self._custom_resources_reserved = False
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(
+                primary_exception, "Custom resource reservation", cleanup_failure
+            )
+
+        try:
+            if self._reserved_cache_task_hashes:
+                _release_cached_root_runs(self._reserved_cache_task_hashes, self)
+                self._reserved_cache_task_hashes.clear()
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(
+                primary_exception, "Task cache reservation", cleanup_failure
+            )
+
+        if exc_val is None and primary_exception is not None:
+            raise primary_exception
+
+    def _require_own_active_session_context(self) -> None:
+        """Reject use of a detached session outside its ambient ownership context."""
+        if isinstance(self, SessionAgent):
+            session_state = self._session_state
+            if session_state is None or _SESSION_STATE.get() is not session_state:
+                raise RuntimeError("SessionAgent requires its own active session context")
 
     async def run_tool(self, tool_call: ToolCall, run_metadata: dict[str, list[Any]]) -> ToolMessage:
         """Execute a single tool call with error handling for invalid JSON/arguments.
@@ -1092,6 +1418,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         Returns a ToolMessage containing either the tool output or an error description.
         Metadata from the tool result is stored in the provided run_metadata dict.
         """
+        self._require_own_active_session_context()
         tool = self._active_tools.get(tool_call.name)
         result: ToolResult
         args_valid = True
@@ -1108,19 +1435,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
                 params = tool.parameters.model_validate_json(args)
 
-                # Set parent depth for sub-agent tools to read
-                prev_depth = _PARENT_DEPTH.set(self._logger.depth)
-                try:
-                    if inspect.iscoroutinefunction(tool.executor):
-                        result = await tool.executor(params)  # ty: ignore[invalid-await]
-                    elif self._run_sync_in_thread:
-                        # ty: ignore - type checker doesn't understand iscoroutinefunction narrowing
-                        result = await anyio.to_thread.run_sync(tool.executor, params)  # ty: ignore[unresolved-attribute]
-                    else:
-                        # ty: ignore - iscoroutinefunction check above ensures this is sync
-                        result = tool.executor(params)  # ty: ignore[invalid-assignment]
-                finally:
-                    _PARENT_DEPTH.reset(prev_depth)
+                if inspect.iscoroutinefunction(tool.executor):
+                    result = await tool.executor(params)  # ty: ignore[invalid-await]
+                elif self._run_sync_in_thread:
+                    # ty: ignore - type checker doesn't understand iscoroutinefunction narrowing
+                    result = await anyio.to_thread.run_sync(tool.executor, params)  # ty: ignore[unresolved-attribute]
+                else:
+                    # ty: ignore - iscoroutinefunction check above ensures this is sync
+                    result = tool.executor(params)  # ty: ignore[invalid-assignment]
 
                 # Store metadata if present
                 if result.metadata is not None:
@@ -1334,17 +1656,64 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         """
 
-        # Guard: fail if ToolProviders are attached but we're not in a session
-        if self._has_tool_providers and not isinstance(self, SessionAgent):
-            provider_names = [type(t).__name__ for t in self._tools if isinstance(t, ToolProvider)]
+        self._require_own_active_session_context()
+        if not isinstance(self, SessionAgent) and self._has_tool_providers:
+            provider_names = [type(tool).__name__ for tool in self._tools if isinstance(tool, ToolProvider)]
             raise RuntimeError(
                 f"Agent.run() called without a session, but the agent has ToolProviders "
                 f"that require session initialization: {provider_names}. "
                 f"Use `async with agent.session(...) as session: await session.run(...)` instead."
             )
 
-        # Compute task hash for caching/resume
+        if isinstance(self, SessionAgent):
+            return await self._run(init_msgs, depth=depth)
+
+        ambient_session_token = _SESSION_STATE.set(None)
+        reservation_owner = object()
         task_hash = compute_task_hash(init_msgs)
+        cache_reserved = False
+        primary_exception: BaseException | None = None
+        try:
+            if self._cache_on_interrupt:
+                _reserve_cached_root_run(task_hash, reservation_owner)
+                cache_reserved = True
+            return await self._run(init_msgs, depth=depth, task_hash=task_hash)
+        except BaseException as exc:
+            primary_exception = exc
+            raise
+        finally:
+            try:
+                if cache_reserved:
+                    _release_cached_root_runs({task_hash}, reservation_owner)
+            except BaseException as cleanup_failure:
+                if primary_exception is None:
+                    raise
+                primary_exception.add_note(
+                    "Task cache reservation release failed after Agent.run(): "
+                    f"{type(cleanup_failure).__name__}: {cleanup_failure}"
+                )
+            finally:
+                _SESSION_STATE.reset(ambient_session_token)
+
+    async def _run(
+        self,
+        init_msgs: str | list[ChatMessage],
+        *,
+        depth: int | None = None,
+        task_hash: str | None = None,
+    ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, Any]]:
+        """Execute a run after its session ownership and ambient context are established."""
+        task_hash = task_hash or compute_task_hash(init_msgs)
+        state = _SESSION_STATE.get()
+        if (
+            isinstance(self, SessionAgent)
+            and self._cache_on_interrupt
+            and state is not None
+            and state.depth == 0
+            and task_hash not in self._reserved_cache_task_hashes
+        ):
+            _reserve_cached_root_run(task_hash, self)
+            self._reserved_cache_task_hashes.add(task_hash)
         self._current_task_hash = task_hash
 
         # Initialize cache manager
@@ -1355,6 +1724,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Try to resume from cache if requested
         if self._resume:
             state = _SESSION_STATE.get()
+            if state is None:
+                raise RuntimeError("Cannot resume an Agent run without an active session")
             cached = cache_manager.load_state(task_hash)
             if cached:
                 # Restore files to exec env
@@ -1524,161 +1895,205 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         """
         agent = self  # Capture self for closure
+        sub_agent_tool: Tool[SubAgentParams, SubAgentMetadata]
 
         async def sub_agent_executor(params: SubAgentParams) -> ToolResult[SubAgentMetadata]:
-            """Execute the sub-agent with the given task.
-
-            Sub-agents enter their own full session to ensure:
-            1. Tool isolation - each agent only sees its own tools (fixes recursive sub-agent bug)
-            2. Proper ToolProvider lifecycle - sub-agent's ToolProviders are initialized
-            3. Correct logging - logger context is entered for proper output formatting
-            """
-            # Get parent's depth and calculate subagent depth
-            parent_depth = _PARENT_DEPTH.get()
-            sub_agent_depth = parent_depth + 1
-
-            # Save parent's session state so we can restore it after subagent completes
-            # This ensures sibling subagents see the parent's state, not a previous sibling's stale state
+            """Execute this agent as a child of the active session."""
             parent_session_state = _SESSION_STATE.get(None)
-            logger.debug(
-                "[%s] PRE-SESSION: _SESSION_STATE=%s, exec_env=%s, exec_env._temp_dir=%s",
-                agent.name,
-                id(parent_session_state) if parent_session_state else None,
-                type(parent_session_state.exec_env).__name__
-                if parent_session_state and parent_session_state.exec_env
-                else None,
-                getattr(parent_session_state.exec_env, "_temp_dir", "N/A")
-                if parent_session_state and parent_session_state.exec_env
-                else None,
-            )
-
-            # Set _PARENT_DEPTH to subagent's depth BEFORE entering session
-            # so that __aenter__ reads the correct depth for SessionState.depth
-            prev_depth = _PARENT_DEPTH.set(sub_agent_depth)
+            if (
+                parent_session_state is None
+                or parent_session_state.owner is None
+                or parent_session_state.owner.tools.get(agent.name) is not sub_agent_tool
+            ):
+                return ToolResult(
+                    content=(
+                        f"<sub_agent_result>\n<error>Sub-agent tool '{agent.name}' requires an active parent "
+                        "Agent session. Use `async with parent.session() as session:` before running the parent."
+                        "</error>\n</sub_agent_result>"
+                    ),
+                    success=False,
+                    metadata=SubAgentMetadata(message_history=[], run_metadata={}),
+                )
             try:
                 init_msgs: list[ChatMessage] = []
                 if system_prompt:
                     init_msgs.append(SystemMessage(content=system_prompt))
                 init_msgs.append(UserMessage(content=params.task))
 
-                # Sub-agent enters its own full session for tool isolation and proper lifecycle
-                # output_dir is a path within the parent's exec env (not local filesystem)
-                # Files are transferred to parent's env at __aexit__ via save_output_files(dest_env=parent)
-                async with agent.session(
-                    output_dir=".",  # Path in parent's exec env
-                    input_files=list(params.input_files) if params.input_files else None,  # ty: ignore[invalid-argument-type]
-                ) as agent_session:
-                    # Override logger depth for proper indentation in console output
-                    agent_session._logger.depth = sub_agent_depth  # noqa: SLF001
-
+                agent_session = SessionAgent.from_agent(
+                    agent,
+                    output_dir=".",
+                    input_files=list(params.input_files) if params.input_files else None,
+                    parent_session_state=parent_session_state,
+                )
+                async with agent_session:
                     finish_params, msg_history, run_metadata = await agent_session.run(init_msgs)
 
-                    # Extract the last assistant message with actual content (not just tool calls)
-                    last_assistant_msg: AssistantMessage | None = None
-                    for msg_group in reversed(msg_history):
-                        for msg in reversed(msg_group):
-                            if isinstance(msg, AssistantMessage) and msg.content:
-                                last_assistant_msg = msg
-                                break
-                        if last_assistant_msg:
+                last_assistant_msg: AssistantMessage | None = None
+                for msg_group in reversed(msg_history):
+                    for msg in reversed(msg_group):
+                        if isinstance(msg, AssistantMessage) and msg.content:
+                            last_assistant_msg = msg
                             break
+                    if last_assistant_msg:
+                        break
 
-                    # Build content from the assistant message and/or finish params
-                    content_parts: list[str] = []
+                content_parts: list[str] = []
+                if last_assistant_msg and last_assistant_msg.content:
+                    content = last_assistant_msg.content
+                    if isinstance(content, list):
+                        content = "\n".join(str(block) for block in content)
+                    content_parts.append(content)
 
-                    if last_assistant_msg and last_assistant_msg.content:
-                        content = last_assistant_msg.content
-                        if isinstance(content, list):
-                            content = "\n".join(str(block) for block in content)
-                        content_parts.append(content)
+                if finish_params is not None:
+                    finish_dict = finish_params.model_dump()
+                    if finish_dict:
+                        content_parts.append(f"Finish params: {finish_dict}")
 
-                    # Include finish params if available (they often contain the actual result)
-                    if finish_params is not None:
-                        finish_dict = finish_params.model_dump()
-                        if finish_dict:
-                            content_parts.append(f"Finish params: {finish_dict}")
-
-                    # Report files transferred to parent's exec env (set in __aexit__)
-                    transferred_paths = agent_session._transferred_paths  # noqa: SLF001
-                    if transferred_paths:
-                        content_parts.append(f"Files available in your environment: {transferred_paths}")
-
-                    if not content_parts:
-                        result_content = "<sub_agent_result>\n<error>No assistant message or finish params found</error>\n</sub_agent_result>"
-                    else:
-                        content = "\n".join(content_parts)
-                        result_content = (
-                            f"<sub_agent_result>"
-                            f"\n<response>{content}</response>"
-                            f"\n<finished>{finish_params is not None}</finished>"
-                            f"\n</sub_agent_result>"
-                        )
-
-                    # Create subagent metadata with token usage, message history, and run metadata
-                    sub_metadata = SubAgentMetadata(
-                        message_history=msg_history,
-                        run_metadata=run_metadata,
+                if agent_session._transferred_paths:  # noqa: SLF001
+                    content_parts.append(
+                        f"Files available in your environment: {agent_session._transferred_paths}"  # noqa: SLF001
                     )
 
-                    return ToolResult(content=result_content, metadata=sub_metadata)
+                if not content_parts:
+                    result_content = "<sub_agent_result>\n<error>No assistant message or finish params found</error>\n</sub_agent_result>"
+                else:
+                    content = "\n".join(content_parts)
+                    result_content = (
+                        f"<sub_agent_result>"
+                        f"\n<response>{content}</response>"
+                        f"\n<finished>{finish_params is not None}</finished>"
+                        f"\n</sub_agent_result>"
+                    )
 
-            except Exception as e:
-                # On error, return empty metadata
-                error_metadata = SubAgentMetadata(
-                    message_history=[],
-                    run_metadata={},
-                )
                 return ToolResult(
-                    content=f"<sub_agent_result>\n<error>{e!s}</error>\n</sub_agent_result>",
+                    content=result_content,
+                    metadata=SubAgentMetadata(message_history=msg_history, run_metadata=run_metadata),
+                )
+            except Exception as exc:
+                return ToolResult(
+                    content=f"<sub_agent_result>\n<error>{exc!s}</error>\n</sub_agent_result>",
                     success=False,
-                    metadata=error_metadata,
-                )
-            finally:
-                # DEBUG: Log SESSION_STATE after subagent session
-                post_session_state = _SESSION_STATE.get(None)
-                logger.debug(
-                    "[%s] POST-SESSION: _SESSION_STATE=%s, exec_env=%s, exec_env._temp_dir=%s",
-                    agent.name,
-                    id(post_session_state) if post_session_state else None,
-                    type(post_session_state.exec_env).__name__
-                    if post_session_state and post_session_state.exec_env
-                    else None,
-                    getattr(post_session_state.exec_env, "_temp_dir", "N/A")
-                    if post_session_state and post_session_state.exec_env
-                    else None,
+                    metadata=SubAgentMetadata(message_history=[], run_metadata={}),
                 )
 
-                # Restore parent's depth
-                _PARENT_DEPTH.reset(prev_depth)
-                # Restore parent's session state so next sibling subagent sees it
-                if parent_session_state is not None:
-                    _SESSION_STATE.set(parent_session_state)
-
-        return Tool[SubAgentParams, SubAgentMetadata](
+        sub_agent_tool = Tool[SubAgentParams, SubAgentMetadata](
             name=self._name,
             description=description,
             parameters=SubAgentParams,
             executor=sub_agent_executor,  # ty: ignore[invalid-argument-type]
         )
+        return sub_agent_tool
 
 
 class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, FinishMeta]):
-    """Agent running inside an active session with full tool access.
+    """Detached runtime returned by ``Agent.session()``.
 
-    Returned by ``async with agent.session(...) as session``. A SessionAgent
-    shares its ``__dict__`` with the parent Agent, so it has the same
-    configuration and state. The key difference is that ToolProvider-created
-    tools have been initialized and are available in ``_active_tools``.
-
-    ``Agent.run()`` raises ``RuntimeError`` when ToolProviders are present
-    but the caller is not a SessionAgent. This makes the invalid state
-    (calling ``run()`` with uninitialized ToolProviders) a type-level
-    distinction rather than just a runtime flag.
+    Agent configuration, the LLM client, and static tools are shared. Active
+    tools, provider and logger lifecycle, run results, cache state, skills, and
+    output state belong to this session.
     """
 
     @classmethod
-    def from_agent(cls, agent: Agent[FinishParams, FinishMeta]) -> "SessionAgent[FinishParams, FinishMeta]":
-        """Create a SessionAgent sharing the given Agent's ``__dict__``."""
-        sa: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
-        sa.__dict__ = agent.__dict__
-        return sa
+    def from_agent(
+        cls,
+        agent: Agent[FinishParams, FinishMeta],
+        *,
+        output_dir: Path | str | None = None,
+        input_files: str | Path | list[str | Path] | None = None,
+        skills_dir: Path | str | None = None,
+        resume: bool = False,
+        clear_cache_on_success: bool = True,
+        cache_on_interrupt: bool = True,
+        parent_session_state: SessionState | None = None,
+    ) -> "SessionAgent[FinishParams, FinishMeta]":
+        """Shallow-copy configuration and replace all mutable runtime owners."""
+        from stirrup.tools.view_image import ViewImageToolProvider
+
+        configured_tools = agent._tools  # noqa: SLF001
+        configured_providers = {id(tool): tool for tool in configured_tools if isinstance(tool, ToolProvider)}
+        sequential_provider_ids = {
+            id(tool._exec_env)  # noqa: SLF001
+            for tool in configured_providers.values()
+            if isinstance(tool, ViewImageToolProvider)
+            and type(tool) is not ViewImageToolProvider
+            and tool._exec_env is not None  # noqa: SLF001
+            and id(tool._exec_env) in configured_providers  # noqa: SLF001
+        }
+
+        replacements: dict[int, ToolProvider] = {}
+        should_share_exec_env = (
+            agent._share_parent_exec_env  # noqa: SLF001
+            and parent_session_state is not None
+            and parent_session_state.exec_env is not None
+        )
+        if should_share_exec_env and sequential_provider_ids:
+            raise ValueError(
+                f"Subagent '{agent._name}' cannot use share_parent_exec_env=True with a custom "  # noqa: SLF001
+                "ViewImageToolProvider configured for its own code backend. Disable environment sharing "
+                "or use the exact built-in ViewImageToolProvider."
+            )
+
+        for configured_tool in agent._tools:  # noqa: SLF001
+            if not isinstance(configured_tool, ToolProvider):
+                continue
+            if type(configured_tool) is ViewImageToolProvider:
+                continue
+            if id(configured_tool) in sequential_provider_ids:
+                replacements[id(configured_tool)] = configured_tool
+                continue
+            if should_share_exec_env and isinstance(configured_tool, CodeExecToolProvider):
+                replacements[id(configured_tool)] = parent_session_state.exec_env  # type: ignore[assignment]
+                continue
+            replacements[id(configured_tool)] = (
+                _detach_builtin_provider(configured_tool, replacements) or configured_tool
+            )
+
+        session_tools: list[Tool | ToolProvider] = []
+        custom_resources: list[object] = []
+        for configured_tool in agent._tools:  # noqa: SLF001
+            if not isinstance(configured_tool, ToolProvider):
+                session_tools.append(configured_tool)
+                continue
+            session_tool = replacements.get(id(configured_tool))
+            if session_tool is None:
+                session_tool = _detach_builtin_provider(configured_tool, replacements) or configured_tool
+                replacements[id(configured_tool)] = session_tool
+            session_tools.append(session_tool)
+            if session_tool is configured_tool:
+                custom_resources.append(configured_tool)
+
+        session_logger, is_custom_logger = _detach_logger(agent._logger)  # noqa: SLF001
+        if is_custom_logger:
+            custom_resources.append(session_logger)
+        custom_resources = list({id(resource): resource for resource in custom_resources}.values())
+
+        session: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
+        session.__dict__ = agent.__dict__.copy()
+        session._tools = session_tools
+        session._finish_tools = dict(agent._finish_tools)  # noqa: SLF001
+        session._active_tools = {tool.name: tool for tool in session_tools if isinstance(tool, Tool)}
+        session._active_tools.update(session._finish_tools)
+        session._has_tool_providers = any(isinstance(tool, ToolProvider) for tool in session_tools)
+        session._logger = session_logger
+
+        session._pending_output_dir = Path(output_dir) if output_dir else None
+        session._pending_input_files = list(input_files) if isinstance(input_files, list) else input_files
+        session._pending_skills_dir = Path(skills_dir) if skills_dir else None
+        session._resume = resume
+        session._clear_cache_on_success = clear_cache_on_success
+        session._cache_on_interrupt = cache_on_interrupt
+
+        session._last_finish_params = None
+        session._last_run_metadata = {}
+        session._transferred_paths = []
+        session._current_task_hash = None
+        session._current_run_state = None
+        session._parent_session_state = parent_session_state
+        session._session_state = None
+        session._session_state_token = None
+        session._interrupt_handler_installed = False
+        session._custom_session_resources = custom_resources
+        session._custom_resources_reserved = False
+        session._reserved_cache_task_hashes = set()
+        return session
