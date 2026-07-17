@@ -6,13 +6,14 @@ import logging
 import re
 import signal
 import threading
+from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import perf_counter
 from types import TracebackType
-from typing import Annotated, Any, overload
+from typing import Annotated, Any, cast, overload
 
 import anyio
 from pydantic import BaseModel, Field, ValidationError
@@ -22,7 +23,13 @@ from stirrup.constants import (
     CONTEXT_SUMMARIZATION_CUTOFF,
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
-from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
+from stirrup.core.cache import (
+    CacheFileIdentity,
+    CacheManager,
+    CacheState,
+    build_tool_registry,
+    compute_task_hash,
+)
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -45,7 +52,7 @@ from stirrup.core.models import (
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
 from stirrup.tools import DEFAULT_TOOLS
-from stirrup.tools.code_backends.base import CodeExecToolProvider
+from stirrup.tools.code_backends.base import CodeExecToolProvider, UploadedFile
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL
 from stirrup.tools.finish import FinishParams as SimpleFinishParams
@@ -87,6 +94,8 @@ class SessionState:
     depth: int = 0
     exec_env_owned: bool = True  # Whether this session owns (and should cleanup) the exec_env
     uploaded_file_paths: list[str] = field(default_factory=list)  # Paths of files uploaded to exec_env
+    cache_input_files: list[CacheFileIdentity] = field(default_factory=list)
+    cache_skill_files: list[CacheFileIdentity] = field(default_factory=list)
     skills_metadata: list[SkillMetadata] = field(default_factory=list)  # Loaded skills metadata
     logger: AgentLoggerBase | None = None  # Logger for pause/resume during user input
 
@@ -149,25 +158,75 @@ def _release_custom_session_resources(resources: list[object]) -> None:
             _ACTIVE_SESSION_RESERVATIONS.pop(("custom", id(resource)), None)
 
 
-def _reserve_cached_root_run(task_hash: str, owner: object) -> None:
-    """Keep one cache-writing root run active for a task hash."""
-    reservation = ("cache", task_hash)
-    with _SESSION_RESERVATIONS_LOCK:
-        active_owner = _ACTIVE_SESSION_RESERVATIONS.get(reservation)
-        if active_owner is not None:
-            raise RuntimeError(
-                "Concurrent root runs with cache_on_interrupt=True cannot use the same task cache. "
-                "Wait for the active run to finish or set cache_on_interrupt=False."
+class _TaskCacheOwnership:
+    """Reserve task caches and guard every cache operation by ownership."""
+
+    def __init__(self) -> None:
+        self._owner = object()
+        self._task_hashes: set[str] = set()
+
+    def reserve(self, task_hash: str) -> None:
+        reservation = ("cache", task_hash)
+        with _SESSION_RESERVATIONS_LOCK:
+            active_owner = _ACTIVE_SESSION_RESERVATIONS.get(reservation)
+            if active_owner is self._owner:
+                return
+            if active_owner is not None:
+                raise RuntimeError(
+                    "Concurrent root runs cannot use the same task cache. "
+                    "Wait for the active cache-enabled or resuming run to finish."
+                )
+            _ACTIVE_SESSION_RESERVATIONS[reservation] = self._owner
+            self._task_hashes.add(task_hash)
+
+    def owns(self, task_hash: str) -> bool:
+        with _SESSION_RESERVATIONS_LOCK:
+            return (
+                task_hash in self._task_hashes and _ACTIVE_SESSION_RESERVATIONS.get(("cache", task_hash)) is self._owner
             )
-        _ACTIVE_SESSION_RESERVATIONS[reservation] = owner
 
+    def _require(self, task_hash: str) -> None:
+        if not self.owns(task_hash):
+            raise RuntimeError(f"Task cache operation requires reservation ownership for {task_hash}")
 
-def _release_cached_root_runs(task_hashes: set[str], owner: object) -> None:
-    with _SESSION_RESERVATIONS_LOCK:
-        for task_hash in task_hashes:
-            reservation = ("cache", task_hash)
-            if _ACTIVE_SESSION_RESERVATIONS.get(reservation) is owner:
-                _ACTIVE_SESSION_RESERVATIONS.pop(reservation)
+    def save_state(
+        self,
+        cache_manager: CacheManager,
+        task_hash: str,
+        state: CacheState,
+        exec_env_dir: Path | None,
+    ) -> None:
+        self._require(task_hash)
+        cache_manager.save_state(task_hash, state, exec_env_dir)
+
+    def load_state(
+        self,
+        cache_manager: CacheManager,
+        task_hash: str,
+        *,
+        restore_files_to: Path | None,
+        finish_tools: Mapping[str, Tool[Any, Any]],
+    ) -> CacheState | None:
+        self._require(task_hash)
+        return cache_manager.load_state(
+            task_hash,
+            restore_files_to=restore_files_to,
+            finish_tools=finish_tools,
+        )
+
+    def clear_cache_if_owned(self, cache_manager: CacheManager, task_hash: str) -> bool:
+        if not self.owns(task_hash):
+            return False
+        cache_manager.clear_cache(task_hash)
+        return True
+
+    def release(self) -> None:
+        with _SESSION_RESERVATIONS_LOCK:
+            for task_hash in self._task_hashes:
+                reservation = ("cache", task_hash)
+                if _ACTIVE_SESSION_RESERVATIONS.get(reservation) is self._owner:
+                    _ACTIVE_SESSION_RESERVATIONS.pop(reservation)
+            self._task_hashes.clear()
 
 
 def _record_session_cleanup_failure(
@@ -321,49 +380,160 @@ def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessa
     )
 
 
+def _as_posix_path(path: str | Path) -> PurePosixPath:
+    return PurePosixPath(str(path).replace("\\", "/"))
+
+
+def _uploaded_input_relative_name(
+    uploaded_file: UploadedFile,
+    source_roots: list[str | Path],
+    *,
+    preserve_relative_roots: bool,
+) -> str:
+    """Map an uploaded source to the safe path visible in the logical input set."""
+    source_path = _as_posix_path(uploaded_file.source_path)
+    destination_path = _as_posix_path(uploaded_file.dest_path)
+    candidates: list[PurePosixPath] = []
+    for source_root_value in source_roots:
+        source_root = _as_posix_path(source_root_value)
+        logical_root = (
+            source_root
+            if preserve_relative_roots and not source_root.is_absolute()
+            else PurePosixPath(source_root.name)
+        )
+        if source_path == source_root:
+            relative_path = logical_root
+        else:
+            try:
+                path_within_root = source_path.relative_to(source_root)
+            except ValueError:
+                continue
+            relative_path = logical_root / path_within_root if logical_root.parts else path_within_root
+        candidates.append(relative_path)
+
+    if not candidates:
+        raise ValueError(f"Uploaded input source was not under a requested input root: {uploaded_file.source_path}")
+    matching_candidates = [
+        candidate
+        for candidate in candidates
+        if len(candidate.parts) <= len(destination_path.parts)
+        and destination_path.parts[-len(candidate.parts) :] == candidate.parts
+    ]
+    if matching_candidates:
+        return max(matching_candidates, key=lambda candidate: len(candidate.parts)).as_posix()
+    return min(candidates, key=lambda candidate: candidate.as_posix()).as_posix()
+
+
+async def _fingerprint_uploaded_inputs(
+    exec_env: CodeExecToolProvider,
+    uploaded_files: list[UploadedFile],
+    source_roots: list[str | Path],
+    *,
+    preserve_relative_roots: bool = False,
+) -> list[CacheFileIdentity]:
+    """Fingerprint bytes in the execution environment, never mutable source files."""
+    identities: list[CacheFileIdentity] = []
+    for uploaded_file in uploaded_files:
+        content = await exec_env.read_file_bytes(uploaded_file.dest_path)
+        identities.append(
+            CacheFileIdentity.from_content(
+                _uploaded_input_relative_name(
+                    uploaded_file,
+                    source_roots,
+                    preserve_relative_roots=preserve_relative_roots,
+                ),
+                content,
+            )
+        )
+    return identities
+
+
+async def _fingerprint_uploaded_skills(
+    exec_env: CodeExecToolProvider,
+    uploaded_files: list[UploadedFile],
+    source_root: str | Path,
+) -> list[CacheFileIdentity]:
+    """Fingerprint uploaded skill bytes using paths relative to the skills root."""
+    normalized_root = _as_posix_path(source_root)
+    identities: list[CacheFileIdentity] = []
+    for uploaded_file in uploaded_files:
+        source_path = _as_posix_path(uploaded_file.source_path)
+        try:
+            relative_name = source_path.relative_to(normalized_root).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                f"Uploaded skill was not under the requested skills root: {uploaded_file.source_path}"
+            ) from exc
+        content = await exec_env.read_file_bytes(uploaded_file.dest_path)
+        identities.append(CacheFileIdentity.from_content(relative_name, content))
+    return identities
+
+
+async def _fingerprint_shared_inputs(
+    exec_env: CodeExecToolProvider,
+    input_paths: list[str | Path],
+) -> list[CacheFileIdentity]:
+    """Fingerprint subagent inputs already present in a shared environment."""
+    identities: list[CacheFileIdentity] = []
+    for input_path_value in input_paths:
+        input_path = _as_posix_path(input_path_value)
+        contextual_path = PurePosixPath(*input_path.parts[1:]) if input_path.is_absolute() else input_path
+        if await exec_env.is_directory(input_path.as_posix()):
+            for relative_file in await exec_env.list_files(input_path.as_posix()):
+                relative_file_path = _as_posix_path(relative_file)
+                content = await exec_env.read_file_bytes((input_path / relative_file_path).as_posix())
+                identities.append(
+                    CacheFileIdentity.from_content((contextual_path / relative_file_path).as_posix(), content)
+                )
+        else:
+            content = await exec_env.read_file_bytes(input_path.as_posix())
+            identities.append(CacheFileIdentity.from_content(contextual_path.as_posix(), content))
+    return identities
+
+
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
-    """Extract image blocks from tool messages and convert them to user messages for text-only models."""
+    """Return an idempotent text-only representation without mutating inputs."""
+    transformed_tool_messages: list[ToolMessage] = []
     user_messages: list[UserMessage] = []
-    for tm in tool_messages:
-        if isinstance(tm.content, list):
-            for idx, block in enumerate(tm.content):
+    for tool_message in tool_messages:
+        transformed_content = tool_message.content
+        if isinstance(tool_message.content, list):
+            content_blocks: list[str | ImageContentBlock] = []
+            found_image = False
+            for block in tool_message.content:
                 if isinstance(block, ImageContentBlock):
+                    found_image = True
                     user_messages.append(
-                        UserMessage(content=[f"Here is the image for tool call {tm.tool_call_id}", block]),
+                        UserMessage(content=[f"Here is the image for tool call {tool_message.tool_call_id}", block])
                     )
-                    tm.content[idx] = f"Done! The User will provide the image for tool call {tm.tool_call_id}"
+                    content_blocks.append(
+                        f"Done! The User will provide the image for tool call {tool_message.tool_call_id}"
+                    )
                 elif isinstance(block, str):
-                    continue
+                    content_blocks.append(block)
                 else:
                     raise NotImplementedError(f"Unsupported content block: {type(block)}")
-
-    return tool_messages, user_messages
+            if found_image:
+                transformed_content = content_blocks
+        transformed_tool_messages.append(
+            tool_message
+            if transformed_content is tool_message.content
+            else tool_message.model_copy(update={"content": transformed_content})
+        )
+    return transformed_tool_messages, user_messages
 
 
 def _normalize_finish_tools[FinishParams: BaseModel, FinishMeta](
     finish_tool: Tool[FinishParams, FinishMeta] | list[Tool] | None,
-) -> dict[str, Tool[Any, Any]]:
-    """Normalize a single finish tool or list of finish tools into a name-keyed mapping."""
-    finish_tools: list[Tool]
+) -> list[Tool[Any, Any]]:
+    """Normalize the finish-tool option before centralized runtime validation."""
     if finish_tool is None:
-        finish_tools = [SIMPLE_FINISH_TOOL]
-    elif isinstance(finish_tool, list):
+        return [SIMPLE_FINISH_TOOL]
+    if isinstance(finish_tool, list):
         if not finish_tool:
             raise ValueError("finish_tool list cannot be empty")
-        finish_tools = finish_tool
-    else:
-        finish_tools = [finish_tool]
-
-    seen_names: set[str] = set()
-    duplicate_names: set[str] = set()
-    for tool in finish_tools:
-        if tool.name in seen_names:
-            duplicate_names.add(tool.name)
-        seen_names.add(tool.name)
-    if duplicate_names:
-        raise ValueError(f"Finish tools must have unique names, found duplicates: {sorted(duplicate_names)}")
-
-    return {tool.name: tool for tool in finish_tools}
+        return finish_tool
+    return [finish_tool]
 
 
 def _get_total_token_usage(messages: list[list[ChatMessage]]) -> list[TokenUsage]:
@@ -394,15 +564,6 @@ def _get_turn_count(full_msg_history: list[list[ChatMessage]], messages: list[Ch
     """Count accepted assistant turns still present in history."""
     all_messages = chain(chain.from_iterable(full_msg_history), messages)
     return sum(1 for msg in all_messages if isinstance(msg, AssistantMessage))
-
-
-def _merge_run_metadata(run_metadata_by_turn: dict[str, dict[str, list[Any]]]) -> dict[str, list[Any]]:
-    """Merge per-turn metadata into the public run_metadata shape."""
-    run_metadata: dict[str, list[Any]] = {}
-    for turn_metadata in run_metadata_by_turn.values():
-        for name, metadata_list in turn_metadata.items():
-            run_metadata.setdefault(name, []).extend(metadata_list)
-    return run_metadata
 
 
 def _get_model_speed_stats(messages: list[list[ChatMessage]], model_slug: str) -> dict[str, float | int | str]:
@@ -482,7 +643,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
     _interrupt_handler_installed: bool
     _custom_session_resources: list[object]
     _custom_resources_reserved: bool
-    _reserved_cache_task_hashes: set[str]
+    _task_cache_ownership: _TaskCacheOwnership
 
     @overload
     def __init__(
@@ -611,7 +772,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._max_turns = max_turns
         self._system_prompt = system_prompt
         self._tools = tools if tools is not None else DEFAULT_TOOLS
-        self._finish_tools: dict[str, Tool[Any, Any]] = _normalize_finish_tools(finish_tool)
+        finish_tools = _normalize_finish_tools(finish_tool)
         self._context_summarization_cutoff = context_summarization_cutoff
         self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
         self._run_sync_in_thread = run_sync_in_thread
@@ -631,17 +792,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._clear_cache_on_success: bool = True
         self._cache_on_interrupt: bool = True
 
-        # Eagerly register static tools + finish tools (available without a session)
-        self._active_tools: dict[str, Tool] = {}
-        for tool in self._tools:
-            if isinstance(tool, Tool):
-                if tool.name in self._finish_tools:
-                    raise ValueError(
-                        f"Tool name '{tool.name}' in `tools` collides with a finish tool. "
-                        "Tool names must be unique across `tools` and `finish_tool`."
-                    )
-                self._active_tools[tool.name] = tool
-        self._active_tools.update(self._finish_tools)
+        # Eagerly register static and finish tools; provider tools are resolved on session entry.
+        static_tools = [tool for tool in self._tools if isinstance(tool, Tool)]
+        self._active_tools, self._finish_tools, self._tool_definitions = build_tool_registry(
+            static_tools,
+            finish_tools,
+        )
         self._has_tool_providers = any(isinstance(t, ToolProvider) for t in self._tools)
 
         self._last_finish_params: Any = None  # FinishParams type parameter
@@ -651,7 +807,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Cache state for resumption (set during run(), used in __aexit__ for caching on interrupt)
         self._current_task_hash: str | None = None
         self._current_run_state: CacheState | None = None
-        self._reserved_cache_task_hashes: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -717,15 +872,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                    The cache is identified by hashing the init_msgs passed to run().
                    Cached state includes message history, current turn, and execution
                    environment files from a previous interrupted run.
-            clear_cache_on_success: If True (default), automatically clear the cache
-                                   when the agent completes successfully. Set to False
-                                   to preserve caches for inspection or debugging.
+            clear_cache_on_success: If True (default), automatically clear an owned
+                                   cache when the agent completes successfully. Set to
+                                   False to preserve caches for inspection or debugging.
             cache_on_interrupt: If True (default), set up a SIGINT handler to cache
                                state on Ctrl+C. Set to False when running agents in
                                threads or subprocesses where signal handlers cannot
                                be registered from non-main threads. Concurrent root runs
-                               in one process must use different task prompts while caching
-                               is enabled.
+                               in one process must use different task identities while
+                               caching or resumption is enabled.
 
         Returns:
             A fresh SessionAgent for use with `async with agent.session(...) as session:`
@@ -1054,19 +1209,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     # Static Tool, use directly
                     active_tools.append(tool)
 
-            # Detect collisions between session-resolved tool names and finish tool names.
-            # Static-Tool collisions are caught earlier in __init__; ToolProvider-derived tools
-            # only have known names at this point.
-            colliding = sorted({t.name for t in active_tools} & self._finish_tools.keys())
-            if colliding:
-                raise ValueError(
-                    f"Session-resolved tool name(s) {colliding} collide with finish tool name(s). "
-                    "Tool names must be unique across `tools` and `finish_tool`."
-                )
-
-            # Merge session-initialized tools into _active_tools and ensure finish tools take precedence.
-            self._active_tools.update({t.name: t for t in active_tools})
-            self._active_tools.update(self._finish_tools)
+            self._active_tools, self._finish_tools, self._tool_definitions = build_tool_registry(
+                active_tools,
+                self._finish_tools.values(),
+            )
 
             # Validate subagent code exec requirements (only at root level)
             if current_depth == 0:
@@ -1076,6 +1222,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if self._pending_input_files:
                 if not state.exec_env:
                     raise ValueError("input_files specified but no CodeExecToolProvider configured")
+                pending_input_paths = (
+                    [self._pending_input_files]
+                    if isinstance(self._pending_input_files, (str, Path))
+                    else list(self._pending_input_files)
+                )
 
                 logger.debug(
                     "[%s __aenter__] Uploading input files: %s, depth=%d, parent_exec_env=%s, parent_exec_env._temp_dir=%s, exec_env_owned=%s",
@@ -1090,11 +1241,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 if state.depth > 0 and state.parent_exec_env:
                     if not state.exec_env_owned:
                         # SHARED EXEC ENV: Files already accessible - no transfer needed
-                        # Just record the paths as "uploaded" for system prompt
-                        if isinstance(self._pending_input_files, (str, Path)):
-                            state.uploaded_file_paths = [str(self._pending_input_files)]
-                        else:
-                            state.uploaded_file_paths = [str(p) for p in self._pending_input_files]
+                        state.uploaded_file_paths = sorted(str(path) for path in pending_input_paths)
+                        state.cache_input_files = await _fingerprint_shared_inputs(state.exec_env, pending_input_paths)
                         logger.debug(
                             "[%s __aenter__] Shared exec_env - files already accessible: %s",
                             self._name,
@@ -1104,7 +1252,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         # SEPARATE EXEC ENV: Read files from parent's exec env, write to subagent's exec env
                         # input_files are paths within the parent's environment
                         result = await state.exec_env.upload_files(
-                            *self._pending_input_files,
+                            *pending_input_paths,
                             source_env=state.parent_exec_env,
                         )
                         logger.debug(
@@ -1113,9 +1261,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             result.uploaded,
                             result.failed,
                         )
-                        state.uploaded_file_paths = [uf.dest_path for uf in result.uploaded]
+                        state.uploaded_file_paths = sorted(uploaded.dest_path for uploaded in result.uploaded)
                         if result.failed:
                             raise RuntimeError(f"Failed to upload files: {result.failed}")
+                        state.cache_input_files = await _fingerprint_uploaded_inputs(
+                            state.exec_env,
+                            result.uploaded,
+                            pending_input_paths,
+                            preserve_relative_roots=True,
+                        )
                 else:
                     # ROOT AGENT: Read files from local filesystem
                     resolved = self._resolve_input_files(self._pending_input_files)
@@ -1126,9 +1280,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         result.uploaded,
                         result.failed,
                     )
-                    state.uploaded_file_paths = [uf.dest_path for uf in result.uploaded]
+                    state.uploaded_file_paths = sorted(uploaded.dest_path for uploaded in result.uploaded)
                     if result.failed:
                         raise RuntimeError(f"Failed to upload files: {result.failed}")
+                    state.cache_input_files = await _fingerprint_uploaded_inputs(
+                        state.exec_env,
+                        result.uploaded,
+                        [path.resolve() for path in resolved],
+                    )
             self._pending_input_files = None  # Clear pending state
 
             # Upload skills directory if it exists and load metadata
@@ -1137,7 +1296,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 if skills_path.exists() and skills_path.is_dir():
                     if state.exec_env:
                         logger.debug("[%s __aenter__] Uploading skills directory: %s", self._name, skills_path)
-                        await state.exec_env.upload_files(skills_path, dest_dir="skills")
+                        result = await state.exec_env.upload_files(skills_path, dest_dir="skills")
+                        if result.failed:
+                            raise RuntimeError(f"Failed to upload skills: {result.failed}")
+                        state.cache_skill_files = await _fingerprint_uploaded_skills(
+                            state.exec_env,
+                            result.uploaded,
+                            skills_path.resolve(),
+                        )
                     # Load skills metadata (even if no exec_env, for system prompt)
                     state.skills_metadata = load_skills_metadata(skills_path)
                     logger.debug("[%s __aenter__] Loaded %d skills", self._name, len(state.skills_metadata))
@@ -1149,7 +1315,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Transfer skills directory from parent's exec_env to sub-agent's exec_env
                 # (only if we have a separate exec_env)
                 if state.exec_env and parent_state.exec_env and state.exec_env_owned:
-                    await state.exec_env.upload_files("skills", source_env=parent_state.exec_env)
+                    result = await state.exec_env.upload_files("skills", source_env=parent_state.exec_env)
+                    if result.failed:
+                        raise RuntimeError(f"Failed to inherit skills: {result.failed}")
+                    state.cache_skill_files = await _fingerprint_uploaded_skills(
+                        state.exec_env,
+                        result.uploaded,
+                        "skills",
+                    )
+                elif not state.exec_env_owned:
+                    state.cache_skill_files = list(parent_state.cache_skill_files)
 
             # Configure and enter logger context
             self._logger.name = self._name
@@ -1221,11 +1396,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         """Finalize and release a session inside its shielded teardown scope."""
         primary_exception = exc_val
         try:
-            # Cache state on non-success exit (only at root level)
+            # Persist the latest accepted boundary before any fallible finalization.
+            # A terminal generation is selected here and cleared only after teardown.
             should_cache = (
                 state.depth == 0
                 and self._cache_on_interrupt
-                and (exc_type is not None or self._last_finish_params is None)
                 and self._current_task_hash is not None
                 and self._current_run_state is not None
             )
@@ -1243,7 +1418,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
             if should_cache:
-                cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
+                cache_manager = CacheManager()
 
                 exec_env_dir = state.exec_env.temp_dir if state.exec_env else None
 
@@ -1256,7 +1431,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     original_handler = signal.getsignal(signal.SIGINT)
                     signal.signal(signal.SIGINT, signal.SIG_IGN)
                     try:
-                        cache_manager.save_state(
+                        self._task_cache_ownership.save_state(
+                            cache_manager,
                             self._current_task_hash,
                             self._current_run_state,
                             exec_env_dir,
@@ -1264,7 +1440,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     finally:
                         signal.signal(signal.SIGINT, original_handler)
                 else:
-                    cache_manager.save_state(
+                    self._task_cache_ownership.save_state(
+                        cache_manager,
                         self._current_task_hash,
                         self._current_run_state,
                         exec_env_dir,
@@ -1292,6 +1469,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             len(result.saved),
                             len(result.failed),
                         )
+                        if result.failed:
+                            raise RuntimeError(f"Failed to export output files: {result.failed}")
                     else:
                         # SUBAGENT: Handle file transfer based on exec_env ownership
                         if not state.exec_env_owned:
@@ -1362,8 +1541,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             primary_exception = _record_session_cleanup_failure(primary_exception, "Logger", cleanup_failure)
 
         try:
-            self._active_tools = {tool.name: tool for tool in self._tools if isinstance(tool, Tool)}
-            self._active_tools.update(self._finish_tools)
+            self._active_tools, self._finish_tools, self._tool_definitions = build_tool_registry(
+                (tool for tool in self._tools if isinstance(tool, Tool)),
+                self._finish_tools.values(),
+            )
         except BaseException as cleanup_failure:
             primary_exception = _record_session_cleanup_failure(primary_exception, "Active tool reset", cleanup_failure)
 
@@ -1393,10 +1574,23 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 primary_exception, "Custom resource reservation", cleanup_failure
             )
 
+        if (
+            primary_exception is None
+            and self._last_finish_params is not None
+            and self._clear_cache_on_success
+            and self._current_task_hash is not None
+        ):
+            try:
+                if self._task_cache_ownership.clear_cache_if_owned(CacheManager(), self._current_task_hash):
+                    self._current_task_hash = None
+                    self._current_run_state = None
+            except BaseException as cleanup_failure:
+                primary_exception = _record_session_cleanup_failure(
+                    primary_exception, "Success cache cleanup", cleanup_failure
+                )
+
         try:
-            if self._reserved_cache_task_hashes:
-                _release_cached_root_runs(self._reserved_cache_task_hashes, self)
-                self._reserved_cache_task_hashes.clear()
+            self._task_cache_ownership.release()
         except BaseException as cleanup_failure:
             primary_exception = _record_session_cleanup_failure(
                 primary_exception, "Task cache reservation", cleanup_failure
@@ -1471,47 +1665,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             tool_end_time=tool_end_time,
         )
 
-    def _unwind_context_overflow(self, messages: list[ChatMessage]) -> tuple[list[ChatMessage], str]:
-        """Drop the latest completed turn, preserving the original task prompt."""
+    def _validate_context_overflow_recovery(self, messages: list[ChatMessage]) -> None:
+        """Require accepted work after the active context boundary before compression."""
         if not self._recover_from_context_overflow:
             raise ContextOverflowError("Context overflow recovery is disabled")
-
-        turn = self._latest_completed_turn(messages)
-        if turn is None:
-            raise self._context_boundary_error(messages)
-
-        turn_start, assistant_message_id = turn
-        if not self._has_prior_completed_turn(messages, turn_start):
-            raise self._context_boundary_error(messages[:turn_start])
-        return messages[:turn_start], assistant_message_id
-
-    @staticmethod
-    def _latest_completed_turn(messages: list[ChatMessage]) -> tuple[int, str] | None:
-        """Return the start index and id for the latest assistant turn.
-
-        A turn-warning message immediately before an assistant response belongs to that
-        assistant turn, so it is unwound with the assistant response.
-        """
-        for index in range(len(messages) - 1, -1, -1):
-            msg = messages[index]
-            if isinstance(msg, SummaryMessage):
-                return None
-
-            if isinstance(msg, AssistantMessage):
-                if index > 0 and isinstance(messages[index - 1], TurnWarningMessage):
-                    return index - 1, msg.id
-                return index, msg.id
-
-        return None
-
-    @staticmethod
-    def _has_prior_completed_turn(messages: list[ChatMessage], before_index: int) -> bool:
-        for msg in reversed(messages[:before_index]):
-            if isinstance(msg, SummaryMessage):
-                return False
-            if isinstance(msg, AssistantMessage):
-                return True
-        return False
+        for message in reversed(messages):
+            if isinstance(message, SummaryMessage):
+                break
+            if isinstance(message, AssistantMessage):
+                return
+        raise self._context_boundary_error(messages)
 
     @staticmethod
     def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
@@ -1520,6 +1683,118 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         )
         return ContextOverflowError(f"Context overflow reached the {boundary}")
 
+    def _checkpoint_run_state(
+        self,
+        messages: list[ChatMessage],
+        full_message_history: list[list[ChatMessage]],
+        run_metadata: dict[str, list[Any]],
+        task_hash: str,
+    ) -> None:
+        """Snapshot canonical accepted messages and flat metadata for recovery."""
+        self._current_run_state = CacheState(
+            msgs=list(messages),
+            full_msg_history=[list(group) for group in full_message_history],
+            run_metadata={name: list(items) for name, items in run_metadata.items()},
+            task_hash=task_hash,
+            agent_name=self._name,
+        )
+
+    async def _execute_assistant_tool_calls(
+        self,
+        assistant_message: AssistantMessage,
+        tool_calls: list[ToolCall],
+        run_metadata: dict[str, list[Any]],
+        *,
+        initial_tool_messages: list[ToolMessage] | None = None,
+        initial_user_messages: list[UserMessage] | None = None,
+        adapt_text_only: bool,
+        on_tool_result: Callable[[AssistantMessage, list[ToolMessage], list[UserMessage]], None] | None = None,
+    ) -> tuple[list[ToolMessage], list[UserMessage], FinishParams | None]:
+        """Execute ordered calls and expose each complete accepted result before callbacks."""
+        finish_params: FinishParams | None = None
+        tool_messages = list(initial_tool_messages or [])
+        user_messages = list(initial_user_messages or [])
+        finish_call_names = [call.name for call in assistant_message.tool_calls if call.name in self._finish_tools]
+        reject_all_finish_calls = len(finish_call_names) > 1
+
+        for index, tool_call in enumerate(tool_calls):
+            skipped_messages: list[ToolMessage] = []
+            if reject_all_finish_calls and tool_call.name in self._finish_tools:
+                now = perf_counter()
+                tool_message = ToolMessage(
+                    content=(
+                        f"Cannot call finish tool '{tool_call.name}': multiple finish tools "
+                        f"({sorted(set(finish_call_names))}) were called in the same turn. "
+                        "Only one finish tool may be called per turn — retry with a single finish tool call."
+                    ),
+                    tool_call_id=tool_call.tool_call_id,
+                    name=tool_call.name,
+                    args_was_valid=True,
+                    success=False,
+                    tool_start_time=now,
+                    tool_end_time=now,
+                )
+            else:
+                tool_message = await self.run_tool(tool_call, run_metadata)
+
+            new_user_messages: list[UserMessage] = []
+            if adapt_text_only:
+                transformed, new_user_messages = _handle_text_only_tool_responses([tool_message])
+                tool_message = transformed[0]
+            tool_messages.append(tool_message)
+            user_messages.extend(new_user_messages)
+
+            if tool_message.success and tool_message.name in self._finish_tools:
+                finish_tool = self._finish_tools[tool_message.name]
+                finish_params = finish_tool.parameters.model_validate_json(
+                    tool_call.arguments if tool_call.arguments.strip() else "{}"
+                )
+                skipped_messages.extend(
+                    ToolMessage(
+                        content=(
+                            f"Skipped tool '{skipped_call.name}' because finish tool "
+                            f"'{tool_message.name}' completed successfully earlier in the same turn."
+                        ),
+                        tool_call_id=skipped_call.tool_call_id,
+                        name=skipped_call.name,
+                        success=False,
+                    )
+                    for skipped_call in tool_calls[index + 1 :]
+                )
+                tool_messages.extend(skipped_messages)
+
+            if on_tool_result is not None:
+                on_tool_result(assistant_message, list(tool_messages), list(user_messages))
+
+            self._logger.tool_result(tool_message)
+            for skipped_message in skipped_messages:
+                self._logger.tool_result(skipped_message)
+            for user_message in new_user_messages:
+                self._logger.user_message(user_message)
+            if finish_params is not None:
+                break
+
+        return tool_messages, user_messages, finish_params
+
+    async def _step_with_semantic_results(
+        self,
+        messages: list[ChatMessage],
+        run_metadata: dict[str, list[Any]],
+        turn: int,
+        max_turns: int,
+        on_tool_result: Callable[[AssistantMessage, list[ToolMessage], list[UserMessage]], None],
+    ) -> tuple[AssistantMessage, list[ToolMessage], list[UserMessage], FinishParams | None]:
+        assistant_message = await self._client.generate(messages, self._active_tools)
+        self._logger.assistant_message(turn, max_turns, assistant_message)
+        tool_messages, user_messages, finish_params = await self._execute_assistant_tool_calls(
+            assistant_message,
+            assistant_message.tool_calls,
+            run_metadata,
+            adapt_text_only=self._text_only_tool_responses,
+            on_tool_result=on_tool_result,
+        )
+        return assistant_message, tool_messages, user_messages, finish_params
+
     async def step(
         self,
         messages: list[ChatMessage],
@@ -1527,102 +1802,75 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         turn: int = 0,
         max_turns: int = 0,
     ) -> tuple[AssistantMessage, list[ToolMessage], FinishParams | None]:
-        """Execute one agent step: generate assistant message and run any requested tool calls.
-
-        Args:
-            messages: Current conversation messages
-            run_metadata: Metadata storage for tool results
-            turn: Current turn number (1-indexed) for logging
-            max_turns: Maximum turns for logging
-
-        Returns the assistant message, tool execution results, and finish tool call (if present).
-
-        """
+        """Execute one public agent step without text-only message adaptation."""
         assistant_message = await self._client.generate(messages, self._active_tools)
-
-        # Log assistant message immediately
         if turn > 0:
             self._logger.assistant_message(turn, max_turns, assistant_message)
-
-        finish_params: FinishParams | None = None
-        tool_messages: list[ToolMessage] = []
-        if assistant_message.tool_calls:
-            # If multiple finish tools were called in one turn, refuse all of them without
-            # executing — silently picking one would discard the model's other intent and
-            # may swap in contradictory params. Force the model to retry with a single call.
-            finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
-            reject_all_finish_calls = len(finish_call_names) > 1
-
-            for tool_call in assistant_message.tool_calls:
-                if finish_params is not None:
-                    tool_message = ToolMessage(
-                        content=(
-                            f"Skipped tool '{tool_call.name}' because a finish tool "
-                            "completed successfully earlier in the same turn."
-                        ),
-                        tool_call_id=tool_call.tool_call_id,
-                        name=tool_call.name,
-                        success=False,
-                    )
-                elif reject_all_finish_calls and tool_call.name in self._finish_tools:
-                    now = perf_counter()
-                    tool_message = ToolMessage(
-                        content=(
-                            f"Cannot call finish tool '{tool_call.name}': multiple finish tools "
-                            f"({sorted(set(finish_call_names))}) were called in the same turn. "
-                            "Only one finish tool may be called per turn — retry with a single "
-                            "finish tool call."
-                        ),
-                        tool_call_id=tool_call.tool_call_id,
-                        name=tool_call.name,
-                        args_was_valid=True,
-                        success=False,
-                        tool_start_time=now,
-                        tool_end_time=now,
-                    )
-                else:
-                    tool_message = await self.run_tool(tool_call, run_metadata)
-                    if tool_message.success and tool_message.name in self._finish_tools:
-                        finish_tool = self._finish_tools[tool_message.name]
-                        finish_params = finish_tool.parameters.model_validate_json(tool_call.arguments)
-
-                tool_messages.append(tool_message)
-                self._logger.tool_result(tool_message)
-
+        tool_messages, _user_messages, finish_params = await self._execute_assistant_tool_calls(
+            assistant_message,
+            assistant_message.tool_calls,
+            run_metadata,
+            adapt_text_only=False,
+        )
         return assistant_message, tool_messages, finish_params
 
     async def summarize_messages(
         self,
         messages: list[ChatMessage],
-        run_metadata_by_turn: dict[str, dict[str, list[Any]]],
+        run_metadata: dict[str, list[Any]],
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
-        """Summarize messages, unwinding completed turns if summarization overflows."""
-        current_messages = messages
-        while True:
+        """Summarize accepted messages without discarding their metadata."""
+        del run_metadata
+        return await self._summarize_message_prefix(messages, len(messages))
+
+    async def _summarize_older_context(
+        self,
+        messages: list[ChatMessage],
+    ) -> tuple[list[ChatMessage], list[ChatMessage]]:
+        """Summarize the largest fitting older prefix while retaining the latest turn."""
+        latest_summary_index = max(
+            (index for index, message in enumerate(messages) if isinstance(message, SummaryMessage)),
+            default=-1,
+        )
+        assistant_turns: list[tuple[int, AssistantMessage]] = []
+        for index, message in enumerate(messages):
+            if index <= latest_summary_index or not isinstance(message, AssistantMessage):
+                continue
+            turn_start = index - 1 if index > 0 and isinstance(messages[index - 1], TurnWarningMessage) else index
+            assistant_turns.append((turn_start, message))
+        if len(assistant_turns) < 2:
+            raise self._context_boundary_error(messages)
+
+        last_overflow: ContextOverflowError | None = None
+        for prefix_end, retained_assistant in reversed(assistant_turns[1:]):
+            if retained_assistant.token_usage.input >= self._client.max_tokens:
+                continue
             try:
-                task_context: list[ChatMessage] = list(
-                    takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), current_messages)
-                )
+                return await self._summarize_message_prefix(messages, prefix_end)
+            except ContextOverflowError as error:
+                last_overflow = error
+        if last_overflow is not None:
+            raise last_overflow
+        raise self._context_boundary_error(messages)
 
-                summary_prompt = [*current_messages, UserMessage(content=MESSAGE_SUMMARIZER)]
-
-                # Give the summarizer the active tools so it can interpret prior tool calls/results.
-                summary = await self._client.generate(summary_prompt, self._active_tools)
-
-                summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
-                summary_bridge = SummaryMessage(content=summary_bridge_prompt)
-                # Use a user acknowledgement to avoid consecutive assistant messages with strict providers.
-                acknowledgement_msg = UserMessage(content="Got it, thanks!")
-
-                summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
-                self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
-
-                return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
-            except ContextOverflowError:
-                # Summarization can overflow too; drop the latest completed turn and retry.
-                # _unwind_context_overflow raises if that would cross a progress boundary.
-                current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
-                run_metadata_by_turn.pop(dropped_turn_id, None)
+    async def _summarize_message_prefix(
+        self,
+        messages: list[ChatMessage],
+        prefix_end: int,
+    ) -> tuple[list[ChatMessage], list[ChatMessage]]:
+        """Summarize one complete prefix and retain its remainder unchanged."""
+        task_context = list(takewhile(lambda msg: not isinstance(msg, (AssistantMessage, SummaryMessage)), messages))
+        messages_to_summarize = messages[:prefix_end]
+        summary = await self._client.generate(
+            [*messages_to_summarize, UserMessage(content=MESSAGE_SUMMARIZER)],
+            self._active_tools,
+        )
+        summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
+        summary_bridge = SummaryMessage(content=summary_bridge_prompt)
+        acknowledgement = UserMessage(content="Got it, thanks!")
+        summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
+        self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
+        return messages_to_summarize, [*task_context, summary_bridge, acknowledgement, *messages[prefix_end:]]
 
     async def run(
         self,
@@ -1673,22 +1921,29 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             return await self._run(init_msgs, depth=depth)
 
         ambient_session_token = _SESSION_STATE.set(None)
-        reservation_owner = object()
-        task_hash = compute_task_hash(init_msgs)
-        cache_reserved = False
+        task_cache_ownership = _TaskCacheOwnership()
+        full_system_prompt = self._build_system_prompt()
+        task_hash = compute_task_hash(
+            init_msgs,
+            agent_name=self._name,
+            model_slug=self._client.model_slug,
+            system_prompt=full_system_prompt,
+            tool_definitions=self._tool_definitions,
+        )
         primary_exception: BaseException | None = None
         try:
             if self._cache_on_interrupt:
-                _reserve_cached_root_run(task_hash, reservation_owner)
-                cache_reserved = True
-            return await self._run(init_msgs, depth=depth, task_hash=task_hash)
+                task_cache_ownership.reserve(task_hash)
+            result = await self._run(init_msgs, depth=depth, task_hash=task_hash)
+            if result[0] is not None and self._clear_cache_on_success:
+                task_cache_ownership.clear_cache_if_owned(CacheManager(), task_hash)
+            return result
         except BaseException as exc:
             primary_exception = exc
             raise
         finally:
             try:
-                if cache_reserved:
-                    _release_cached_root_runs({task_hash}, reservation_owner)
+                task_cache_ownership.release()
             except BaseException as cleanup_failure:
                 if primary_exception is None:
                     raise
@@ -1707,146 +1962,204 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         task_hash: str | None = None,
     ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, Any]]:
         """Execute a run after its session ownership and ambient context are established."""
-        task_hash = task_hash or compute_task_hash(init_msgs)
-        state = _SESSION_STATE.get()
+        session_state = _SESSION_STATE.get()
+        full_system_prompt = self._build_system_prompt()
+        task_hash = task_hash or compute_task_hash(
+            init_msgs,
+            agent_name=self._name,
+            model_slug=self._client.model_slug,
+            system_prompt=full_system_prompt,
+            tool_definitions=self._tool_definitions,
+            input_files=session_state.cache_input_files if session_state else (),
+            skill_files=session_state.cache_skill_files if session_state else (),
+        )
         if (
             isinstance(self, SessionAgent)
-            and self._cache_on_interrupt
-            and state is not None
-            and state.depth == 0
-            and task_hash not in self._reserved_cache_task_hashes
+            and (self._cache_on_interrupt or self._resume)
+            and session_state is not None
+            and session_state.depth == 0
         ):
-            _reserve_cached_root_run(task_hash, self)
-            self._reserved_cache_task_hashes.add(task_hash)
+            self._task_cache_ownership.reserve(task_hash)
         self._current_task_hash = task_hash
+        self._last_finish_params = None
+        self._last_run_metadata = {}
 
-        # Initialize cache manager
-        cache_manager = CacheManager(clear_on_success=self._clear_cache_on_success)
+        cache_manager = CacheManager()
         resumed = False
-        cached_run_metadata_by_turn: dict[str, dict[str, list[Any]]] | None = None
+        restored_progress = None
+        run_metadata: dict[str, list[Any]] = {}
 
-        # Try to resume from cache if requested
         if self._resume:
-            state = _SESSION_STATE.get()
-            if state is None:
+            if session_state is None:
                 raise RuntimeError("Cannot resume an Agent run without an active session")
-            cached = cache_manager.load_state(task_hash)
-            if cached:
-                # Restore files to exec env
-                if state.exec_env and state.exec_env.temp_dir:
-                    cache_manager.restore_files(task_hash, state.exec_env.temp_dir)
-
-                # Restore state
+            restore_dir = session_state.exec_env.temp_dir if session_state.exec_env else None
+            if session_state.exec_env and restore_dir is None:
+                cached = None
+                self._logger.warning(
+                    f"Resume caching is unavailable for {type(session_state.exec_env).__name__}; starting fresh"
+                )
+            else:
+                cached = self._task_cache_ownership.load_state(
+                    cache_manager,
+                    task_hash,
+                    restore_files_to=restore_dir,
+                    finish_tools=self._finish_tools,
+                )
+            if cached is not None:
                 msgs = cached.msgs
                 full_msg_history = cached.full_msg_history
-                cached_run_metadata_by_turn = cached.run_metadata_by_turn
+                run_metadata.update(cached.run_metadata)
+                restored_progress = cached.message_progress
+                self._current_run_state = cached
                 resumed = True
-                restored_turn = _get_turn_count(full_msg_history, msgs)
-                self._logger.info(f"Resuming from cached state at turn {restored_turn}")
+                self._logger.info(f"Resuming from cached state at turn {_get_turn_count(full_msg_history, msgs)}")
             else:
                 self._logger.info(f"No cache found for task {task_hash}, starting fresh")
 
         if not resumed:
-            msgs: list[ChatMessage] = []
-
-            # Build the complete system prompt (base + input files + user instructions)
-            full_system_prompt = self._build_system_prompt()
-            msgs.append(SystemMessage(content=full_system_prompt))
-
+            msgs: list[ChatMessage] = [SystemMessage(content=full_system_prompt)]
             if isinstance(init_msgs, str):
                 msgs.append(UserMessage(content=init_msgs))
             else:
                 msgs.extend(init_msgs)
-
             full_msg_history: list[list[ChatMessage]] = []
 
-        # Set logger depth if provided (for sub-agent runs)
         if depth is not None:
             self._logger.depth = depth
-
-        # Log the task at run start (only if not resuming)
         if not resumed:
             self._logger.task_message(msgs[-1].content)
-
-        # Show warnings (top-level only, if logger supports it)
         if self._logger.depth == 0 and isinstance(self._logger, AgentLogger):
             run_warnings = self._collect_warnings()
             if run_warnings:
                 self._logger.warnings_message(run_warnings)
 
-        # Use logger callback if available and not overridden
-        step_callback = self._logger.on_step
-        run_metadata_by_turn: dict[str, dict[str, list[Any]]] = {}
-        if cached_run_metadata_by_turn is not None:
-            run_metadata_by_turn.update(cached_run_metadata_by_turn)
-
-        # Cumulative stats for spinner
-        total_tool_calls = 0
-        total_input_tokens = 0
-        total_output_tokens = 0
         finish_params: FinishParams | None = None
+        if restored_progress is not None:
+            finish_params = cast(FinishParams | None, restored_progress.finish_params)
 
-        while _get_turn_count(full_msg_history, msgs) < self._max_turns:
-            turn = _get_turn_count(full_msg_history, msgs)
-            # Capture current state for potential caching (before any async work)
-            self._current_run_state = CacheState(
-                msgs=list(msgs),
-                full_msg_history=[list(group) for group in full_msg_history],
-                run_metadata_by_turn={turn_id: dict(metadata) for turn_id, metadata in run_metadata_by_turn.items()},
-                task_hash=task_hash,
-                agent_name=self._name,
+        all_accepted_messages = [*chain.from_iterable(full_msg_history), *msgs]
+        total_tool_calls = sum(isinstance(message, ToolMessage) for message in all_accepted_messages)
+        accepted_assistants = [message for message in all_accepted_messages if isinstance(message, AssistantMessage)]
+        total_input_tokens = sum(message.token_usage.input for message in accepted_assistants)
+        total_output_tokens = sum(message.token_usage.output for message in accepted_assistants)
+        step_callback = self._logger.on_step
+
+        if finish_params is None and restored_progress is not None and restored_progress.pending_calls:
+            pending_assistant = restored_progress.assistant
+            pending_assistant_index = restored_progress.assistant_index
+            if pending_assistant is None or pending_assistant_index is None:
+                raise ValueError("Cached pending calls have no assistant message")
+            pending_prefix = msgs[:pending_assistant_index]
+
+            def checkpoint_pending_result(
+                assistant: AssistantMessage,
+                partial_tool_messages: list[ToolMessage],
+                partial_user_messages: list[UserMessage],
+            ) -> None:
+                self._checkpoint_run_state(
+                    [*pending_prefix, assistant, *partial_tool_messages, *partial_user_messages],
+                    full_msg_history,
+                    run_metadata,
+                    task_hash,
+                )
+
+            resumed_tool_messages, resumed_user_messages, finish_params = await self._execute_assistant_tool_calls(
+                pending_assistant,
+                list(restored_progress.pending_calls),
+                run_metadata,
+                initial_tool_messages=list(restored_progress.tool_messages),
+                initial_user_messages=list(restored_progress.user_messages),
+                adapt_text_only=self._text_only_tool_responses,
+                on_tool_result=checkpoint_pending_result,
             )
+            msgs[:] = [
+                *pending_prefix,
+                pending_assistant,
+                *resumed_tool_messages,
+                *resumed_user_messages,
+            ]
+            self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
+            total_tool_calls += len(resumed_tool_messages) - len(restored_progress.tool_messages)
+            step_callback(
+                _get_turn_count(full_msg_history, msgs),
+                total_tool_calls,
+                total_input_tokens,
+                total_output_tokens,
+            )
+
+        while finish_params is None and _get_turn_count(full_msg_history, msgs) < self._max_turns:
+            turn = _get_turn_count(full_msg_history, msgs)
+            self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
             if self._max_turns - turn <= self._turns_remaining_warning_threshold and turn != 0:
-                num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - turn)
-                msgs.append(num_turns_remaining_msg)
-                self._logger.user_message(num_turns_remaining_msg)
+                warning_message = _num_turns_remaining_msg(self._max_turns - turn)
+                msgs.append(warning_message)
+                self._logger.user_message(warning_message)
 
             while True:
-                turn_metadata: dict[str, list[Any]] = {}
+                checkpoint_prefix = list(msgs)
+
+                def checkpoint_tool_result(
+                    assistant: AssistantMessage,
+                    partial_tool_messages: list[ToolMessage],
+                    partial_user_messages: list[UserMessage],
+                    accepted_prefix: list[ChatMessage] = checkpoint_prefix,
+                ) -> None:
+                    self._checkpoint_run_state(
+                        [*accepted_prefix, assistant, *partial_tool_messages, *partial_user_messages],
+                        full_msg_history,
+                        run_metadata,
+                        task_hash,
+                    )
+
                 try:
-                    # Pass turn info to step() for real-time logging
-                    assistant_message, tool_messages, finish_params = await self.step(
+                    (
+                        assistant_message,
+                        tool_messages,
+                        user_messages,
+                        finish_params,
+                    ) = await self._step_with_semantic_results(
                         msgs,
-                        turn_metadata,
-                        turn=_get_turn_count(full_msg_history, msgs) + 1,
+                        run_metadata,
+                        turn=turn + 1,
                         max_turns=self._max_turns,
+                        on_tool_result=checkpoint_tool_result,
                     )
                     break
                 except ContextOverflowError:
-                    msgs, dropped_turn_id = self._unwind_context_overflow(msgs)
-                    run_metadata_by_turn.pop(dropped_turn_id, None)
+                    self._validate_context_overflow_recovery(msgs)
+                    try:
+                        messages_to_summarize, compressed_messages = await self._summarize_older_context(msgs)
+                    except ContextOverflowError as error:
+                        self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
+                        raise self._context_boundary_error(msgs) from error
+                    full_msg_history.append(messages_to_summarize)
+                    msgs = compressed_messages
+                    self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
+                    turn = _get_turn_count(full_msg_history, msgs)
 
-            # Update cumulative stats
-            run_metadata_by_turn[assistant_message.id] = turn_metadata
+            accepted_messages = [*msgs, assistant_message, *tool_messages, *user_messages]
+            self._checkpoint_run_state(accepted_messages, full_msg_history, run_metadata, task_hash)
             accepted_turn = _get_turn_count(full_msg_history, msgs) + 1
             total_tool_calls += len(tool_messages)
             total_input_tokens += assistant_message.token_usage.input
             total_output_tokens += assistant_message.token_usage.output
+            step_callback(accepted_turn, total_tool_calls, total_input_tokens, total_output_tokens)
 
-            # Call progress callback after step completes
-            if step_callback:
-                step_callback(accepted_turn, total_tool_calls, total_input_tokens, total_output_tokens)
-
-            user_messages: list[UserMessage] = []
-            if self._text_only_tool_responses:
-                tool_messages, user_messages = _handle_text_only_tool_responses(tool_messages)
-
-            # Log user messages (e.g., image content extracted from tool responses)
-            for user_msg in user_messages:
-                self._logger.user_message(user_msg)
-
-            msgs.extend([assistant_message, *tool_messages, *user_messages])
-
-            if finish_params:
+            msgs[:] = accepted_messages
+            if finish_params is not None:
                 break
 
             pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
             if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
-                messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
+                try:
+                    messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata)
+                except ContextOverflowError as error:
+                    self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
+                    raise self._context_boundary_error(msgs) from error
                 full_msg_history.append(messages_to_summarize)
+                self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
 
-            # Avoid successive assistant messages (only if next turn won't show turns remaining)
             next_turn_will_show_warning = self._max_turns - accepted_turn <= self._turns_remaining_warning_threshold
             if (
                 self._block_successive_assistant_messages
@@ -1854,31 +2167,25 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 and not user_messages
                 and not next_turn_will_show_warning
             ):
-                msgs.extend([UserMessage(content="Please continue the task")])
+                msgs.append(UserMessage(content="Please continue the task"))
+                self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
 
         if finish_params is None:
             LOGGER.error(
-                f"Maximum number of turns reached: {self._max_turns}. The agent was not able to finish the task. Consider increasing the max_turns parameter.",
+                f"Maximum number of turns reached: {self._max_turns}. The agent was not able to finish the task. Consider increasing the max_turns parameter."
             )
 
         full_msg_history.append(msgs)
-
-        # Add agent's own token usage, tool durations, and model speed to run_metadata
-        run_metadata = _merge_run_metadata(run_metadata_by_turn)
-        run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
-        run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
-        run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]
-        # Store for __aexit__ to access (on instance for this agent)
+        public_run_metadata = {name: list(items) for name, items in run_metadata.items()}
+        public_run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
+        public_run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
+        public_run_metadata["_model_speed"] = _get_model_speed_stats(  # type: ignore[assignment]
+            full_msg_history,
+            self._client.model_slug,
+        )
         self._last_finish_params = finish_params
-        self._last_run_metadata = run_metadata
-
-        # Clear cache on successful completion (finish_params is set)
-        if finish_params is not None and cache_manager.clear_on_success:
-            cache_manager.clear_cache(task_hash)
-            self._current_task_hash = None
-            self._current_run_state = None
-
-        return finish_params, full_msg_history, run_metadata
+        self._last_run_metadata = public_run_metadata
+        return finish_params, full_msg_history, public_run_metadata
 
     def to_tool(
         self,
@@ -2075,9 +2382,10 @@ class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, Fini
         session: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
         session.__dict__ = agent.__dict__.copy()
         session._tools = session_tools
-        session._finish_tools = dict(agent._finish_tools)  # noqa: SLF001
-        session._active_tools = {tool.name: tool for tool in session_tools if isinstance(tool, Tool)}
-        session._active_tools.update(session._finish_tools)
+        session._active_tools, session._finish_tools, session._tool_definitions = build_tool_registry(
+            (tool for tool in session_tools if isinstance(tool, Tool)),
+            agent._finish_tools.values(),  # noqa: SLF001
+        )
         session._has_tool_providers = any(isinstance(tool, ToolProvider) for tool in session_tools)
         session._logger = session_logger
 
@@ -2099,5 +2407,5 @@ class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, Fini
         session._interrupt_handler_installed = False
         session._custom_session_resources = custom_resources
         session._custom_resources_reserved = False
-        session._reserved_cache_task_hashes = set()
+        session._task_cache_ownership = _TaskCacheOwnership()
         return session

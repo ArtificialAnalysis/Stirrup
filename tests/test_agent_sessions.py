@@ -2,6 +2,7 @@
 
 import json
 import signal
+from collections.abc import Mapping
 from io import StringIO
 from pathlib import Path
 from typing import Any, Self
@@ -14,7 +15,7 @@ from rich.console import Console
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
-from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
+from stirrup.core.cache import CacheManager, CacheState
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -502,10 +503,21 @@ async def test_concurrent_identical_cached_root_run_is_rejected_before_cache_io(
     load_count = 0
     original_load_state = CacheManager.load_state
 
-    def count_load(cache_manager: CacheManager, task_hash: str) -> CacheState | None:
+    def count_load(
+        cache_manager: CacheManager,
+        task_hash: str,
+        *,
+        restore_files_to: Path | None = None,
+        finish_tools: Mapping[str, Tool[Any, Any]] | None = None,
+    ) -> CacheState | None:
         nonlocal load_count
         load_count += 1
-        return original_load_state(cache_manager, task_hash)
+        return original_load_state(
+            cache_manager,
+            task_hash,
+            restore_files_to=restore_files_to,
+            finish_tools=finish_tools,
+        )
 
     monkeypatch.setattr(CacheManager, "load_state", count_load)
 
@@ -574,7 +586,10 @@ async def test_successful_run_keeps_task_cache_reserved_until_failed_session_tea
         fail_body.set()
         await teardown_finished.wait()
 
-    cached = CacheManager(cache_base_dir=tmp_path).load_state(compute_task_hash("same cached prompt"))
+    cache_manager = CacheManager(cache_base_dir=tmp_path)
+    cache_hashes = cache_manager.list_caches()
+    assert len(cache_hashes) == 1
+    cached = cache_manager.load_state(cache_hashes[0])
     assert cached is not None
     assert cached.agent_name == "teardown-cache-owner"
 
@@ -583,6 +598,57 @@ async def test_successful_run_keeps_task_cache_reserved_until_failed_session_tea
 
     assert finish_params is not None
     assert finish_params.reason == "after teardown"
+
+
+async def test_cache_disabled_teardown_cannot_clear_an_active_runs_terminal_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", tmp_path)
+    cache_owner_provider = BlockingCleanupProvider()
+    cache_owner = Agent(
+        client=ScriptedClient([_finish_response("terminal", "finish-owner")]),
+        name="terminal-cache-owner",
+        tools=[cache_owner_provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+    cache_disabled = Agent(
+        client=ScriptedClient([_finish_response("overlap", "finish-disabled")]),
+        name="terminal-cache-owner",
+        tools=[CustomProvider()],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+
+    async def finish_then_fail_teardown() -> None:
+        with pytest.raises(RuntimeError) as exc_info:
+            async with cache_owner.session(resume=True) as session:
+                await session.run("same terminal prompt")
+        assert exc_info.value is cache_owner_provider.first_cleanup_error
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(finish_then_fail_teardown)
+        await cache_owner_provider.cleanup_started.wait()
+
+        async with cache_disabled.session(cache_on_interrupt=False) as session:
+            finish_params, _, _ = await session.run("same terminal prompt")
+        assert finish_params is not None and finish_params.reason == "overlap"
+        assert len(CacheManager(cache_base_dir=tmp_path).list_caches()) == 1
+
+        cache_owner_provider.cleanup_allowed.set()
+
+    resumed = Agent(
+        client=ScriptedClient([]),
+        name="terminal-cache-owner",
+        tools=[CustomProvider()],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+    async with resumed.session(resume=True) as session:
+        finish_params, _, _ = await session.run("same terminal prompt")
+
+    assert finish_params is not None and finish_params.reason == "terminal"
+    assert CacheManager(cache_base_dir=tmp_path).list_caches() == []
 
 
 async def test_concurrent_calls_to_same_subagent_are_isolated() -> None:
@@ -701,6 +767,79 @@ async def test_provider_free_base_run_releases_task_cache_reservation_after_fail
     assert exc_info.value is run_error
     assert finish_params is not None
     assert finish_params.reason == "reused"
+
+
+async def test_provider_free_direct_success_clears_a_max_turn_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", tmp_path)
+    direct_error = RuntimeError("direct run failed")
+    agent = Agent(
+        client=ScriptedClient(
+            [
+                AssistantMessage(content="not finished", tool_calls=[], token_usage=TokenUsage()),
+                direct_error,
+                _finish_response("direct success", "finish-direct"),
+            ]
+        ),
+        name="direct-cache-cleanup",
+        max_turns=1,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+
+    async with agent.session() as session:
+        finish_params, _, _ = await session.run("same direct prompt")
+    assert finish_params is None
+    assert len(CacheManager(cache_base_dir=tmp_path).list_caches()) == 1
+
+    with pytest.raises(RuntimeError, match="direct run failed") as exc_info:
+        await agent.run("same direct prompt")
+    assert exc_info.value is direct_error
+    assert len(CacheManager(cache_base_dir=tmp_path).list_caches()) == 1
+
+    finish_params, _, _ = await agent.run("same direct prompt")
+
+    assert finish_params is not None and finish_params.reason == "direct success"
+    assert CacheManager(cache_base_dir=tmp_path).list_caches() == []
+
+
+async def test_provider_free_direct_cache_clear_failure_releases_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_error = RuntimeError("direct cache clear failed")
+    original_clear_cache = CacheManager.clear_cache
+    clear_attempts = 0
+
+    def fail_first_clear(cache_manager: CacheManager, task_hash: str) -> None:
+        nonlocal clear_attempts
+        clear_attempts += 1
+        if clear_attempts == 1:
+            raise clear_error
+        original_clear_cache(cache_manager, task_hash)
+
+    monkeypatch.setattr(CacheManager, "clear_cache", fail_first_clear)
+    agent = Agent(
+        client=ScriptedClient(
+            [
+                _finish_response("first", "finish-first"),
+                _finish_response("reused", "finish-reused"),
+            ]
+        ),
+        name="direct-clear-failure",
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+
+    with pytest.raises(RuntimeError, match="direct cache clear failed") as exc_info:
+        await agent.run("same direct prompt")
+    finish_params, _, _ = await agent.run("same direct prompt")
+
+    assert exc_info.value is clear_error
+    assert finish_params is not None and finish_params.reason == "reused"
+    assert clear_attempts == 2
 
 
 async def test_provider_free_base_run_is_independent_inside_an_active_session(tmp_path: Path) -> None:
@@ -1238,7 +1377,10 @@ async def test_worker_thread_failure_is_cached_without_masking_original_error(
         await anyio.to_thread.run_sync(run_in_worker)  # ty: ignore[unresolved-attribute]
 
     assert exc_info.value is original_error
-    cached = CacheManager(cache_base_dir=tmp_path).load_state(compute_task_hash(prompt))
+    cache_manager = CacheManager(cache_base_dir=tmp_path)
+    cache_hashes = cache_manager.list_caches()
+    assert len(cache_hashes) == 1
+    cached = cache_manager.load_state(cache_hashes[0])
     assert cached is not None
     assert cached.agent_name == "worker-cache"
 

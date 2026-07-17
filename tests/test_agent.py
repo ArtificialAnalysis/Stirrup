@@ -21,6 +21,7 @@ from stirrup.core.models import (
     Tool,
     ToolCall,
     ToolMessage,
+    ToolProvider,
     ToolResult,
     TurnWarningMessage,
     UserMessage,
@@ -259,6 +260,7 @@ async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
+        AssistantMessage(content="Condensed first step", tool_calls=[], token_usage=TokenUsage()),
         AssistantMessage(
             content="Recovered",
             tool_calls=[
@@ -286,10 +288,10 @@ async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
 
     assert finish_params is not None
     assert finish_params.reason == "Recovered"
-    assert client.call_count == 4
+    assert client.call_count == 5
     assistant_contents = [msg.content for group in history for msg in group if isinstance(msg, AssistantMessage)]
     assert "First step" in assistant_contents
-    assert "Second step" not in assistant_contents
+    assert "Second step" in assistant_contents
 
 
 async def test_context_overflow_removes_unwound_turn_metadata() -> None:
@@ -321,6 +323,7 @@ async def test_context_overflow_removes_unwound_turn_metadata() -> None:
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
+        AssistantMessage(content="Condensed first step", tool_calls=[], token_usage=TokenUsage()),
         AssistantMessage(
             content="Recovered",
             tool_calls=[
@@ -347,8 +350,8 @@ async def test_context_overflow_removes_unwound_turn_metadata() -> None:
         finish_params, history, run_metadata = await session.run([UserMessage(content="Test task")])
 
     assert finish_params is not None
-    assert "marker" not in run_metadata
-    assert not any(msg.name == "marker" for group in history for msg in group if isinstance(msg, ToolMessage))
+    assert run_metadata["marker"] == [MarkerMetadata(value="dropped")]
+    assert any(msg.name == "marker" for group in history for msg in group if isinstance(msg, ToolMessage))
 
 
 async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
@@ -364,11 +367,7 @@ async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
-        AssistantMessage(
-            content="Recovered second step",
-            tool_calls=[],
-            token_usage=TokenUsage(input=100, answer=50),
-        ),
+        AssistantMessage(content="Condensed first step", tool_calls=[], token_usage=TokenUsage()),
         AssistantMessage(
             content="Done",
             tool_calls=[
@@ -399,22 +398,22 @@ async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
 
     assert finish_params is not None
     assert finish_params.reason == "Finished after recovery"
-    assert assistant_contents == ["First step", "Recovered second step", "Done"]
+    assert assistant_contents == ["First step", "Second step", "Done"]
 
 
-async def test_cache_state_preserves_run_metadata_by_turn() -> None:
+async def test_cache_state_preserves_flat_run_metadata() -> None:
     state = CacheState(
         msgs=[UserMessage(content="Test task")],
         full_msg_history=[],
-        run_metadata_by_turn={"assistant-id": {"marker": [{"value": "kept"}]}},
+        run_metadata={"marker": [{"value": "kept"}]},
         task_hash="task",
     )
 
     data = state.to_dict()
     restored = CacheState.from_dict(data)
 
-    assert "run_metadata" not in data
-    assert restored.run_metadata_by_turn == {"assistant-id": {"marker": [{"value": "kept"}]}}
+    assert "run_metadata_by_turn" not in data
+    assert restored.run_metadata == {"marker": [{"value": "kept"}]}
 
 
 async def test_cache_state_preserves_special_user_message_types() -> None:
@@ -425,7 +424,7 @@ async def test_cache_state_preserves_special_user_message_types() -> None:
             UserMessage(content="Regular user message"),
         ],
         full_msg_history=[],
-        run_metadata_by_turn={},
+        run_metadata={},
         task_hash="task",
     )
 
@@ -1070,6 +1069,36 @@ async def test_tools_finish_tool_name_collision_raises_at_init() -> None:
         )
 
 
+def test_duplicate_static_tool_names_are_rejected() -> None:
+    executions: list[str] = []
+
+    with pytest.raises(ValueError, match="duplicated across ordinary tools"):
+        Agent(
+            client=MockLLMClient([]),
+            name="duplicate-static",
+            tools=[recording_tool("duplicate", executions), recording_tool("duplicate", executions)],
+        )
+
+
+async def test_duplicate_provider_resolved_tool_name_is_rejected() -> None:
+    executions: list[str] = []
+    duplicate = recording_tool("duplicate", executions)
+
+    class DuplicateProvider(ToolProvider):
+        async def __aenter__(self) -> Tool:
+            return recording_tool("duplicate", executions)
+
+    agent = Agent(
+        client=MockLLMClient([]),
+        name="duplicate-provider",
+        tools=[duplicate, DuplicateProvider()],
+    )
+
+    with pytest.raises(ValueError, match="duplicated across ordinary tools"):
+        async with agent.session():
+            pass
+
+
 async def test_finish_tool_validates_file_paths() -> None:
     """Test that SIMPLE_FINISH_TOOL rejects non-existent file paths."""
     from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
@@ -1305,7 +1334,7 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
     assert summaries_1[0].content != summaries_2[0].content
 
 
-async def test_summarization_context_overflow_unwinds_and_retries() -> None:
+async def test_summarization_context_overflow_preserves_accepted_turns_and_raises() -> None:
     responses = [
         AssistantMessage(
             content="First step",
@@ -1347,11 +1376,7 @@ async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     )
 
     async with agent.session() as session:
-        finish_params, history, _ = await session.run(
-            [SystemMessage(content="System prompt"), UserMessage(content="Do the task")]
-        )
+        with pytest.raises(ContextOverflowError, match="original prompt"):
+            await session.run([SystemMessage(content="System prompt"), UserMessage(content="Do the task")])
 
-    assert finish_params is not None
-    assert finish_params.reason == "Completed"
-    assert client.call_count == 5
-    assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+    assert client.call_count == 3

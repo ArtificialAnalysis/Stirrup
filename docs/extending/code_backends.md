@@ -26,6 +26,10 @@ separate backend instances. Stirrup rejects overlap on the same configured
 instance before entering resources. Exact built-in backends are reconstructed
 privately for each session.
 
+Filesystem resume is exact for backends whose `temp_dir` exposes the complete
+Stirrup-managed working root. Backends without such a local root start fresh on
+resume; Stirrup does not attempt a partial remote filesystem reconstruction.
+
 ## Minimal Implementation
 
 ```python

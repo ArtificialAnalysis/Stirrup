@@ -10,7 +10,7 @@ from io import BytesIO
 from math import isinf, isnan, sqrt
 from tempfile import NamedTemporaryFile
 from types import TracebackType
-from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, overload, runtime_checkable
+from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, cast, overload, runtime_checkable
 from uuid import uuid4
 
 import filetype
@@ -254,6 +254,24 @@ class Addable(Protocol):
     def __add__(self, other: Self) -> Self: ...
 
 
+class _UnresolvedMetadata(dict[str, Any]):
+    """Cached application metadata whose model class is not safely available."""
+
+    def __init__(self, module: str, qualname: str, payload: dict[str, Any], reason: str) -> None:
+        super().__init__(payload)
+        self.module = module
+        self.qualname = qualname
+        self.reason = reason
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return dict(self)
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return self.module, self.qualname
+
+
 def _merge_dicts(a: dict, b: dict) -> dict:
     """Deep merge two dicts, recursively merging nested dicts and summing numbers."""
     merged = dict(a)
@@ -277,10 +295,60 @@ def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
     """Aggregate a list of metadata using __add__, with fallback for dicts."""
     if not metadata_list:
         return None
+
+    live_models = [item for item in metadata_list if isinstance(item, BaseModel)]
+    live_model_types = {type(model) for model in live_models}
+    if len(live_model_types) > 1:
+        model_names = sorted(model.__name__ for model in live_model_types)
+        raise TypeError(f"Cannot aggregate metadata with multiple live model types: {model_names}")
+
+    unresolved = [item for item in metadata_list if isinstance(item, _UnresolvedMetadata)]
+    if unresolved:
+        if not live_models:
+            if len(metadata_list) == 1:
+                return metadata_list[0]
+            identities = sorted({f"{item.module}.{item.qualname}" for item in unresolved})
+            raise TypeError(f"Cannot aggregate unresolved cached metadata types: {identities}")
+
+        model_type = type(live_models[0])
+        expected_identity = (model_type.__module__, model_type.__qualname__)
+        if any(item.identity != expected_identity for item in unresolved):
+            raise TypeError(
+                f"Cached metadata type does not match live model {model_type.__module__}.{model_type.__qualname__}"
+            )
+        restored_metadata: list[T] = []
+        for item in metadata_list:
+            if isinstance(item, _UnresolvedMetadata):
+                try:
+                    item = model_type.model_validate(item.payload)
+                except ValueError as exc:
+                    raise TypeError(f"Cached metadata does not match live model {model_type.__name__}") from exc
+            restored_metadata.append(item)  # type: ignore[arg-type]
+        metadata_list = restored_metadata
+        live_models = [item for item in metadata_list if isinstance(item, BaseModel)]
+
+    if live_models and any(isinstance(item, dict) for item in metadata_list):
+        model_type = type(live_models[0])
+        restored_models: list[T] = []
+        for item in metadata_list:
+            if isinstance(item, dict):
+                try:
+                    item = model_type.model_validate(item)
+                except ValueError as exc:
+                    raise TypeError(f"Cached metadata does not match live model {model_type.__name__}") from exc
+            restored_models.append(item)  # type: ignore[arg-type]
+        metadata_list = restored_models
+
     aggregated: T = metadata_list[0]
     for m in metadata_list[1:]:
-        if isinstance(aggregated, dict) and isinstance(m, dict):
-            aggregated = _merge_dicts(aggregated, m)  # type: ignore[assignment]
+        if isinstance(aggregated, dict) or isinstance(m, dict):
+            left = aggregated.model_dump() if isinstance(aggregated, BaseModel) else aggregated
+            right = m.model_dump() if isinstance(m, BaseModel) else m
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                raise TypeError(
+                    f"Cannot aggregate mixed metadata types: {type(aggregated).__name__}, {type(m).__name__}"
+                )
+            aggregated = cast(T, _merge_dicts(left, right))
         else:
             aggregated = aggregated + m  # type: ignore[assignment]
     return aggregated
@@ -296,6 +364,9 @@ def to_json_serializable(value: object) -> object:
         if isnan(value) or isinf(value):
             raise ValueError(f"Cannot serialize {value} to JSON")
         return value
+
+    if isinstance(value, _UnresolvedMetadata):
+        return to_json_serializable(value.payload)
 
     # Pydantic models
     if isinstance(value, BaseModel):
