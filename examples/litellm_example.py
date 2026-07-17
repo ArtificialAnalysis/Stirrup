@@ -19,7 +19,11 @@ async def main() -> None:
     # --8<-- [start:client]
     # Create LiteLLM client for Anthropic Claude
     # See https://docs.litellm.ai/docs/providers for all supported providers
-    client = LiteLLMClient(model_slug="anthropic/claude-sonnet-4-5", max_tokens=64_000)
+    client = LiteLLMClient(
+        model_slug="anthropic/claude-sonnet-4-5",
+        max_tokens=8_192,
+        context_window_tokens=64_000,
+    )
 
     # Pass client to Agent - model info comes from client.model_slug
     agent = Agent(

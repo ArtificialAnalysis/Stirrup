@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
 from stirrup.core.cache import CacheState
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -52,6 +52,26 @@ class MockLLMClient(LLMClient):
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class ContextWindowLLMClient(MockLLMClient):
+    """Mock client exposing the optional context-window capability."""
+
+    def __init__(
+        self,
+        responses: list[AssistantMessage | Exception],
+        *,
+        max_tokens: int,
+        context_window_tokens: int | None,
+    ) -> None:
+        super().__init__(responses, max_tokens=max_tokens)
+        self._configured_context_window_tokens = context_window_tokens
+        self.context_window_reads = 0
+
+    @property
+    def context_window_tokens(self) -> int | None:
+        self.context_window_reads += 1
+        return self._configured_context_window_tokens
 
 
 def _sample_png_block() -> ImageContentBlock:
@@ -107,6 +127,141 @@ async def test_agent_basic_finish() -> None:
     # Agent's own token usage metadata should be present
     assert "token_usage" in run_metadata
     assert len(message_history) == 1  # One turn
+    assert client.call_count == 1
+
+
+async def test_output_limit_does_not_control_context_summarization() -> None:
+    responses = [
+        AssistantMessage(content="Working", tool_calls=[], token_usage=TokenUsage(input=700, answer=100)),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": []}',
+                    tool_call_id="finish",
+                )
+            ],
+            token_usage=TokenUsage(),
+        ),
+    ]
+    client = ContextWindowLLMClient(
+        responses,
+        max_tokens=100,
+        context_window_tokens=64_000,
+    )
+    agent = Agent(
+        client=client,
+        name="separate-budget-agent",
+        max_turns=2,
+        tools=[],
+        context_summarization_cutoff=0.7,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        finish_params, _history, _metadata = await session.run("complete the task")
+
+    assert finish_params is not None
+    assert client.call_count == 2
+    assert client.context_window_reads == 1
+
+
+async def test_legacy_llmclient_subclass_falls_back_to_max_tokens() -> None:
+    class LegacyLLMClient(LLMClient):
+        """Client written against the protocol before context budgets were separate."""
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        @property
+        def model_slug(self) -> str:
+            return "legacy-model"
+
+        @property
+        def max_tokens(self) -> int:
+            return 1_000
+
+        async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+            del messages, tools
+            self.call_count += 1
+            return AssistantMessage(
+                content="Done",
+                tool_calls=[
+                    ToolCall(
+                        name=DEFAULT_FINISH_TOOL_NAME,
+                        arguments='{"reason": "done", "paths": []}',
+                        tool_call_id="legacy-finish",
+                    )
+                ],
+                token_usage=TokenUsage(),
+            )
+
+    client = LegacyLLMClient()
+    assert isinstance(client, LLMClient)
+    assert not hasattr(client, "context_window_tokens")
+    agent = Agent(client=client, name="legacy-client-agent", tools=[])
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        finish_params, _history, _metadata = await session.run("complete the task")
+
+    assert finish_params is not None
+    assert client.call_count == 1
+
+
+async def test_none_context_capability_falls_back_to_max_tokens() -> None:
+    responses = [
+        AssistantMessage(content="Working", tool_calls=[], token_usage=TokenUsage(input=800)),
+        AssistantMessage(content="Summary", tool_calls=[], token_usage=TokenUsage()),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": []}',
+                    tool_call_id="finish",
+                )
+            ],
+            token_usage=TokenUsage(),
+        ),
+    ]
+    client = ContextWindowLLMClient(responses, max_tokens=1_000, context_window_tokens=None)
+    agent = Agent(
+        client=client,
+        name="none-context-agent",
+        max_turns=2,
+        tools=[],
+        context_summarization_cutoff=0.7,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        finish_params, history, _metadata = await session.run("complete the task")
+
+    assert finish_params is not None
+    assert client.call_count == 3
+    assert client.context_window_reads == 1
+    assert any(isinstance(message, SummaryMessage) for message in history[-1])
+
+
+def test_agent_rejects_nonpositive_resolved_context_window() -> None:
+    client = ContextWindowLLMClient([], max_tokens=1_000, context_window_tokens=0)
+
+    with pytest.raises(ValueError, match="context_window_tokens must be positive"):
+        Agent(client=client, name="invalid-context-agent", tools=[])
+
+
+async def test_output_token_limit_surfaces_without_agent_retry_or_recovery() -> None:
+    error = OutputTokenLimitError(model_slug="mock-model", max_tokens=100, provider_reason="length")
+    client = MockLLMClient(
+        [error, AssistantMessage(content="unused", tool_calls=[], token_usage=TokenUsage())],
+        max_tokens=100,
+    )
+    agent = Agent(client=client, name="output-limit-agent", tools=[])
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        with pytest.raises(OutputTokenLimitError) as exc_info:
+            await session.run("complete the task")
+
+    assert exc_info.value is error
     assert client.call_count == 1
 
 

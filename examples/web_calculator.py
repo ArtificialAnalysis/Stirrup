@@ -41,7 +41,8 @@ async def main(openrouter_slug: str) -> None:
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
         model=openrouter_slug,
-        max_tokens=50_000,
+        max_tokens=8_192,
+        context_window_tokens=50_000,
     )
 
     # Create agent with E2B execution + web tools + calculator

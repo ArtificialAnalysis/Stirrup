@@ -383,6 +383,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
         self._client: LLMClient = client
+        context_window_tokens = getattr(client, "context_window_tokens", None)
+        self._context_window_tokens = client.max_tokens if context_window_tokens is None else context_window_tokens
+        if self._context_window_tokens <= 0:
+            raise ValueError("context_window_tokens must be positive")
+
         self._name = name
         self._max_turns = max_turns
         self._system_prompt = system_prompt
@@ -1465,7 +1470,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if finish_params:
                 break
 
-            pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
+            pct_context_used = assistant_message.token_usage.total / self._context_window_tokens
             if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)

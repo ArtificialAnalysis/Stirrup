@@ -147,7 +147,8 @@ agent = Agent(client=client, name="deepseek_agent")
 # See https://docs.litellm.ai/docs/providers for all supported providers
 client = LiteLLMClient(
     model_slug="anthropic/claude-sonnet-4-5",
-    max_tokens=200_000,
+    max_tokens=8_192,
+    context_window_tokens=200_000,
 )
 
 # Pass client to Agent - model info comes from client.model_slug

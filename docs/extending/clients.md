@@ -20,7 +20,19 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 |--------|------|-------------|
 | `generate()` | `async method` | Generate next message with optional tool calls |
 | `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
-| `max_tokens` | `property` | Maximum context window size |
+| `max_tokens` | `property` | Maximum provider response/output tokens |
+
+`context_window_tokens` is an optional client capability, not a member of the
+runtime-checkable `LLMClient` protocol. When it returns a value, that positive
+context capacity is used for Agent summarization calculations. `Agent` reads it
+once during initialization. If it is absent or `None`, `Agent` falls back to
+`max_tokens`, preserving compatibility with existing custom clients.
+
+Custom clients that adapt provider stop reasons should raise
+`OutputTokenLimitError` when the provider exhausts the response budget. Reserve
+`ContextOverflowError` for request input that does not fit the model context.
+The agent may summarize and retry the latter; it surfaces an output-limit failure
+without summarization or retry with the unchanged limit.
 
 ## Basic Implementation
 
@@ -39,11 +51,13 @@ class MyCustomClient:
     def __init__(
         self,
         model: str,
-        max_tokens: int = 64_000,
+        max_tokens: int = 8_192,
+        context_window_tokens: int | None = None,
         api_key: str | None = None,
     ):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._api_key = api_key
 
     @property
@@ -53,6 +67,10 @@ class MyCustomClient:
     @property
     def max_tokens(self) -> int:
         return self._max_tokens
+
+    @property
+    def context_window_tokens(self) -> int | None:
+        return self._context_window_tokens
 
     async def generate(
         self,
@@ -79,7 +97,8 @@ from stirrup import Agent
 
 client = MyCustomClient(
     model="my-model-id",
-    max_tokens=100_000,
+    max_tokens=8_192,
+    context_window_tokens=100_000,
     api_key="...",
 )
 
@@ -102,9 +121,15 @@ from stirrup import AssistantMessage, ChatMessage, Tool, ToolCall, ToolMessage, 
 class OpenAIClient:
     """Direct OpenAI API client."""
 
-    def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000):
+    def __init__(
+        self,
+        model: str = "gpt-4o",
+        max_tokens: int = 8_192,
+        context_window_tokens: int = 128_000,
+    ):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._client = openai.AsyncOpenAI()
 
     @property
@@ -114,6 +139,10 @@ class OpenAIClient:
     @property
     def max_tokens(self) -> int:
         return self._max_tokens
+
+    @property
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
 
     def _convert_message(self, msg: ChatMessage) -> dict:
         """Convert a message to OpenAI format."""
@@ -139,7 +168,12 @@ class OpenAIClient:
             for t in tools.values()
         ] or None
 
-        response = await self._client.chat.completions.create(model=self._model, messages=api_messages, tools=api_tools)
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=api_messages,
+            tools=api_tools,
+            max_completion_tokens=self._max_tokens,
+        )
         message = response.choices[0].message
 
         return AssistantMessage(

@@ -23,7 +23,7 @@ except ImportError as e:
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from stirrup.clients.utils import to_openai_messages, to_openai_tools
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.exceptions import OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -54,6 +54,7 @@ class LiteLLMClient(LLMClient):
         model: str | None = None,
         max_tokens: int = 64_000,
         *,
+        context_window_tokens: int | None = None,
         model_slug: str | None = None,
         api_key: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
@@ -63,10 +64,15 @@ class LiteLLMClient(LLMClient):
 
         Args:
             model: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
-            max_tokens: Maximum context window size in tokens
+            max_tokens: Maximum number of tokens the provider may generate
+            context_window_tokens: Context capacity used to decide when Agent history
+                should be summarized. Defaults to ``max_tokens`` when omitted.
             model_slug: Deprecated. Use model instead.
             reasoning_effort: Reasoning effort level for extended thinking models (e.g., 'medium', 'high')
             kwargs: Additional arguments to pass to LiteLLM completion calls
+
+        Raises:
+            ValueError: If no model is provided or ``context_window_tokens`` is not positive.
         """
         if model_slug is not None:
             warnings.warn(
@@ -78,16 +84,26 @@ class LiteLLMClient(LLMClient):
                 model = model_slug
         if model is None:
             raise ValueError("model is required")
+        resolved_context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
+        if resolved_context_window_tokens <= 0:
+            raise ValueError("context_window_tokens must be positive")
+
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = resolved_context_window_tokens
         self._reasoning_effort: ReasoningEffort | None = reasoning_effort
         self._api_key = api_key
         self._kwargs = kwargs or {}
 
     @property
     def max_tokens(self) -> int:
-        """Maximum context window size in tokens."""
+        """Maximum number of tokens the provider may generate."""
         return self._max_tokens
+
+    @property
+    def context_window_tokens(self) -> int:
+        """Context capacity used by agents for history summarization."""
+        return self._context_window_tokens
 
     @property
     def model_slug(self) -> str:
@@ -116,9 +132,11 @@ class LiteLLMClient(LLMClient):
 
         choice = r["choices"][0]
 
-        if choice.finish_reason in ["max_tokens", "length"]:
-            raise ContextOverflowError(
-                f"Maximal context window tokens reached for model {self.model_slug}, resulting in finish reason: {choice.finish_reason}. Reduce agent.max_tokens and try again."
+        if choice.finish_reason in ("max_tokens", "length"):
+            raise OutputTokenLimitError(
+                model_slug=self.model_slug,
+                max_tokens=self._max_tokens,
+                provider_reason=choice.finish_reason,
             )
 
         msg = choice["message"]
