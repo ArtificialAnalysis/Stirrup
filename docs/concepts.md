@@ -130,7 +130,18 @@ Speed metrics are available directly on each `AssistantMessage` via `request_sta
 
 ## Session
 
-The `session()` method returns the agent configured as an async context manager. Sessions handle:
+Each call to `session()` returns a detached runtime with its own active tools,
+provider and logger lifecycle, run state, skills, cache state, and outputs. Exact
+built-in providers and loggers support overlapping sessions. Custom lifecycle
+objects and subclasses of built-ins remain reusable across sequential sessions,
+but the same configured object cannot be used by overlapping sessions; configure
+a distinct instance for each concurrent owner.
+
+A provider-free `Agent.run()` can still be called directly. It is always an
+independent root run, even when called from inside an active session, and does
+not inherit that session's files, skills, warnings, or finish validation.
+
+Sessions handle:
 
 - Tool lifecycle (setup and teardown of ToolProviders)
 - File uploads to execution environment

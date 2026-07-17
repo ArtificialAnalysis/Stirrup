@@ -63,6 +63,13 @@ agent.to_tool(
 
 Returns a `Tool[SubAgentParams, SubAgentMetadata]`.
 
+The returned tool must execute within its owning parent's active session. Use
+`async with parent.session() as session:` and run the parent through `session`;
+a direct `await parent.run(...)` cannot delegate to sub-agents. Without an
+active parent session, delegation returns an unsuccessful tool result instead
+of treating the child as a root agent or saving its output to the current
+working directory.
+
 ### SubAgentParams
 
 When the parent calls the sub-agent tool, it provides:
@@ -317,6 +324,9 @@ parent = Agent(
 - Sub-agent runs are synchronous (parent waits for completion)
 - All sub-agent messages are returned to parent (may use context)
 - File transfer only works with code execution environments
+- A custom `ViewImageToolProvider` configured with the sub-agent's backend cannot
+  use `share_parent_exec_env=True`; disable sharing or use the exact built-in
+  view-image provider.
 
 ## Next Steps
 

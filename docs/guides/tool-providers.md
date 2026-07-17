@@ -137,6 +137,23 @@ async with agent.session() as session:
 # Providers are cleaned up automatically
 ```
 
+A custom provider instance owns its lifecycle directly. It can be reused by
+sequential sessions, including sessions created by different `Agent` objects.
+Overlapping sessions cannot use the same configured custom provider instance;
+Stirrup rejects the second session before entering any resources. Create a
+separate provider instance for each concurrent owner. The same rule applies to
+subclasses of built-in providers.
+
+Exact built-in providers are reconstructed privately for each session, so one
+`Agent` can run overlapping sessions without sharing their clients, sandboxes,
+temporary directories, or exit stacks. When a custom `ViewImageToolProvider`
+subclass explicitly references a configured built-in code backend, the dependent
+provider/backend pair follows the custom-provider rule instead: it is reusable
+sequentially, and overlap on either configured object is rejected before entry.
+Such a pair cannot be used by a `share_parent_exec_env=True` sub-agent because
+sharing substitutes the parent's backend; disable sharing or use the exact
+built-in `ViewImageToolProvider`.
+
 ## Built-in ToolProviders
 
 Stirrup includes several ToolProviders:
@@ -172,6 +189,13 @@ agent = Agent(
 ```
 
 ## Error Handling
+
+Session teardown attempts every provider and logger cleanup and shields that
+work from surrounding AnyIO cancellation. Custom-resource ownership is released
+only after cleanup finishes or raises. If setup or the session body already
+failed, cleanup failures are attached to that primary exception rather than
+replacing it. A cleanup failure is raised directly only when there was no
+earlier failure.
 
 Handle setup/cleanup errors gracefully:
 

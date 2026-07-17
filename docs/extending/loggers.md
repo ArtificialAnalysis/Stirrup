@@ -228,6 +228,17 @@ async with agent.session() as session:
 print(metrics_logger.get_summary())
 ```
 
+A custom logger instance is reused directly and supports sequential sessions.
+The same configured logger cannot serve overlapping sessions, even when it is
+attached to different `Agent` objects; the second session fails before it enters
+any logger or provider resources. Use one logger instance per concurrent
+owner, and share an explicitly synchronized metrics or event sink between those
+instances when aggregation is required. Subclasses of the built-in logger follow
+the same sequential-only rule.
+
+The exact built-in console and Slack loggers receive private per-session
+lifecycle state automatically.
+
 ## Combining Loggers
 
 ```python

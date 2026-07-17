@@ -76,5 +76,9 @@ cache_manager.clear_cache("abc123def456")
 ## Notes
 
 - Cache key is computed from the initial prompt—same prompt = same cache
+- Cache files are not shared transactionally. Within one process, while
+  `cache_on_interrupt=True`, a concurrent root run with the same task prompt is
+  rejected before cache I/O. Different prompts can run concurrently; use
+  `cache_on_interrupt=False` when identical tasks must overlap without caching.
 - Caches are stored locally in `~/.cache/stirrup/`
 - Caches are automatically cleared on successful completion (by default)
