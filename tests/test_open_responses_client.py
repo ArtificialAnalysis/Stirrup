@@ -258,6 +258,7 @@ class TestMessageConversion:
                     EncryptedReasoningBlock(
                         id="rs_123",
                         encrypted_content="opaque",
+                        content="private detail",
                         summary=["summary"],
                     )
                 ],
@@ -274,6 +275,7 @@ class TestMessageConversion:
             {
                 "type": "reasoning",
                 "id": "rs_123",
+                "content": [{"type": "reasoning_text", "text": "private detail"}],
                 "summary": [{"type": "summary_text", "text": "summary"}],
                 "encrypted_content": "opaque",
             }
@@ -422,28 +424,28 @@ class TestResponseParsing:
             TextBlock(text="The answer is 42"),
         ]
 
-    def test_parse_reasoning_output_with_id(self) -> None:
-        """A reasoning item with an id becomes a ReasoningRefBlock — the id is the passback handle."""
+    def test_parse_stored_reasoning_output_keeps_only_readable_content(self) -> None:
+        """Response-level continuation state makes stored reasoning item IDs redundant."""
+        content_part = MagicMock(spec=["text"])
+        content_part.text = "Private detail."
         summary_part = MagicMock(spec=["text"])
         summary_part.text = "Thinking..."
-        reasoning_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        reasoning_item = MagicMock(spec=["type", "id", "content", "summary", "encrypted_content"])
         reasoning_item.type = "reasoning"
         reasoning_item.id = "rs_123"
+        reasoning_item.content = [content_part]
         reasoning_item.summary = [summary_part]
         reasoning_item.encrypted_content = None
 
-        empty_reasoning_item = MagicMock(spec=["type", "id", "summary"])
+        empty_reasoning_item = MagicMock(spec=["type", "id", "content", "summary"])
         empty_reasoning_item.type = "reasoning"
         empty_reasoning_item.id = "rs_456"
+        empty_reasoning_item.content = []
         empty_reasoning_item.summary = []
 
         blocks = _parse_response_output([reasoning_item, empty_reasoning_item])
 
-        # id retained even when the summary is empty
-        assert blocks == [
-            ReasoningRefBlock(id="rs_123", content="Thinking..."),
-            ReasoningRefBlock(id="rs_456", content=""),
-        ]
+        assert blocks == [ReasoningBlock(content="Private detail.\nThinking...")]
 
     def test_stateless_parse_rejects_reference_only_reasoning(self) -> None:
         reasoning_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
@@ -462,15 +464,19 @@ class TestResponseParsing:
         part_1.text = "First thought."
         part_2 = MagicMock(spec=["text"])
         part_2.text = "Second thought."
-        encrypted_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        content_part = MagicMock(spec=["text"])
+        content_part.text = "Private detail."
+        encrypted_item = MagicMock(spec=["type", "id", "content", "summary", "encrypted_content"])
         encrypted_item.type = "reasoning"
         encrypted_item.id = "rs_789"
+        encrypted_item.content = [content_part]
         encrypted_item.summary = [part_1, part_2]
         encrypted_item.encrypted_content = "opaque-zdr-payload"
 
-        bare_encrypted_item = MagicMock(spec=["type", "id", "summary", "encrypted_content"])
+        bare_encrypted_item = MagicMock(spec=["type", "id", "content", "summary", "encrypted_content"])
         bare_encrypted_item.type = "reasoning"
         bare_encrypted_item.id = "rs_790"
+        bare_encrypted_item.content = []
         bare_encrypted_item.summary = []
         bare_encrypted_item.encrypted_content = "opaque-zdr-payload-2"
 
@@ -478,7 +484,10 @@ class TestResponseParsing:
 
         assert blocks == [
             EncryptedReasoningBlock(
-                id="rs_789", encrypted_content="opaque-zdr-payload", summary=["First thought.", "Second thought."]
+                id="rs_789",
+                encrypted_content="opaque-zdr-payload",
+                content="Private detail.",
+                summary=["First thought.", "Second thought."],
             ),
             EncryptedReasoningBlock(id="rs_790", encrypted_content="opaque-zdr-payload-2"),
         ]

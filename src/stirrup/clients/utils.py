@@ -198,9 +198,13 @@ def to_openai_messages(
             msg: dict[str, Any] = {"role": "assistant", "content": content_to_openai(_assistant_content(m.blocks))}
 
             rblocks = reasoning_blocks(m.blocks)
-            reasoning_content = "".join(
-                block.content for block in rblocks if not isinstance(block, RedactedReasoningBlock)
-            )
+            reasoning_parts: list[str] = []
+            for block in rblocks:
+                if isinstance(block, RedactedReasoningBlock):
+                    continue
+                if block.content is not None:
+                    reasoning_parts.append(block.content)
+            reasoning_content = "".join(reasoning_parts)
             if reasoning_content:
                 msg["reasoning_content"] = reasoning_content
 

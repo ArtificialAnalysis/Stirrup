@@ -368,9 +368,14 @@ def test_legacy_none_tool_call_id_normalizes_but_tool_result_requires_correlatio
         ReasoningBlock(content="in-band"),
         SignedReasoningBlock(signature="sig", content="signed"),
         RedactedReasoningBlock(data="opaque"),
-        ReasoningRefBlock(id="rs_1", content="summary"),
+        ReasoningRefBlock(id="rs_1", content="private", summary=["summary"]),
         ReasoningRefBlock(id="rs_2"),
-        EncryptedReasoningBlock(id="rs_3", encrypted_content="zdr-payload", summary=["part one", "part two"]),
+        EncryptedReasoningBlock(
+            id="rs_3",
+            encrypted_content="zdr-payload",
+            content="private",
+            summary=["part one", "part two"],
+        ),
     ],
 )
 def test_each_reasoning_kind_round_trips(block: ReasoningBlock) -> None:
@@ -526,7 +531,7 @@ def test_chat_wire_rejects_synthetic_tool_ids() -> None:
 def test_responses_replay_preserves_interleaved_order() -> None:
     msg = AssistantMessage(
         blocks=[
-            ReasoningRefBlock(id="rs_1", content="thinking"),
+            ReasoningRefBlock(id="rs_1", content="private", summary=["thinking"]),
             TextBlock(text="first"),
             ToolCall(name="grep", arguments="{}", tool_call_id="call-1"),
             TextBlock(text="second"),
@@ -537,6 +542,7 @@ def test_responses_replay_preserves_interleaved_order() -> None:
     assert items[0] == {
         "type": "reasoning",
         "id": "rs_1",
+        "content": [{"type": "reasoning_text", "text": "private"}],
         "summary": [{"type": "summary_text", "text": "thinking"}],
     }
     assert items[1]["content"] == [{"type": "output_text", "text": "first"}]
@@ -545,12 +551,22 @@ def test_responses_replay_preserves_interleaved_order() -> None:
 
 
 def test_responses_replay_encrypted_reasoning_echoes_item_verbatim() -> None:
-    msg = AssistantMessage(blocks=[EncryptedReasoningBlock(id="rs_9", encrypted_content="zdr", summary=["a", "b"])])
+    msg = AssistantMessage(
+        blocks=[
+            EncryptedReasoningBlock(
+                id="rs_9",
+                encrypted_content="zdr",
+                content="private",
+                summary=["a", "b"],
+            )
+        ]
+    )
     _instructions, items = _to_open_responses_input([msg])
     assert items == [
         {
             "type": "reasoning",
             "id": "rs_9",
+            "content": [{"type": "reasoning_text", "text": "private"}],
             "summary": [{"type": "summary_text", "text": "a"}, {"type": "summary_text", "text": "b"}],
             "encrypted_content": "zdr",
         }

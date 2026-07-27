@@ -44,10 +44,11 @@ actual emission order. `blocks` is the only stored content; the channel-era
 - `SummaryMessage.replaced_ids`: ids of the assistant messages a summary replaced.
 - Documented integration contract: stable `AssistantMessage.id`, metadata opacity,
   `generate` may return an `AssistantMessage` subclass and the framework preserves it.
-- OpenAI Responses client now captures reasoning items as `ReasoningRefBlock`
-  (id + summary) — or `EncryptedReasoningBlock` when the provider returns
-  `encrypted_content` — and re-emits them on replay; previously reasoning was
-  reduced to summary text and dropped on replay.
+- OpenAI Responses stores continuation state once on
+  `AssistantMessage.provider_response_id`; stored reasoning items contribute
+  readable `ReasoningBlock` content without creating redundant item-reference
+  blocks. Stateless reasoning uses `EncryptedReasoningBlock`, preserving its
+  content and summary fields separately for exact replay.
 - `OpenResponsesClient(encrypted_reasoning=True)`: stateless mode — sends
   `store: false` + `include: ["reasoning.encrypted_content"]` and carries
   reasoning state client-side, for zero-data-retention setups.

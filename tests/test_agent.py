@@ -1,7 +1,7 @@
 """Tests for agent core functionality."""
 
 import json
-from collections.abc import Awaitable, Sequence
+from collections.abc import Sequence
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -44,7 +44,7 @@ class MockLLMClient(LLMClient):
     """Mock LLM client for testing."""
 
     def __init__(self, responses: Sequence[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
-        self.responses = responses
+        self.responses = list(responses)
         self.call_count = 0
         self._max_tokens = max_tokens
         self.tools_seen: list[dict[str, Tool]] = []
@@ -536,8 +536,13 @@ async def test_cache_round_trips_block_based_assistant_message() -> None:
         blocks=[
             SignedReasoningBlock(signature="sig-1", content="signed thinking"),
             RedactedReasoningBlock(data="redacted-token"),
-            ReasoningRefBlock(id="rs_1", content="summary"),
-            EncryptedReasoningBlock(id="rs_2", encrypted_content="zdr-payload", summary=["summary"]),
+            ReasoningRefBlock(id="rs_1", content="private", summary=["summary"]),
+            EncryptedReasoningBlock(
+                id="rs_2",
+                encrypted_content="zdr-payload",
+                content="private",
+                summary=["summary"],
+            ),
             ReasoningBlock(content="in-band thinking"),
             TextBlock(text="the answer"),
             OpaqueBlock(data='{"type": "provider_marker"}'),
@@ -1511,19 +1516,19 @@ async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_dire
         absolute_report = str(parent_provider.temp_dir / "report.txt")
         subagent_client.responses.append(
             AssistantMessage(
-                content="Done",
-                tool_calls=[
+                blocks=[
+                    TextBlock(text="Done"),
                     ToolCall(
                         name=DEFAULT_FINISH_TOOL_NAME,
                         arguments=json.dumps({"reason": "done", "paths": [absolute_report, "artifacts"]}),
                         tool_call_id="call_finish",
-                    )
+                    ),
                 ],
                 token_usage=TokenUsage(input=100, answer=50),
             )
         )
         execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
-        assert isinstance(execution, Awaitable)
+        assert not isinstance(execution, ToolResult)
         result = await execution
 
     assert isinstance(result.content, str)
@@ -1556,15 +1561,15 @@ async def test_shared_docker_subagent_repairs_and_validates_absolute_outputs(
         client=MockLLMClient(
             [
                 AssistantMessage(
-                    content="Done",
-                    tool_calls=[
+                    blocks=[
+                        TextBlock(text="Done"),
                         ToolCall(
                             name=DEFAULT_FINISH_TOOL_NAME,
                             arguments=json.dumps(
                                 {"reason": "done", "paths": [declared_file, declared_directory, traversal]}
                             ),
                             tool_call_id="call_finish",
-                        )
+                        ),
                     ],
                     token_usage=TokenUsage(input=100, answer=50),
                 )
@@ -1604,7 +1609,7 @@ async def test_shared_docker_subagent_repairs_and_validates_absolute_outputs(
 
             monkeypatch.setattr(parent_provider, "_run_command_unchecked", repair_access)
             execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
-            assert isinstance(execution, Awaitable)
+            assert not isinstance(execution, ToolResult)
             result = await execution
 
     assert isinstance(result.content, str)
@@ -1622,13 +1627,13 @@ async def test_owned_subagent_without_parent_reports_declared_output_failure() -
 
     responses = [
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["report.txt"]}',
                     tool_call_id="call_finish",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1641,7 +1646,7 @@ async def test_owned_subagent_without_parent_reports_declared_output_failure() -
     )
 
     execution = subagent.to_tool().executor(SubAgentParams(task="produce output", input_files=[]))
-    assert isinstance(execution, Awaitable)
+    assert not isinstance(execution, ToolResult)
     result = await execution
 
     assert "Files available in your environment" not in result.content
@@ -1661,13 +1666,13 @@ async def test_root_agent_saves_declared_outputs_and_records_failures(tmp_path: 
 
     responses = [
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["real.txt", "nested/../sneaky.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
             request_start_time=100.0,
@@ -1708,24 +1713,24 @@ async def test_root_session_resets_stale_output_result(tmp_path: Path) -> None:
 
     responses = [
         AssistantMessage(
-            content="first",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="first"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["real.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="second",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="second"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": []}',
                     tool_call_id="call_2",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1760,13 +1765,13 @@ async def test_failed_reused_session_does_not_export_previous_finish_paths(tmp_p
 
     responses: list[AssistantMessage | Exception] = [
         AssistantMessage(
-            content="first",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="first"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["report.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1801,13 +1806,13 @@ async def test_failed_second_run_in_same_session_does_not_reuse_first_finish(tmp
 
     responses: list[AssistantMessage | Exception] = [
         AssistantMessage(
-            content="first",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="first"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["report.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),

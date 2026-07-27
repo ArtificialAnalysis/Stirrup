@@ -218,15 +218,23 @@ def _to_open_responses_input(
                         raise NotImplementedError(
                             "Stateless OpenAI Responses passback requires encrypted reasoning content"
                         )
-                    case ReasoningRefBlock(id=reasoning_id, content=content):
+                    case ReasoningRefBlock(
+                        id=reasoning_id,
+                        content=content,
+                        summary=summary,
+                    ):
                         # Passed back by reference: the id is the handle to the stored
                         # reasoning item.
-                        reasoning_item: dict[str, Any] = {"type": "reasoning", "id": reasoning_id, "summary": []}
-                        if content:
-                            reasoning_item["summary"] = [{"type": "summary_text", "text": content}]
+                        reasoning_item: dict[str, Any] = {
+                            "type": "reasoning",
+                            "id": reasoning_id,
+                            "content": [] if content is None else [{"type": "reasoning_text", "text": content}],
+                            "summary": [{"type": "summary_text", "text": part} for part in summary],
+                        }
                         input_items.append(reasoning_item)
                     case EncryptedReasoningBlock(
                         id=reasoning_id,
+                        content=content,
                         summary=summary,
                         encrypted_content=encrypted_content,
                     ):
@@ -236,6 +244,7 @@ def _to_open_responses_input(
                             {
                                 "type": "reasoning",
                                 "id": reasoning_id,
+                                "content": [] if content is None else [{"type": "reasoning_text", "text": content}],
                                 "summary": [{"type": "summary_text", "text": part} for part in summary],
                                 "encrypted_content": encrypted_content,
                             }
@@ -327,10 +336,10 @@ def _parse_response_output(
 
     One exhaustive pass in item order: each ``message`` item becomes its own
     TextBlock (refusal content surfaces as answer text), each ``function_call``
-    a ToolCall block, each ``reasoning`` item one of EncryptedReasoningBlock /
-    ReasoningRefBlock / ReasoningBlock depending on the passback state it carries
-    (an id is retained even when the summary is empty — it is the passback
-    handle). Unknown item and content types raise until their semantics and
+    a ToolCall block, and each ``reasoning`` item an EncryptedReasoningBlock or
+    readable ReasoningBlock. Stored continuation state lives on the assistant
+    message as ``provider_response_id``; reasoning item IDs are not duplicated
+    into blocks. Unknown item and content types raise until their semantics and
     passback behavior are explicitly implemented.
     """
     blocks: list[AssistantBlock] = []
@@ -372,6 +381,18 @@ def _parse_response_output(
                 )
 
             case "reasoning":
+                content = _get_attr(item, "content")
+                content_parts: list[str] = []
+                if isinstance(content, list):
+                    for part in content:
+                        text = _get_attr(part, "text")
+                        if not isinstance(text, str):
+                            raise ValueError(f"OpenAI Responses reasoning content entry has no text: {part!r}")
+                        if text:
+                            content_parts.append(text)
+                elif content:
+                    content_parts = [str(content)]
+
                 # summary can be a list of Summary objects with .text attribute
                 summary = _get_attr(item, "summary")
                 if isinstance(summary, list):
@@ -401,6 +422,7 @@ def _parse_response_output(
                         EncryptedReasoningBlock(
                             id=item_id,
                             encrypted_content=encrypted_content,
+                            content="".join(content_parts) or None,
                             summary=summary_parts,
                         )
                     )
@@ -410,9 +432,11 @@ def _parse_response_output(
                             "A stateless OpenAI Responses call returned reference-only reasoning; "
                             "enable encrypted_reasoning so it can be passed back"
                         )
-                    blocks.append(ReasoningRefBlock(id=item_id, content="\n".join(summary_parts)))
-                elif summary_parts:
-                    blocks.append(ReasoningBlock(content="\n".join(summary_parts)))
+                    readable_parts = [*content_parts, *summary_parts]
+                    if readable_parts:
+                        blocks.append(ReasoningBlock(content="\n".join(readable_parts)))
+                elif content_parts or summary_parts:
+                    blocks.append(ReasoningBlock(content="\n".join([*content_parts, *summary_parts])))
 
             case _:
                 raise NotImplementedError(f"Unsupported OpenAI Responses output item type: {item_type!r}")
