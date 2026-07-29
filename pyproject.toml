@@ -24,9 +24,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "anyio>=4.0.0",
+    "anyio>=4.1.0",
     "filetype>=1.0.0",
-    "httpx>=0.20.0",
+    "httpx>=0.25.0",
     "json-schema-to-pydantic>=0.2.0",
     "moviepy>=2.0.0",
     "openai>=1.0.0",
