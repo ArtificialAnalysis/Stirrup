@@ -25,8 +25,13 @@ Fetches a web page and returns its content as markdown.
 ### Limits
 
 - The response body is not bounded while it is downloaded and decompressed; only the extracted
-  markdown is truncated, to 40 000 characters. Bounding the download itself needs streaming reads
-  plus a bounded incremental decompressor, which is out of scope here.
+  markdown is truncated, to 40 000 characters. A compressed body is the sharper case, since it
+  expands without bound and httpx decodes a whole chunk before any size could be measured.
+  Refusing compressed responses outright was considered and rejected: it taxes every fetch with
+  full uncompressed bandwidth and breaks origins that ignore `Accept-Encoding: identity`, while
+  still leaving the uncompressed body unbounded. The bounded fix is streaming reads plus an
+  incremental decompressor, which is out of scope here. Revisit if a fetch is observed to exhaust
+  memory in practice.
 - There is no destination-port policy once an address validates: any port on a public address is
   reachable.
 - Internal services hosted on public IP addresses remain reachable by construction.
