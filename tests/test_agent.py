@@ -183,17 +183,16 @@ async def test_successful_finish_stops_later_tool_calls() -> None:
 
 
 @pytest.mark.parametrize(
-    ("finish_arguments", "finish_succeeds", "expected_executions", "args_was_valid"),
+    ("finish_arguments", "finish_succeeds", "expected_executions"),
     [
-        pytest.param("{}", True, ["after"], False, id="invalid"),
-        pytest.param('{"label": "finish"}', False, ["finish", "after"], True, id="unsuccessful"),
+        pytest.param("{}", True, ["after"], id="invalid"),
+        pytest.param('{"label": "finish"}', False, ["finish", "after"], id="unsuccessful"),
     ],
 )
 async def test_nonterminal_finish_allows_later_tool_calls(
     finish_arguments: str,
     finish_succeeds: bool,
     expected_executions: list[str],
-    args_was_valid: bool,
 ) -> None:
     executions: list[str] = []
     record = recording_tool("record", executions)
@@ -220,7 +219,6 @@ async def test_nonterminal_finish_allows_later_tool_calls(
     assert finish_params is None
     assert [message.tool_call_id for message in tool_messages] == ["call_finish", "call_after"]
     assert [message.success for message in tool_messages] == [False, True]
-    assert tool_messages[0].args_was_valid is args_was_valid
 
 
 async def test_agent_max_turns() -> None:

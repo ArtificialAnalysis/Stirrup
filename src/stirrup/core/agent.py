@@ -1267,8 +1267,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
             reject_all_finish_calls = len(finish_call_names) > 1
 
+            # Tool call order is treated as semantically meaningful: every call positioned after a
+            # successful finish is dropped. For providers that emit genuinely parallel calls, array
+            # position therefore decides which of the model's intents survives.
             for tool_call in assistant_message.tool_calls:
                 if finish_params is not None:
+                    # The run breaks out of the turn loop immediately after this turn, so the model
+                    # never reads this content — it exists only to keep the final history 1:1 with
+                    # the assistant message's tool calls, as provider APIs require.
                     tool_message = ToolMessage(
                         content=(
                             f"Skipped tool '{tool_call.name}' because a finish tool "
