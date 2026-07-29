@@ -149,27 +149,6 @@ def _release_custom_session_resources(resources: list[object]) -> None:
             _ACTIVE_SESSION_RESERVATIONS.pop(("custom", id(resource)), None)
 
 
-def _reserve_cached_root_run(task_hash: str, owner: object) -> None:
-    """Keep one cache-writing root run active for a task hash."""
-    reservation = ("cache", task_hash)
-    with _SESSION_RESERVATIONS_LOCK:
-        active_owner = _ACTIVE_SESSION_RESERVATIONS.get(reservation)
-        if active_owner is not None:
-            raise RuntimeError(
-                "Concurrent root runs with cache_on_interrupt=True cannot use the same task cache. "
-                "Wait for the active run to finish or set cache_on_interrupt=False."
-            )
-        _ACTIVE_SESSION_RESERVATIONS[reservation] = owner
-
-
-def _release_cached_root_runs(task_hashes: set[str], owner: object) -> None:
-    with _SESSION_RESERVATIONS_LOCK:
-        for task_hash in task_hashes:
-            reservation = ("cache", task_hash)
-            if _ACTIVE_SESSION_RESERVATIONS.get(reservation) is owner:
-                _ACTIVE_SESSION_RESERVATIONS.pop(reservation)
-
-
 def _record_session_cleanup_failure(
     primary_exception: BaseException | None,
     phase: str,
@@ -185,7 +164,12 @@ def _record_session_cleanup_failure(
 
 
 def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, ToolProvider]) -> ToolProvider | None:
-    """Return a fresh runtime owner for an exact built-in provider."""
+    """Return a fresh runtime owner for an exact built-in provider.
+
+    Every attribute a built-in provider assigns in __aenter__ must be reset here, or overlapping
+    sessions will share it. Nothing enforces that: adding or renaming such an attribute without
+    updating this function silently reintroduces cross-session sharing.
+    """
     provider_type = type(provider)
 
     from stirrup.tools.view_image import ViewImageToolProvider
@@ -193,12 +177,6 @@ def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, Too
 
     if isinstance(provider, LocalCodeExecToolProvider) and provider_type is LocalCodeExecToolProvider:
         detached = copy.copy(provider)
-        detached._allowed_commands = (  # noqa: SLF001
-            list(provider._allowed_commands) if provider._allowed_commands is not None else None  # noqa: SLF001
-        )
-        detached._compiled_allowed = (  # noqa: SLF001
-            list(provider._compiled_allowed) if provider._compiled_allowed is not None else None  # noqa: SLF001
-        )
         detached._temp_dir = None  # noqa: SLF001
         return detached
     if isinstance(provider, WebToolProvider) and provider_type is WebToolProvider:
@@ -220,15 +198,6 @@ def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, Too
 
         if isinstance(provider, DockerCodeExecToolProvider) and provider_type is DockerCodeExecToolProvider:
             detached = copy.copy(provider)
-            detached._allowed_commands = (  # noqa: SLF001
-                list(provider._allowed_commands) if provider._allowed_commands is not None else None  # noqa: SLF001
-            )
-            detached._compiled_allowed = (  # noqa: SLF001
-                list(provider._compiled_allowed) if provider._compiled_allowed is not None else None  # noqa: SLF001
-            )
-            detached._env_vars = (  # noqa: SLF001
-                list(provider._env_vars) if provider._env_vars is not None else None  # noqa: SLF001
-            )
             detached._temp_dir = None  # noqa: SLF001
             detached._client = None  # noqa: SLF001
             detached._container = None  # noqa: SLF001
@@ -238,17 +207,6 @@ def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, Too
 
         if isinstance(provider, E2BCodeExecToolProvider) and provider_type is E2BCodeExecToolProvider:
             detached = copy.copy(provider)
-            detached._allowed_commands = (  # noqa: SLF001
-                list(provider._allowed_commands) if provider._allowed_commands is not None else None  # noqa: SLF001
-            )
-            detached._compiled_allowed = (  # noqa: SLF001
-                list(provider._compiled_allowed) if provider._compiled_allowed is not None else None  # noqa: SLF001
-            )
-            detached._sandbox_kwargs = dict(provider._sandbox_kwargs)  # noqa: SLF001
-            for key in ("envs", "metadata"):
-                value = detached._sandbox_kwargs.get(key)  # noqa: SLF001
-                if isinstance(value, dict):
-                    detached._sandbox_kwargs[key] = dict(value)  # noqa: SLF001
             detached._sbx = None  # noqa: SLF001
             return detached
     elif provider_type.__module__ == "stirrup.tools.mcp":
@@ -256,10 +214,6 @@ def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, Too
 
         if isinstance(provider, MCPToolProvider) and provider_type is MCPToolProvider:
             detached = copy.copy(provider)
-            detached._config = provider._config.model_copy(deep=True)  # noqa: SLF001
-            detached._server_names = (  # noqa: SLF001
-                list(provider._server_names) if provider._server_names is not None else None  # noqa: SLF001
-            )
             detached._servers = {}  # noqa: SLF001
             detached._tools = {}  # noqa: SLF001
             detached._exit_stack = None  # noqa: SLF001
@@ -269,23 +223,10 @@ def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, Too
 
         if isinstance(provider, BrowserUseToolProvider) and provider_type is BrowserUseToolProvider:
             detached = copy.copy(provider)
-            detached._extra_args = (  # noqa: SLF001
-                list(provider._extra_args) if provider._extra_args is not None else None  # noqa: SLF001
-            )
             detached._session = None  # noqa: SLF001
             return detached
 
     return None
-
-
-def _reset_logger_state(session_logger: AgentLoggerBase) -> None:
-    session_logger.name = "agent"
-    session_logger.model = None
-    session_logger.max_turns = None
-    session_logger.depth = 0
-    session_logger.finish_params = None
-    session_logger.run_metadata = None
-    session_logger.output_dir = None
 
 
 def _detach_logger(configured_logger: AgentLoggerBase) -> tuple[AgentLoggerBase, bool]:
@@ -293,7 +234,6 @@ def _detach_logger(configured_logger: AgentLoggerBase) -> tuple[AgentLoggerBase,
     logger_type = type(configured_logger)
     if isinstance(configured_logger, AgentLogger) and logger_type is AgentLogger:
         detached = copy.copy(configured_logger)
-        _reset_logger_state(detached)
         detached._current_step = 0  # noqa: SLF001
         detached._tool_calls = 0  # noqa: SLF001
         detached._input_tokens = 0  # noqa: SLF001
@@ -305,9 +245,7 @@ def _detach_logger(configured_logger: AgentLoggerBase) -> tuple[AgentLoggerBase,
         from stirrup.integrations.slack.slack import SlackLogger
 
         if isinstance(configured_logger, SlackLogger) and logger_type is SlackLogger:
-            detached = copy.copy(configured_logger)
-            _reset_logger_state(detached)
-            return detached, False
+            return copy.copy(configured_logger), False
 
     return configured_logger, True
 
@@ -482,7 +420,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
     _interrupt_handler_installed: bool
     _custom_session_resources: list[object]
     _custom_resources_reserved: bool
-    _reserved_cache_task_hashes: set[str]
 
     @overload
     def __init__(
@@ -651,7 +588,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Cache state for resumption (set during run(), used in __aexit__ for caching on interrupt)
         self._current_task_hash: str | None = None
         self._current_run_state: CacheState | None = None
-        self._reserved_cache_task_hashes: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -1393,15 +1329,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 primary_exception, "Custom resource reservation", cleanup_failure
             )
 
-        try:
-            if self._reserved_cache_task_hashes:
-                _release_cached_root_runs(self._reserved_cache_task_hashes, self)
-                self._reserved_cache_task_hashes.clear()
-        except BaseException as cleanup_failure:
-            primary_exception = _record_session_cleanup_failure(
-                primary_exception, "Task cache reservation", cleanup_failure
-            )
-
         if exc_val is None and primary_exception is not None:
             raise primary_exception
 
@@ -1669,51 +1596,19 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             return await self._run(init_msgs, depth=depth)
 
         ambient_session_token = _SESSION_STATE.set(None)
-        reservation_owner = object()
-        task_hash = compute_task_hash(init_msgs)
-        cache_reserved = False
-        primary_exception: BaseException | None = None
         try:
-            if self._cache_on_interrupt:
-                _reserve_cached_root_run(task_hash, reservation_owner)
-                cache_reserved = True
-            return await self._run(init_msgs, depth=depth, task_hash=task_hash)
-        except BaseException as exc:
-            primary_exception = exc
-            raise
+            return await self._run(init_msgs, depth=depth)
         finally:
-            try:
-                if cache_reserved:
-                    _release_cached_root_runs({task_hash}, reservation_owner)
-            except BaseException as cleanup_failure:
-                if primary_exception is None:
-                    raise
-                primary_exception.add_note(
-                    "Task cache reservation release failed after Agent.run(): "
-                    f"{type(cleanup_failure).__name__}: {cleanup_failure}"
-                )
-            finally:
-                _SESSION_STATE.reset(ambient_session_token)
+            _SESSION_STATE.reset(ambient_session_token)
 
     async def _run(
         self,
         init_msgs: str | list[ChatMessage],
         *,
         depth: int | None = None,
-        task_hash: str | None = None,
     ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, Any]]:
         """Execute a run after its session ownership and ambient context are established."""
-        task_hash = task_hash or compute_task_hash(init_msgs)
-        state = _SESSION_STATE.get()
-        if (
-            isinstance(self, SessionAgent)
-            and self._cache_on_interrupt
-            and state is not None
-            and state.depth == 0
-            and task_hash not in self._reserved_cache_task_hashes
-        ):
-            _reserve_cached_root_run(task_hash, self)
-            self._reserved_cache_task_hashes.add(task_hash)
+        task_hash = compute_task_hash(init_msgs)
         self._current_task_hash = task_hash
 
         # Initialize cache manager
@@ -2095,5 +1990,4 @@ class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, Fini
         session._interrupt_handler_installed = False
         session._custom_session_resources = custom_resources
         session._custom_resources_reserved = False
-        session._reserved_cache_task_hashes = set()
         return session

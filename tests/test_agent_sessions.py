@@ -14,7 +14,7 @@ from rich.console import Console
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
-from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
+from stirrup.core.cache import CacheManager, compute_task_hash
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -32,6 +32,7 @@ from stirrup.core.models import (
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL
 from stirrup.tools.view_image import ViewImageToolProvider
+from stirrup.tools.web import WebToolProvider
 from stirrup.utils.logging import AgentLogger, AgentLoggerBase
 
 
@@ -85,29 +86,6 @@ class ConcurrentIdenticalClient(LLMClient):
             self.all_arrived.set()
         await self.all_arrived.wait()
         return _finish_response("identical", f"finish-identical-{self.call_count}")
-
-
-class BlockingFinishClient(LLMClient):
-    """Hold a run active until its cache boundary has been inspected."""
-
-    def __init__(self) -> None:
-        self.started = anyio.Event()
-        self.release = anyio.Event()
-
-    @property
-    def model_slug(self) -> str:
-        return "blocking-finish-model"
-
-    @property
-    def max_tokens(self) -> int:
-        return 100_000
-
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
-        del messages
-        assert DEFAULT_FINISH_TOOL_NAME in tools
-        self.started.set()
-        await self.release.wait()
-        return _finish_response("finished", "finish-blocked")
 
 
 class ConcurrentFileClient(LLMClient):
@@ -439,44 +417,19 @@ async def test_concurrent_sessions_with_default_loggers_can_render_while_overlap
     assert output.getvalue().count("concurrent-logger") >= 2
 
 
-async def test_cached_root_runs_with_different_task_hashes_remain_concurrent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_identical_concurrent_root_runs_both_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", tmp_path)
-    agent = Agent(
-        client=ConcurrentPromptClient(),
-        name="different-cached-tasks",
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        logger=_quiet_logger(),
-    )
-    reasons: set[str] = set()
-
-    async def run_prompt(prompt: str) -> None:
-        async with agent.session() as session:
-            finish_params, _, _ = await session.run(prompt)
-        assert finish_params is not None
-        reasons.add(finish_params.reason)
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(run_prompt, "first prompt")
-        task_group.start_soon(run_prompt, "second prompt")
-
-    assert reasons == {"first prompt", "second prompt"}
-
-
-async def test_identical_root_runs_remain_concurrent_when_interrupt_caching_is_disabled() -> None:
     client = ConcurrentIdenticalClient()
     agent = Agent(
         client=client,
-        name="identical-uncached-tasks",
+        name="identical-tasks",
         tools=[],
         finish_tool=SIMPLE_FINISH_TOOL,
         logger=_quiet_logger(),
     )
 
     async def run_prompt() -> None:
-        async with agent.session(cache_on_interrupt=False) as session:
+        async with agent.session() as session:
             finish_params, _, _ = await session.run("same prompt")
         assert finish_params is not None
 
@@ -485,104 +438,6 @@ async def test_identical_root_runs_remain_concurrent_when_interrupt_caching_is_d
         task_group.start_soon(run_prompt)
 
     assert client.call_count == 2
-
-
-async def test_concurrent_identical_cached_root_run_is_rejected_before_cache_io(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", tmp_path)
-    client = BlockingFinishClient()
-    agent = Agent(
-        client=client,
-        name="identical-cached-tasks",
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        logger=_quiet_logger(),
-    )
-    load_count = 0
-    original_load_state = CacheManager.load_state
-
-    def count_load(cache_manager: CacheManager, task_hash: str) -> CacheState | None:
-        nonlocal load_count
-        load_count += 1
-        return original_load_state(cache_manager, task_hash)
-
-    monkeypatch.setattr(CacheManager, "load_state", count_load)
-
-    async def run_first() -> None:
-        async with agent.session(resume=True) as session:
-            await session.run("same cached prompt")
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(run_first)
-        await client.started.wait()
-
-        with pytest.raises(RuntimeError, match="cannot use the same task cache"):
-            async with agent.session(resume=True) as duplicate:
-                await duplicate.run("same cached prompt")
-        assert load_count == 1
-        client.release.set()
-
-    async with agent.session(resume=True) as reusable:
-        await reusable.run("same cached prompt")
-
-    assert load_count == 2
-
-
-async def test_successful_run_keeps_task_cache_reserved_until_failed_session_teardown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", tmp_path)
-    body_error = RuntimeError("body failed after run")
-    client = ScriptedClient(
-        [
-            _finish_response("first", "finish-first"),
-            _finish_response("after teardown", "finish-after-teardown"),
-        ]
-    )
-    agent = Agent(
-        client=client,
-        name="teardown-cache-owner",
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        logger=_quiet_logger(),
-    )
-    run_finished = anyio.Event()
-    fail_body = anyio.Event()
-    teardown_finished = anyio.Event()
-
-    async def finish_then_fail() -> None:
-        try:
-            async with agent.session(clear_cache_on_success=False) as session:
-                await session.run("same cached prompt")
-                run_finished.set()
-                await fail_body.wait()
-                raise body_error
-        except RuntimeError as exc:
-            assert exc is body_error
-        finally:
-            teardown_finished.set()
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(finish_then_fail)
-        await run_finished.wait()
-
-        with pytest.raises(RuntimeError, match="cannot use the same task cache"):
-            async with agent.session() as duplicate:
-                await duplicate.run("same cached prompt")
-
-        fail_body.set()
-        await teardown_finished.wait()
-
-    cached = CacheManager(cache_base_dir=tmp_path).load_state(compute_task_hash("same cached prompt"))
-    assert cached is not None
-    assert cached.agent_name == "teardown-cache-owner"
-
-    async with agent.session() as reusable:
-        finish_params, _, _ = await reusable.run("same cached prompt")
-
-    assert finish_params is not None
-    assert finish_params.reason == "after teardown"
 
 
 async def test_concurrent_calls_to_same_subagent_are_isolated() -> None:
@@ -682,25 +537,6 @@ async def test_direct_parent_run_cannot_delegate_or_write_subagent_output_to_cwd
     assert "async with parent.session()" in str(delegated_result.content)
     assert len(child_client.responses) == 2
     assert not (tmp_path / "leaked.txt").exists()
-
-
-async def test_provider_free_base_run_releases_task_cache_reservation_after_failure() -> None:
-    run_error = RuntimeError("direct run failed")
-    agent = Agent(
-        client=ScriptedClient([run_error, _finish_response("reused", "finish-reused")]),
-        name="direct-reusable",
-        tools=[],
-        finish_tool=SIMPLE_FINISH_TOOL,
-        logger=_quiet_logger(),
-    )
-
-    with pytest.raises(RuntimeError, match="direct run failed") as exc_info:
-        await agent.run("same direct prompt")
-    finish_params, _, _ = await agent.run("same direct prompt")
-
-    assert exc_info.value is run_error
-    assert finish_params is not None
-    assert finish_params.reason == "reused"
 
 
 async def test_provider_free_base_run_is_independent_inside_an_active_session(tmp_path: Path) -> None:
@@ -965,6 +801,36 @@ async def test_shared_custom_logger_overlap_across_agents_is_rejected_before_ent
         assert custom_logger.enter_count == 1
 
     assert custom_logger.exit_count == 1
+
+
+async def test_overlapping_sessions_detach_the_configured_web_provider() -> None:
+    configured_web = WebToolProvider()
+    agent = Agent(
+        client=ScriptedClient([]),
+        name="web",
+        tools=[configured_web],
+        logger=_quiet_logger(),
+    )
+    arrived = {"first": anyio.Event(), "second": anyio.Event()}
+    session_webs: dict[str, WebToolProvider] = {}
+
+    async def open_session(label: str, other_label: str) -> None:
+        async with agent.session(cache_on_interrupt=False) as session:
+            session_web = next(tool for tool in session._tools if isinstance(tool, WebToolProvider))  # noqa: SLF001
+            session_webs[label] = session_web
+            # Names the attribute _detach_builtin_provider must reset, so a rename in
+            # WebToolProvider that misses agent.py fails here instead of silently sharing.
+            assert session_web._client is not None  # noqa: SLF001
+            arrived[label].set()
+            await arrived[other_label].wait()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(open_session, "first", "second")
+        task_group.start_soon(open_session, "second", "first")
+
+    assert session_webs["first"] is not session_webs["second"]
+    assert session_webs["first"]._client is None  # noqa: SLF001
+    assert configured_web._client is None  # noqa: SLF001
 
 
 async def test_view_image_uses_each_sessions_active_code_backend() -> None:

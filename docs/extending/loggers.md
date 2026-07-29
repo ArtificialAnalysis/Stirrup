@@ -239,6 +239,20 @@ the same sequential-only rule.
 The exact built-in console and Slack loggers receive private per-session
 lifecycle state automatically.
 
+### Spinners in overlapping sessions
+
+Overlapping sessions each get their own `AgentLogger`, but all of them share one
+process-wide Rich `Console`. Rich 14.1 or newer is required so that a second
+session's spinner nests instead of raising `LiveError`, but only the
+first-entered spinner actually renders — a session started while another is
+already running shows no spinner for its whole run. Its log lines still print.
+`Console.clear_live()` also pops the top of the live stack unconditionally, so
+sessions that exit out of entry order desynchronize the stack and a session that
+outlives an earlier-entered sibling never regains live refresh. Pass
+`show_spinner=False` to avoid depending on this. Fixing it properly means giving
+each session its own `Console`, which is worth doing if overlapping sessions
+become a common way to drive Stirrup interactively.
+
 ## Combining Loggers
 
 ```python

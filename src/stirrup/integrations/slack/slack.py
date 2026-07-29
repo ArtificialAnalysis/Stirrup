@@ -23,7 +23,7 @@ from typing import Any, Self
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from stirrup.core.agent import Agent
+from stirrup.core.agent import Agent, _detach_builtin_provider
 from stirrup.core.models import (
     AssistantMessage,
     LLMClient,
@@ -348,16 +348,23 @@ class SlackBot:
             client = copy.copy(client)
             client._model = model_override  # type: ignore[attr-defined]  # noqa: SLF001
 
-        # Keep configured coordination objects shared. Agent sessions privately
-        # detach exact built-in lifecycle state and guard custom objects from overlap.
-        tools: list[Tool | ToolProvider] = (
-            list(config.tools)
-            if config.tools is not None
-            else [
+        tools: list[Tool | ToolProvider]
+        if config.tools is None:
+            tools = [
                 DockerCodeExecToolProvider.from_dockerfile(_DEFAULT_DOCKERFILE),
                 WebToolProvider(),
             ]
-        )
+        else:
+            # Agent sessions privately detach exact built-in providers, so those stay shared across
+            # concurrent runs and keep any coordination objects they were configured with. Anything
+            # else a session reserves for one owner at a time, so each of the max_concurrent_runs
+            # runs needs its own copy. Seeding the deepcopy memo with the shared objects keeps a
+            # copied provider's reference to a shared one (e.g. ViewImageToolProvider's backend).
+            memo: dict[int, Any] = {}
+            for tool in config.tools:
+                if not isinstance(tool, ToolProvider) or _detach_builtin_provider(tool, {}) is not None:
+                    memo[id(tool)] = tool
+            tools = [copy.deepcopy(tool, memo) for tool in config.tools]
 
         return Agent(
             client=client,
