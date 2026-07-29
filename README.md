@@ -134,10 +134,12 @@ their provider environment key; custom and HTTP endpoints require an explicit ke
 
 > **Breaking change:** provider environment keys are no longer sent to custom or
 > HTTP endpoints, so a proxy or gateway configured through `OPENAI_BASE_URL` now
-> raises at construction unless you pass a key. `ChatCompletionsClient` also
-> changes the key it infers for the default endpoint, from `OPENROUTER_API_KEY` to
-> `OPENAI_API_KEY`; `OpenResponsesClient` already used `OPENAI_API_KEY` there. To
-> migrate, pass the key explicitly: `api_key=os.environ["OPENROUTER_API_KEY"]`.
+> raises at construction unless you pass the key that endpoint expects, for example
+> `api_key=os.environ["MY_GATEWAY_API_KEY"]`. `ChatCompletionsClient` also changes
+> the key it infers for the default endpoint, from `OPENROUTER_API_KEY` to
+> `OPENAI_API_KEY`; `OpenResponsesClient` already used `OPENAI_API_KEY` there. If you
+> relied on that old default, pass `base_url="https://openrouter.ai/api/v1"` and the
+> OpenRouter key is inferred again.
 
 ```python
 # Create client using Deepseek's OpenAI-compatible endpoint

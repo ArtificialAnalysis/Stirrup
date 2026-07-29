@@ -90,6 +90,13 @@ class ChatCompletionsClient(LLMClient):
             max_retries: Number of retries for transient errors. Defaults to 2.
                 The OpenAI SDK handles retries internally with exponential backoff.
             kwargs: Additional arguments passed to chat.completions.create().
+
+        Raises:
+            openai.OpenAIError: If the effective base URL is not an absolute HTTP(S) URL,
+                includes userinfo, or names an endpoint whose credential Stirrup does not
+                infer while ``api_key`` is omitted. A base URL httpx cannot parse at all
+                (a non-numeric port, say) still surfaces as ``httpx.InvalidURL``, since
+                httpx parses it before Stirrup inspects it.
         """
         self._model = model
         self._max_tokens = max_tokens

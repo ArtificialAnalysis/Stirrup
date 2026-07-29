@@ -44,9 +44,9 @@ def _resolve_openai_endpoint_and_api_key(
 
     endpoint = httpx.URL(effective_base_url)
     if endpoint.scheme not in ("http", "https") or not endpoint.host:
-        raise httpx.InvalidURL("base_url must be an absolute HTTP(S) URL with a host")
+        raise OpenAIError("base_url must be an absolute HTTP(S) URL with a host")
     if endpoint.userinfo:
-        raise httpx.InvalidURL("base_url must not include userinfo")
+        raise OpenAIError("base_url must not include userinfo")
 
     if api_key:
         return endpoint, api_key

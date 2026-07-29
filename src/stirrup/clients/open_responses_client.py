@@ -308,6 +308,13 @@ class OpenResponsesClient(LLMClient):
             instructions: Default system-level instructions. Can be overridden by
                 SystemMessage in the messages list.
             kwargs: Additional arguments passed to responses.create().
+
+        Raises:
+            openai.OpenAIError: If the effective base URL is not an absolute HTTP(S) URL,
+                includes userinfo, or names an endpoint whose credential Stirrup does not
+                infer while ``api_key`` is omitted. A base URL httpx cannot parse at all
+                (a non-numeric port, say) still surfaces as ``httpx.InvalidURL``, since
+                httpx parses it before Stirrup inspects it.
         """
         self._model = model
         self._max_tokens = max_tokens

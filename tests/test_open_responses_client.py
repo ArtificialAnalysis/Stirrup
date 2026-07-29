@@ -285,15 +285,27 @@ class TestResponseParsing:
 class TestOpenResponsesClient:
     """Tests for OpenResponsesClient class."""
 
-    async def test_resolver_wiring_strips_responses_suffix(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("base_url", "expected_base_url"),
+        [
+            ("https://openrouter.ai/api/v1/responses/", "https://openrouter.ai/api/v1/"),
+            ("https://openrouter.ai/api/v1/responses", "https://openrouter.ai/api/v1/"),
+            ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/"),
+            ("https://openrouter.ai/api/responses/v1", "https://openrouter.ai/api/responses/v1/"),
+        ],
+        ids=["trailing-slash", "no-trailing-slash", "no-suffix", "suffix-mid-path"],
+    )
+    async def test_resolver_wiring_strips_only_a_trailing_responses_suffix(
+        self,
+        monkeypatch: MonkeyPatch,
+        base_url: str,
+        expected_base_url: str,
+    ) -> None:
         monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
-        client = OpenResponsesClient(
-            model="gpt-4o",
-            base_url="https://openrouter.ai/api/v1/responses/",
-        )
+        client = OpenResponsesClient(model="gpt-4o", base_url=base_url)
 
         try:
-            assert str(client._client.base_url) == "https://openrouter.ai/api/v1/"  # noqa: SLF001
+            assert str(client._client.base_url) == expected_base_url  # noqa: SLF001
             assert client._client.auth_headers == {"Authorization": "Bearer openrouter-key"}  # noqa: SLF001
         finally:
             await client._client.close()  # noqa: SLF001

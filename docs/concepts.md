@@ -222,15 +222,22 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 !!! warning "Breaking change"
     Provider environment keys are no longer sent to custom or HTTP endpoints, so a
     proxy or gateway configured through `OPENAI_BASE_URL` now raises at construction
-    unless you pass a key. The key inferred for the default endpoint also changed from
-    `OPENROUTER_API_KEY` to `OPENAI_API_KEY`. To migrate, pass the key explicitly:
+    unless you pass the key that endpoint expects:
 
     ```python
     client = ChatCompletionsClient(
         model="gpt-4o",
         base_url="https://litellm.mycorp.internal/v1",
-        api_key=os.environ["OPENROUTER_API_KEY"],
+        api_key=os.environ["MY_GATEWAY_API_KEY"],
     )
+    ```
+
+    The key inferred for the default endpoint also changed from `OPENROUTER_API_KEY`
+    to `OPENAI_API_KEY`. If you relied on that old default, name the OpenRouter
+    endpoint and its key is inferred again:
+
+    ```python
+    client = ChatCompletionsClient(model="gpt-4o", base_url="https://openrouter.ai/api/v1")
     ```
 
 ### LiteLLMClient

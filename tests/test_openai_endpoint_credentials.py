@@ -1,6 +1,5 @@
 """Endpoint and credential selection tests for OpenAI-compatible clients."""
 
-import httpx
 import pytest
 from openai import OpenAIError
 from pytest import MonkeyPatch
@@ -52,6 +51,13 @@ async def _assert_client_configuration(
             "explicit-key",
         ),
         ("http://localhost:8000/v1", None, "local-key", "http://localhost:8000/v1/", "local-key"),
+        (
+            "https://openrouter.ai/api/v1",
+            None,
+            "explicit-key",
+            "https://openrouter.ai/api/v1/",
+            "explicit-key",
+        ),
     ],
     ids=[
         "default-openai",
@@ -60,6 +66,7 @@ async def _assert_client_configuration(
         "explicit-endpoint",
         "explicit-key-custom-https",
         "explicit-key-custom-http",
+        "explicit-key-overrides-provider-key",
     ],
 )
 async def test_effective_endpoint_selects_its_api_key(
@@ -91,19 +98,36 @@ async def test_blank_environment_base_url_uses_the_default_endpoint(monkeypatch:
 
 
 @pytest.mark.parametrize(
-    "base_url",
+    ("base_url", "environment_base_url"),
     [
-        "https://gateway.example/v1",
-        "https://api.openrouter.ai/api/v1",
-        "https://openrouter.ai.evil.example/api/v1",
+        ("https://gateway.example/v1", None),
+        ("https://api.openrouter.ai/api/v1", None),
+        ("https://openrouter.ai.evil.example/api/v1", None),
+        ("https://api.openai.com.evil.example/v1", None),
+        ("https://evil-openai.com/v1", None),
+        ("https://api.openai.com:8443/v1", None),
+        (None, "https://litellm.mycorp.internal/v1"),
     ],
-    ids=["custom", "unrecognized-subdomain", "deceptive-host"],
+    ids=[
+        "custom",
+        "unrecognized-subdomain",
+        "deceptive-host",
+        "deceptive-openai-host",
+        "unrecognized-openai-lookalike",
+        "provider-host-on-other-port",
+        "environment-endpoint",
+    ],
 )
 def test_custom_https_endpoint_requires_explicit_api_key(
     monkeypatch: MonkeyPatch,
-    base_url: str,
+    base_url: str | None,
+    environment_base_url: str | None,
 ) -> None:
     _set_provider_keys(monkeypatch)
+    if environment_base_url is None:
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_BASE_URL", environment_base_url)
 
     with pytest.raises(OpenAIError, match="Custom endpoints require an explicit api_key"):
         ChatCompletionsClient(model="gpt-4o", base_url=base_url)
@@ -154,7 +178,7 @@ def test_blank_provider_key_is_reported_as_missing(monkeypatch: MonkeyPatch) -> 
 
 
 def test_base_url_with_userinfo_is_rejected() -> None:
-    with pytest.raises(httpx.InvalidURL, match="userinfo"):
+    with pytest.raises(OpenAIError, match="userinfo"):
         ChatCompletionsClient(
             model="gpt-4o",
             base_url="https://user:password@openrouter.ai/api/v1",
@@ -163,7 +187,7 @@ def test_base_url_with_userinfo_is_rejected() -> None:
 
 
 def test_non_http_base_url_is_rejected() -> None:
-    with pytest.raises(httpx.InvalidURL, match=r"absolute HTTP\(S\) URL"):
+    with pytest.raises(OpenAIError, match=r"absolute HTTP\(S\) URL"):
         ChatCompletionsClient(
             model="gpt-4o",
             base_url="ftp://api.openai.com/v1",
