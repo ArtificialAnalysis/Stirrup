@@ -2104,9 +2104,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 try:
                     messages_to_summarize, msgs = await self.summarize_messages(msgs)
-                except ContextOverflowError as error:
-                    self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
-                    raise self._context_boundary_error(msgs) from error
+                except ContextOverflowError:
+                    self._validate_context_overflow_recovery(msgs)
+                    try:
+                        messages_to_summarize, msgs = await self._summarize_older_context(msgs)
+                    except ContextOverflowError as error:
+                        self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
+                        raise self._context_boundary_error(msgs) from error
                 full_msg_history.append(messages_to_summarize)
                 self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
 

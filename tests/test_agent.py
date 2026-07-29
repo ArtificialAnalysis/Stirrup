@@ -1334,7 +1334,7 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
     assert summaries_1[0].content != summaries_2[0].content
 
 
-async def test_summarization_context_overflow_preserves_accepted_turns_and_raises() -> None:
+async def test_eager_summarization_context_overflow_recovers_and_retains_latest_turn() -> None:
     responses = [
         AssistantMessage(
             content="First step",
@@ -1376,7 +1376,17 @@ async def test_summarization_context_overflow_preserves_accepted_turns_and_raise
     )
 
     async with agent.session() as session:
-        with pytest.raises(ContextOverflowError, match="original prompt"):
-            await session.run([SystemMessage(content="System prompt"), UserMessage(content="Do the task")])
+        finish_params, history, _ = await session.run(
+            [SystemMessage(content="System prompt"), UserMessage(content="Do the task")]
+        )
 
-    assert client.call_count == 3
+    assert finish_params is not None
+    assert finish_params.reason == "Completed"
+    assert client.call_count == 5
+
+    final_messages = history[-1]
+    summary_index = next(index for index, msg in enumerate(final_messages) if isinstance(msg, SummaryMessage))
+    retained_after_summary = [
+        msg.content for msg in final_messages[summary_index:] if isinstance(msg, AssistantMessage)
+    ]
+    assert "Second step" in retained_after_summary

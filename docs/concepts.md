@@ -441,7 +441,7 @@ By default, Stirrup retries context overflow errors by shortening the conversati
 
 When overflow happens, the agent keeps the latest completed assistant turn and summarizes the largest older complete-turn prefix that fits. Turns are summarized rather than dropped, so no accepted work or metadata is discarded, and recovery does not consume `max_turns`. If no safe prefix fits - the overflow already reaches the original prompt or an existing summary - the context error is raised.
 
-Eager summarization, which runs once `context_summarization_cutoff` of the context is used, does not share this recovery: if it overflows, the context error is raised.
+Eager summarization, which runs once `context_summarization_cutoff` of the context is used, shares this recovery: it first summarizes the whole conversation, and if that overflows it falls back to the largest older complete-turn prefix that fits.
 
 To fail immediately instead:
 
