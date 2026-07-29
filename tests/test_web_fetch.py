@@ -175,12 +175,20 @@ async def test_web_fetch_metadata_accumulates_across_fetches(monkeypatch: Monkey
         tool = _get_fetch_web_page_tool(client)
         first_result = await run_web_fetch_tool(tool, "https://first.example/page")
         second_result = await run_web_fetch_tool(tool, "https://second.example/page")
+        # A refused destination is still a use of the tool, so it is accounted for too.
+        refused_result = await run_web_fetch_tool(tool, "http://127.0.0.1/secret")
 
     assert first_result.metadata is not None
     assert second_result.metadata is not None
-    combined = first_result.metadata + second_result.metadata
-    assert combined.num_uses == 2
-    assert combined.pages_fetched == ["https://first.example/page", "https://second.example/page"]
+    assert refused_result.metadata is not None
+    assert refused_result.success is False
+    combined = first_result.metadata + second_result.metadata + refused_result.metadata
+    assert combined.num_uses == 3
+    assert combined.pages_fetched == [
+        "https://first.example/page",
+        "https://second.example/page",
+        "http://127.0.0.1/secret",
+    ]
 
 
 async def test_web_provider_isolates_fetch_from_proxies_and_search_state(monkeypatch: MonkeyPatch) -> None:
