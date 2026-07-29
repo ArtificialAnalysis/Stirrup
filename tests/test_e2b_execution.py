@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,7 +15,7 @@ from e2b import InvalidArgumentException, TimeoutException
 from e2b.sandbox.filesystem.filesystem import FileType
 from e2b_code_interpreter import CommandExitException
 
-from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
+from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider, _quote_argv_for_shell
 
 
 @pytest.fixture
@@ -126,6 +127,22 @@ class TestE2BCodeExecToolProvider:
                 # Disallowed command
                 result = await provider.run_command("rm -rf /")
                 assert result.error_kind == "command_not_allowed"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["echo", "$(whoami)"],
+            ["echo", "line1\nline2"],
+            ["echo", "it's"],
+            ["echo", ""],
+            ["ls", "-n"],
+        ],
+    )
+    def test_quote_argv_for_shell_round_trips(self, argv: list[str]) -> None:
+        # E2B is the one backend that hands a string to a shell, so the
+        # re-quoting is the whole guarantee: it must parse back to exactly the
+        # arguments the allowlist vetted.
+        assert shlex.split(_quote_argv_for_shell(argv)) == argv
 
     async def test_save_output_files(self, mock_sandbox: MagicMock, temp_output_dir: Path) -> None:
         """Test saving files from E2B sandbox."""

@@ -43,7 +43,8 @@ _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
     "shell_syntax": (
         "Allowlisted commands run without a shell. Shell syntax such as ;, &&, |, "
         "redirects, $(...), backticks, or multiple lines is not supported. Run one "
-        "command with literal arguments."
+        "command with literal arguments, and quote any argument that is itself an "
+        "operator character (e.g. -exec ... ';')."
     ),
     "shell_assignment": (
         "Assignment prefixes such as NAME=value are not supported. Run the command without the leading assignment."
@@ -176,19 +177,38 @@ def _reserve_output_destination(
     reserved[identity] = claimant
 
 
-def _unquoted_operator_tokens(cmd: str) -> list[str]:
-    """Return any unquoted shell operator tokens in cmd.
+def _operator_tokens(cmd: str, *, posix: bool) -> list[str]:
+    """Return the tokens of cmd that are made only of operator characters.
 
     Uses shlex punctuation mode, which splits runs of operator characters into
     their own tokens unless they are quoted or escaped. This catches operators
-    attached to a word (``>out.txt``, ``foo;rm``) while leaving quoted literals
-    (``'a;b'``, ``--format='%h;%s'``) alone. Newline counts as an operator, not
-    whitespace. Raises ValueError on unbalanced quotes.
+    attached to a word (``>out.txt``, ``foo;rm``). Newline counts as an
+    operator, not whitespace. Raises ValueError on unbalanced quotes.
     """
-    lex = shlex.shlex(cmd, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
+    lex = shlex.shlex(cmd, posix=posix, punctuation_chars=_SHELL_PUNCTUATION)
+    lex.commenters = ""  # '#' is an ordinary character to shlex.split, so it must be here too
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
     return [token for token in lex if token and all(c in _SHELL_PUNCTUATION for c in token)]
+
+
+def _unquoted_operator_tokens(cmd: str) -> list[str]:
+    """Return any unquoted shell operator tokens in cmd.
+
+    Neither shlex mode alone can tell a bare operator from a quoted literal:
+    POSIX mode removes the quotes before we classify a token, so ``'|'`` and
+    ``-exec ls {} ';'`` look like operators, while non-POSIX mode keeps the
+    quotes but only honours them at the start of a token, so it misreads
+    ``--format='%h;%s'`` and ``a\\;b``. Neither mode can miss a real operator —
+    every character POSIX treats as unquoted is unquoted in non-POSIX mode too
+    — so a command is only rejected when both modes report one.
+
+    Raises ValueError on unbalanced quotes.
+    """
+    posix_operators = _operator_tokens(cmd, posix=True)
+    if not posix_operators or not _operator_tokens(cmd, posix=False):
+        return []
+    return posix_operators
 
 
 class CodeExecutionParams(BaseModel):

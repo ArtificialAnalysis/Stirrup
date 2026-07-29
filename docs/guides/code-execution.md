@@ -64,13 +64,17 @@ provider = LocalCodeExecToolProvider(
 )
 ```
 
-The allowlist works the same way in every backend (`LocalCodeExecToolProvider`,
-`DockerCodeExecToolProvider`, and `E2BCodeExecToolProvider`).
+The allowlist is configured and matched the same way in every backend
+(`LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`, and
+`E2BCodeExecToolProvider`).
 
-When an allowlist is set, commands do not go through a shell. Stirrup parses
-each command into an argument list, checks it against your patterns, and
-executes it directly. What was vetted is exactly what runs — there is no shell
-that could reinterpret the command afterwards.
+When an allowlist is set, Stirrup parses each command into an argument list and
+checks that list against your patterns, so what was vetted is exactly what runs.
+`LocalCodeExecToolProvider` and `DockerCodeExecToolProvider` execute the argument
+list directly, with no shell involved. `E2BCodeExecToolProvider` is the
+exception: the E2B API accepts only a command string, so the vetted arguments are
+quoted back into one and run by the sandbox shell, with every argument quoted so
+there is nothing left for it to expand.
 
 **Pattern matching.** Patterns are regexes matched against the parsed command,
 starting from the first character. Quoting is normalized before matching, so
@@ -79,8 +83,8 @@ also allows `lsblk`. To pin the command word exactly, use a pattern like
 `git(\s.*)?\Z`.
 
 **What works.** A single command with plain or quoted arguments. Quoted shell
-characters are just text: `echo 'a;b'` and `grep 'foo$' file` do what they
-look like.
+characters are just text: `echo 'a;b'`, `grep 'foo$' file`, and
+`find . -exec ls {} ';'` do what they look like.
 
 **What is different without a shell:**
 
