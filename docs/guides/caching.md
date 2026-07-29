@@ -88,7 +88,7 @@ A cache is refused, never partially trusted, when its identity version does not 
 
 Resume is a Ctrl+C recovery aid, not a memoization layer. A resume that silently continues against changed inputs produces a confident wrong answer with no error and no warning — strictly worse than losing the turns and starting again. So identity is matched exactly and a mismatch always starts fresh.
 
-In practice this means: change the model, add, remove, reorder or re-describe a tool, change a tool's parameter schema, change the `system_prompt`, edit an input file, or edit a skill file, and you start over.
+In practice this means: change the model, add, remove or re-describe a tool, change a tool's parameter schema, change the `system_prompt`, edit an input file, or edit a skill file, and you start over. Tool *order* is the one exception: definitions are compared name-sorted, because provider-supplied tools (MCP in particular) are not discovered in a guaranteed order, and a refusal with no visible cause is worse than losing that weak a signal.
 
 ## Preserving Caches on Success
 

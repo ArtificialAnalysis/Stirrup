@@ -675,9 +675,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                        to the agent. Skills are uploaded to the execution environment
                        and their metadata is included in the system prompt.
             resume: If True, attempt to resume from cached state if available.
-                   The cache is identified by hashing the init_msgs passed to run().
-                   Cached state includes message history, current turn, and execution
-                   environment files from a previous interrupted run.
+                   The cache is identified by everything the model is shown - the
+                   init_msgs, model, system prompt, tool definitions, and the content of
+                   input and skill files - and is resumed only on an exact match, so
+                   changing any of them starts fresh. Cached state includes message
+                   history, current turn, and execution environment files from a previous
+                   interrupted run.
             clear_cache_on_success: If True (default), automatically clear the cache
                                    when the agent completes successfully. Set to False
                                    to preserve caches for inspection or debugging.
@@ -685,8 +688,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                state on Ctrl+C. Set to False when running agents in
                                threads or subprocesses where signal handlers cannot
                                be registered from non-main threads. Concurrent root runs
-                               in one process must use different task prompts while caching
-                               is enabled.
+                               in one process must have different cache identities while
+                               caching is enabled.
 
         Returns:
             A fresh SessionAgent for use with `async with agent.session(...) as session:`
