@@ -1,7 +1,7 @@
 """Cache module for persisting and resuming agent state.
 
 Provides functionality to cache agent state (messages, run metadata, execution environment files)
-on non-success exits and restore that state for resumption in new runs.
+when a root session exits - successfully or not - and restore that state for resumption in new runs.
 """
 
 import base64
@@ -29,7 +29,6 @@ else:
 from pydantic import BaseModel, TypeAdapter
 
 from stirrup.core.models import (
-    Addable,
     AssistantMessage,
     AudioContentBlock,
     ChatMessage,
@@ -44,7 +43,6 @@ from stirrup.core.models import (
     TurnWarningMessage,
     UserMessage,
     VideoContentBlock,
-    _UnresolvedMetadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +57,6 @@ _METADATA_VALUE_KEY = "value"
 _SUBAGENT_METADATA_TYPE = "SubAgentMetadata.v1"
 _TOKEN_USAGE_METADATA_TYPE = "TokenUsage.v1"
 _TOOL_USE_COUNT_METADATA_TYPE = "ToolUseCountMetadata.v1"
-_APPLICATION_METADATA_TYPE = "PydanticBaseModel.v1"
 _MAPPING_METADATA_TYPE = "Mapping.v1"
 
 
@@ -366,16 +363,7 @@ def _serialize_metadata_item(item: Any) -> Any:  # noqa: ANN401
     Handles Pydantic models by calling model_dump(mode='json').
     Handles bytes by base64 encoding them.
     """
-    if isinstance(item, _UnresolvedMetadata):
-        return {
-            _METADATA_TYPE_KEY: _APPLICATION_METADATA_TYPE,
-            _METADATA_VALUE_KEY: {
-                "module": item.module,
-                "qualname": item.qualname,
-                "payload": item.payload,
-            },
-        }
-    elif type(item) is SubAgentMetadata:
+    if type(item) is SubAgentMetadata:
         return {
             _METADATA_TYPE_KEY: _SUBAGENT_METADATA_TYPE,
             _METADATA_VALUE_KEY: {
@@ -394,15 +382,7 @@ def _serialize_metadata_item(item: Any) -> Any:  # noqa: ANN401
             _METADATA_VALUE_KEY: item.model_dump(mode="json"),
         }
     elif isinstance(item, BaseModel):
-        model_type = type(item)
-        return {
-            _METADATA_TYPE_KEY: _APPLICATION_METADATA_TYPE,
-            _METADATA_VALUE_KEY: {
-                "module": model_type.__module__,
-                "qualname": model_type.__qualname__,
-                "payload": item.model_dump(mode="json"),
-            },
-        }
+        return item.model_dump(mode="json")
     elif isinstance(item, bytes):
         # Base64 encode raw bytes to make them JSON-serializable
         return base64.b64encode(item).decode("ascii")
@@ -476,11 +456,7 @@ def _validate_serialized_metadata_item(item: object) -> None:
             for nested_value in value.values():
                 _validate_serialized_metadata_item(nested_value)
             return
-        if metadata_type in {
-            _TOKEN_USAGE_METADATA_TYPE,
-            _TOOL_USE_COUNT_METADATA_TYPE,
-            _APPLICATION_METADATA_TYPE,
-        }:
+        if metadata_type in {_TOKEN_USAGE_METADATA_TYPE, _TOOL_USE_COUNT_METADATA_TYPE}:
             return
 
     for value in item_data.values():
@@ -512,72 +488,12 @@ def _deserialize_metadata_item(item: Any) -> Any:  # noqa: ANN401
                 message_history=[deserialize_messages(group) for group in message_history],
                 run_metadata=_deserialize_metadata_item(run_metadata),
             )
-        if metadata_type == _APPLICATION_METADATA_TYPE:
-            return _deserialize_application_metadata(value)
         if metadata_type == _MAPPING_METADATA_TYPE:
             if not isinstance(value, dict):
                 raise ValueError("Cached mapping metadata payload must be a dictionary")
             return {key: _deserialize_metadata_item(nested) for key, nested in value.items()}
 
     return {key: _deserialize_metadata_item(value) for key, value in item.items()}
-
-
-def _deserialize_application_metadata(value: object) -> BaseModel | _UnresolvedMetadata:
-    """Restore an application model only when its already-loaded class is safe to use."""
-    if not isinstance(value, dict):
-        return _UnresolvedMetadata("<invalid>", "<invalid>", {"value": value}, "malformed envelope")
-
-    value_dict = cast(dict[str, object], value)
-    module_name = value_dict.get("module")
-    qualname = value_dict.get("qualname")
-    payload = value_dict.get("payload")
-    safe_payload = cast(dict[str, Any], payload) if isinstance(payload, dict) else {"value": payload}
-    if not isinstance(module_name, str) or not isinstance(qualname, str) or not isinstance(payload, dict):
-        return _UnresolvedMetadata(
-            str(module_name),
-            str(qualname),
-            safe_payload,
-            "malformed type identity or payload",
-        )
-    payload_dict = cast(dict[str, Any], payload)
-
-    module_parts = module_name.split(".")
-    qualname_parts = qualname.split(".")
-    if (
-        not module_parts
-        or not all(part.isidentifier() for part in module_parts)
-        or not qualname_parts
-        or "<locals>" in qualname_parts
-        or not all(part.isidentifier() for part in qualname_parts)
-    ):
-        return _UnresolvedMetadata(module_name, qualname, payload_dict, "unsafe type identity")
-
-    target: object = sys.modules.get(module_name)
-    if target is None:
-        return _UnresolvedMetadata(module_name, qualname, payload_dict, "module is not loaded")
-    for part in qualname_parts:
-        try:
-            namespace = vars(target)
-        except TypeError:
-            return _UnresolvedMetadata(module_name, qualname, payload_dict, "type path is not a namespace")
-        if part not in namespace:
-            return _UnresolvedMetadata(module_name, qualname, payload_dict, "type is not loaded")
-        target = namespace[part]
-
-    if not isinstance(target, type) or not issubclass(target, BaseModel):
-        return _UnresolvedMetadata(module_name, qualname, payload_dict, "target is not a BaseModel class")
-    try:
-        restored = target.model_validate(payload_dict)
-    except Exception as error:
-        return _UnresolvedMetadata(
-            module_name,
-            qualname,
-            payload_dict,
-            f"payload validation raised {type(error).__name__}",
-        )
-    if not isinstance(restored, Addable):
-        return _UnresolvedMetadata(module_name, qualname, payload_dict, "model is not Addable")
-    return restored
 
 
 def _serialize_run_metadata(run_metadata: dict[str, list[Any]]) -> dict[str, list[Any]]:
@@ -1053,11 +969,11 @@ class CacheManager:
                 or generations_dir.is_symlink()
                 or not generations_dir.is_dir()
             ):
-                logger.debug("No compatible cache generation found for task %s", task_hash)
+                logger.debug("No cache found for task %s", task_hash)
                 return None
             generation = self._read_current_generation(cache_dir)
             if generation is None:
-                logger.debug("No compatible cache generation found for task %s", task_hash)
+                logger.warning("Ignoring a cache for task %s because no compatible generation is selected", task_hash)
                 return None
             if any(path.is_symlink() for path in generations_dir.iterdir()):
                 logger.warning("Ignoring cache with a symlinked generation directory for task %s", task_hash)
@@ -1097,17 +1013,10 @@ class CacheManager:
             logger.info("Loaded cache generation %s for task %s", generation, task_hash)
             return state
 
-    def restore_files(self, task_hash: str, dest_dir: Path) -> bool:
-        """Restore cached files to the destination directory.
-
-        Args:
-            task_hash: Unique identifier for the task/cache.
-            dest_dir: Destination directory (typically the new exec env temp dir).
-
-        Returns:
-            True if files were restored, False if no files cache exists.
-        """
-        return self.load_state(task_hash, restore_files_to=dest_dir) is not None
+    def has_cache(self, task_hash: str) -> bool:
+        """Report whether a task cache directory exists, whether or not load_state can use it."""
+        cache_dir = self._get_cache_dir(task_hash)
+        return cache_dir.is_dir() and not cache_dir.is_symlink()
 
     def clear_cache(self, task_hash: str) -> None:
         """Remove cache for a specific task.
@@ -1222,5 +1131,4 @@ class CacheManager:
                 "turn": turn,
                 "timestamp": timestamp,
                 "agent_name": agent_name,
-                "has_files": True,
             }

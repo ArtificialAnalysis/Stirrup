@@ -25,7 +25,7 @@ agent = Agent(
     run_sync_in_thread=True,                              # (default: True) Run sync tools in thread
     text_only_tool_responses=True,                        # (default: True) Extract images from responses
     block_successive_assistant_messages=True,               # (default: True) Inject continue prompt between assistant messages
-    recover_from_context_overflow=True,                   # (default: True) Retry overflows by unwinding recent progress
+    recover_from_context_overflow=True,                   # (default: True) Retry overflows by summarizing older turns
     logger=None,                                          # (default: None) Custom logger instance
 )
 ```
@@ -44,7 +44,7 @@ agent = Agent(
     | `run_sync_in_thread` | `bool` | `True` | Run sync tools in separate thread |
     | `text_only_tool_responses` | `bool` | `True` | Extract images to user messages |
     | `block_successive_assistant_messages` | `bool` | `True` | Inject continue prompt to prevent back-to-back assistant messages |
-    | `recover_from_context_overflow` | `bool` | `True` | Retry context overflows by unwinding recent completed turns |
+    | `recover_from_context_overflow` | `bool` | `True` | Retry context overflows by summarizing an older complete-turn prefix |
     | `logger` | `AgentLoggerBase \| None` | `None` | Custom logger instance |
 
 ### Understanding Agent Output
@@ -439,9 +439,9 @@ print(f"Total tokens: {aggregated['token_usage'].total}")
 
 By default, Stirrup retries context overflow errors by shortening the conversation and trying again.
 
-When overflow happens, the agent removes the latest completed assistant turn. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
+When overflow happens, the agent keeps the latest completed assistant turn and summarizes the largest older complete-turn prefix that fits. Turns are summarized rather than dropped, so no accepted work or metadata is discarded, and recovery does not consume `max_turns`. If no safe prefix fits - the overflow already reaches the original prompt or an existing summary - the context error is raised.
 
-This also applies when eager summarization overflows. Any removed turn is also removed from final metadata and does not count against `max_turns`.
+Eager summarization, which runs once `context_summarization_cutoff` of the context is used, does not share this recovery: if it overflows, the context error is raised.
 
 To fail immediately instead:
 

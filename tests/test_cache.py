@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from PIL import Image
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from stirrup.core import cache as cache_module
 from stirrup.core.cache import (
@@ -33,7 +33,6 @@ from stirrup.core.models import (
     ToolResult,
     ToolUseCountMetadata,
     UserMessage,
-    _UnresolvedMetadata,
     aggregate_metadata,
 )
 from stirrup.tools.finish import FinishParams
@@ -52,24 +51,6 @@ class CountParams(BaseModel):
 
 class OtherParams(BaseModel):
     value: str
-
-
-class RuntimeValidatorMetadata(BaseModel):
-    value: int
-
-    @model_validator(mode="before")
-    @classmethod
-    def fail_validation(cls, _value: object) -> object:
-        raise RuntimeError("application validator failed")
-
-
-class InterruptingValidatorMetadata(BaseModel):
-    value: int
-
-    @model_validator(mode="before")
-    @classmethod
-    def interrupt_validation(cls, _value: object) -> object:
-        raise KeyboardInterrupt("do not catch")
 
 
 def _tool(name: str, parameters: type[BaseModel] = CountParams, *, description: str | None = None) -> Tool:
@@ -172,10 +153,8 @@ def test_state_round_trip_preserves_flat_typed_metadata() -> None:
 
     assert "run_metadata_by_turn" not in serialized
     assert isinstance(restored.run_metadata["worker"][0], SubAgentMetadata)
-    assert all(isinstance(item, HealthMetadata) for item in restored.run_metadata["health"])
-    assert aggregate_metadata(restored.run_metadata, return_json_serializable=False)["health"] == HealthMetadata(
-        healthy=False
-    )
+    # Only Stirrup-owned metadata types are restored; application models come back as plain dicts.
+    assert restored.run_metadata["health"] == [{"healthy": True}, {"healthy": False}]
     assert aggregate_metadata({"worker": restored.run_metadata["worker"]}) == aggregate_metadata({"worker": [child]})
 
 
@@ -199,32 +178,6 @@ def test_plain_metadata_envelope_collisions_round_trip_as_mappings() -> None:
 
     assert restored.run_metadata["plain"] == [{"nested": collisions}, *collisions]
     assert restored.run_metadata["typed"] == [TokenUsage(input=1, answer=2)]
-
-
-def _application_metadata_envelope(model: type[BaseModel]) -> dict[str, object]:
-    return {
-        "__stirrup_metadata_type__": "PydanticBaseModel.v1",
-        "value": {"module": model.__module__, "qualname": model.__qualname__, "payload": {"value": 1}},
-    }
-
-
-def test_application_validator_exception_restores_unresolved_metadata() -> None:
-    data = _state("validator").to_dict()
-    data["run_metadata"] = {"application": [_application_metadata_envelope(RuntimeValidatorMetadata)]}
-
-    restored = CacheState.from_dict(data)
-
-    metadata = restored.run_metadata["application"][0]
-    assert isinstance(metadata, _UnresolvedMetadata)
-    assert metadata.reason == "payload validation raised RuntimeError"
-
-
-def test_application_validator_base_exception_propagates() -> None:
-    data = _state("interrupt").to_dict()
-    data["run_metadata"] = {"application": [_application_metadata_envelope(InterruptingValidatorMetadata)]}
-
-    with pytest.raises(KeyboardInterrupt, match="do not catch"):
-        CacheState.from_dict(data)
 
 
 def test_decoder_derives_partial_complete_skipped_and_terminal_calls() -> None:
@@ -621,20 +574,16 @@ def test_restore_preserves_execution_file_modes(tmp_path: Path) -> None:
     assert stat.S_IMODE((restored / "run.sh").stat().st_mode) == 0o751
 
 
-def test_get_cache_info_does_not_restore_application_metadata(tmp_path: Path) -> None:
+def test_get_cache_info_summarizes_the_selected_generation(tmp_path: Path) -> None:
     manager = CacheManager(cache_base_dir=tmp_path)
     manager.save_state("info", _state("info"))
-    state_path = _selected_generation(tmp_path, "info") / "state.json"
-    data = json.loads(state_path.read_text())
-    data["run_metadata"] = {"application": [_application_metadata_envelope(RuntimeValidatorMetadata)]}
-    state_path.write_text(json.dumps(data))
+    data = json.loads((_selected_generation(tmp_path, "info") / "state.json").read_text())
 
     assert manager.get_cache_info("info") == {
         "task_hash": "info",
         "turn": 0,
         "timestamp": data["timestamp"],
         "agent_name": "",
-        "has_files": True,
     }
 
 
@@ -646,6 +595,7 @@ def test_malformed_pointer_and_state_are_unavailable_but_permission_errors_propa
     manager.save_state("pointer", _state("pointer"))
     (tmp_path / "pointer" / "current.json").write_text("not json")
     assert manager.load_state("pointer") is None
+    assert manager.has_cache("pointer")
 
     manager.save_state("state", _state("state"))
     (_selected_generation(tmp_path, "state") / "state.json").write_text('{"identity_version": 2}')

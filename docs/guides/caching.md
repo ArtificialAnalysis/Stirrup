@@ -1,7 +1,7 @@
 # Caching and Resumption
 
-Stirrup caches accepted agent progress when an interrupt, error, or turn limit
-ends a root session. Pass `resume=True` to restore compatible progress:
+Stirrup caches accepted agent progress whenever a root session ends, including a
+successful one. Pass `resume=True` to restore compatible progress:
 
 ```python
 async with agent.session(
@@ -13,8 +13,9 @@ async with agent.session(
 ```
 
 Caches live under `~/.cache/stirrup/<task_hash>/`. A successful cache-owning
-session or provider-free direct run clears its cache by default. Set
-`clear_cache_on_success=False` to retain it for inspection.
+session writes a complete generation, including a copy of the managed working
+root, and then clears it; a provider-free direct run clears its cache too. Set
+`clear_cache_on_success=False` to retain the generation for inspection.
 
 ## Run identity
 
@@ -23,12 +24,22 @@ A cache is selected by a versioned identity containing:
 - the initial prompt or messages;
 - agent name, model slug, and complete system prompt;
 - every model-visible tool's category, name, description, and parameter schema;
-- uploaded input paths and SHA-256 content digests;
-- uploaded skill paths and SHA-256 content digests.
+- uploaded input and skill destination paths, with SHA-256 digests of the bytes
+  actually present in the execution environment.
 
 Enumeration order does not affect identity. Changing any identified behavior or
-uploaded content starts a fresh run. Endpoint identity is not currently part of
-the cache key.
+uploaded content starts a fresh run.
+
+Two exclusions are accepted rather than accidental. Endpoint identity is not part
+of the cache key. Neither is a nested sub-agent's own configuration: a sub-agent
+contributes only the name, description, and fixed `SubAgentParams` schema of the
+tool it is exposed as, so changing its model slug, system prompt, or tool set and
+then resuming keeps accepted results produced by the previous configuration.
+Clear the cache explicitly after reconfiguring a sub-agent.
+
+Because every model-visible tool contributes to identity, duplicate tool names
+are now rejected when an `Agent` is constructed, where they previously resolved
+silently to the last tool registered under a repeated name.
 
 The identity format and on-disk layout have independent versions. Legacy,
 unversioned, or incompatible state is ignored rather than restored.
@@ -47,11 +58,20 @@ message together. A successful finish is checkpointed before progress callbacks,
 output export, logger shutdown, or provider teardown. Consequently, resumption
 does not replay accepted side effects after one of those later phases fails.
 
+Checkpoints are held in memory and written to disk once, as the root session
+exits. Only endings that unwind through session exit are therefore recoverable:
+exceptions, turn limits, and SIGINT. A process that dies without unwinding -
+SIGKILL, SIGTERM, an OOM kill, or `docker stop` - loses every accepted tool
+result even with `cache_on_interrupt=True`, so a long run killed by a rolling
+deploy replays from turn 0.
+
 Tool metadata is stored as one flat append-only mapping from tool name to
-accepted values. Stirrup-owned metadata and loaded application Pydantic models
-retain their types and `Addable` behavior, while plain mappings remain mappings
-even when their keys resemble Stirrup's typed metadata envelope. Metadata
-remains accepted when older conversation context is summarized.
+accepted values. Stirrup-owned metadata retains its type and `Addable` behavior,
+while plain mappings remain mappings even when their keys resemble Stirrup's
+typed metadata envelope. Application Pydantic models are stored and restored as
+plain dictionaries, so a resumed run mixes dictionaries for cached results with
+live models for results produced after the resume. Metadata remains accepted when
+older conversation context is summarized.
 
 Turn and progress counts are derived from accepted history rather than persisted
 as parallel counters. On context overflow, Stirrup keeps the latest accepted
@@ -79,7 +99,9 @@ filesystem restore.
 
 Cache directories and control files are private to the creating user. Symlinked
 cache, task, or generation directories are rejected, and cleanup never follows a
-symlink. Malformed pointers and state are treated as unavailable. Substantive
+symlink. Malformed pointers and state are treated as unavailable; a cache that
+exists but cannot be loaded is reported as unusable rather than absent, because
+starting fresh re-executes every previously accepted tool call. Substantive
 filesystem failures such as permission errors are propagated.
 
 ## Managing caches

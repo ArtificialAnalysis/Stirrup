@@ -384,88 +384,22 @@ def _as_posix_path(path: str | Path) -> PurePosixPath:
     return PurePosixPath(str(path).replace("\\", "/"))
 
 
-def _uploaded_input_relative_name(
-    uploaded_file: UploadedFile,
-    source_roots: list[str | Path],
-    *,
-    preserve_relative_roots: bool,
-) -> str:
-    """Map an uploaded source to the safe path visible in the logical input set."""
-    source_path = _as_posix_path(uploaded_file.source_path)
-    destination_path = _as_posix_path(uploaded_file.dest_path)
-    candidates: list[PurePosixPath] = []
-    for source_root_value in source_roots:
-        source_root = _as_posix_path(source_root_value)
-        logical_root = (
-            source_root
-            if preserve_relative_roots and not source_root.is_absolute()
-            else PurePosixPath(source_root.name)
-        )
-        if source_path == source_root:
-            relative_path = logical_root
-        else:
-            try:
-                path_within_root = source_path.relative_to(source_root)
-            except ValueError:
-                continue
-            relative_path = logical_root / path_within_root if logical_root.parts else path_within_root
-        candidates.append(relative_path)
-
-    if not candidates:
-        raise ValueError(f"Uploaded input source was not under a requested input root: {uploaded_file.source_path}")
-    matching_candidates = [
-        candidate
-        for candidate in candidates
-        if len(candidate.parts) <= len(destination_path.parts)
-        and destination_path.parts[-len(candidate.parts) :] == candidate.parts
-    ]
-    if matching_candidates:
-        return max(matching_candidates, key=lambda candidate: len(candidate.parts)).as_posix()
-    return min(candidates, key=lambda candidate: candidate.as_posix()).as_posix()
-
-
-async def _fingerprint_uploaded_inputs(
+async def _fingerprint_uploaded_files(
     exec_env: CodeExecToolProvider,
     uploaded_files: list[UploadedFile],
-    source_roots: list[str | Path],
-    *,
-    preserve_relative_roots: bool = False,
 ) -> list[CacheFileIdentity]:
-    """Fingerprint bytes in the execution environment, never mutable source files."""
+    """Fingerprint bytes in the execution environment, never mutable source files.
+
+    Identity follows the destination layout a backend chose. A backend that relocates the same
+    logical inputs therefore changes identity, which is a code change and should invalidate caches.
+    """
     identities: list[CacheFileIdentity] = []
     for uploaded_file in uploaded_files:
+        dest_path = _as_posix_path(uploaded_file.dest_path)
+        # Container backends report absolute destinations, but an identity name must be relative.
+        relative_name = PurePosixPath(*dest_path.parts[1:]) if dest_path.is_absolute() else dest_path
         content = await exec_env.read_file_bytes(uploaded_file.dest_path)
-        identities.append(
-            CacheFileIdentity.from_content(
-                _uploaded_input_relative_name(
-                    uploaded_file,
-                    source_roots,
-                    preserve_relative_roots=preserve_relative_roots,
-                ),
-                content,
-            )
-        )
-    return identities
-
-
-async def _fingerprint_uploaded_skills(
-    exec_env: CodeExecToolProvider,
-    uploaded_files: list[UploadedFile],
-    source_root: str | Path,
-) -> list[CacheFileIdentity]:
-    """Fingerprint uploaded skill bytes using paths relative to the skills root."""
-    normalized_root = _as_posix_path(source_root)
-    identities: list[CacheFileIdentity] = []
-    for uploaded_file in uploaded_files:
-        source_path = _as_posix_path(uploaded_file.source_path)
-        try:
-            relative_name = source_path.relative_to(normalized_root).as_posix()
-        except ValueError as exc:
-            raise ValueError(
-                f"Uploaded skill was not under the requested skills root: {uploaded_file.source_path}"
-            ) from exc
-        content = await exec_env.read_file_bytes(uploaded_file.dest_path)
-        identities.append(CacheFileIdentity.from_content(relative_name, content))
+        identities.append(CacheFileIdentity.from_content(relative_name.as_posix(), content))
     return identities
 
 
@@ -747,9 +681,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             block_successive_assistant_messages: If True (default), automatically inject a continue
                                                message when assistant responds without tool calls to
                                                prevent successive assistant messages.
-            recover_from_context_overflow: If True (default), drop one completed turn and retry when
-                                           the model reports a context overflow. If the original
-                                           prompt still overflows, the context error is raised.
+            recover_from_context_overflow: If True (default), summarize the largest fitting older
+                                           complete-turn prefix and retry when the model reports a
+                                           context overflow. If no safe prefix fits, the context
+                                           error is raised.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -1264,11 +1199,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         state.uploaded_file_paths = sorted(uploaded.dest_path for uploaded in result.uploaded)
                         if result.failed:
                             raise RuntimeError(f"Failed to upload files: {result.failed}")
-                        state.cache_input_files = await _fingerprint_uploaded_inputs(
+                        state.cache_input_files = await _fingerprint_uploaded_files(
                             state.exec_env,
                             result.uploaded,
-                            pending_input_paths,
-                            preserve_relative_roots=True,
                         )
                 else:
                     # ROOT AGENT: Read files from local filesystem
@@ -1283,10 +1216,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     state.uploaded_file_paths = sorted(uploaded.dest_path for uploaded in result.uploaded)
                     if result.failed:
                         raise RuntimeError(f"Failed to upload files: {result.failed}")
-                    state.cache_input_files = await _fingerprint_uploaded_inputs(
+                    state.cache_input_files = await _fingerprint_uploaded_files(
                         state.exec_env,
                         result.uploaded,
-                        [path.resolve() for path in resolved],
                     )
             self._pending_input_files = None  # Clear pending state
 
@@ -1299,10 +1231,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         result = await state.exec_env.upload_files(skills_path, dest_dir="skills")
                         if result.failed:
                             raise RuntimeError(f"Failed to upload skills: {result.failed}")
-                        state.cache_skill_files = await _fingerprint_uploaded_skills(
+                        state.cache_skill_files = await _fingerprint_uploaded_files(
                             state.exec_env,
                             result.uploaded,
-                            skills_path.resolve(),
                         )
                     # Load skills metadata (even if no exec_env, for system prompt)
                     state.skills_metadata = load_skills_metadata(skills_path)
@@ -1318,10 +1249,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     result = await state.exec_env.upload_files("skills", source_env=parent_state.exec_env)
                     if result.failed:
                         raise RuntimeError(f"Failed to inherit skills: {result.failed}")
-                    state.cache_skill_files = await _fingerprint_uploaded_skills(
+                    state.cache_skill_files = await _fingerprint_uploaded_files(
                         state.exec_env,
                         result.uploaded,
-                        "skills",
                     )
                 elif not state.exec_env_owned:
                     state.cache_skill_files = list(parent_state.cache_skill_files)
@@ -1418,35 +1348,42 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
             if should_cache:
-                cache_manager = CacheManager()
+                # A checkpoint is a best-effort recovery aid, so a failed save must not skip the
+                # output export below - that would leave a successful run with no deliverables.
+                try:
+                    cache_manager = CacheManager()
 
-                exec_env_dir = state.exec_env.temp_dir if state.exec_env else None
+                    exec_env_dir = state.exec_env.temp_dir if state.exec_env else None
 
-                # Explicit checks to keep type checker happy - should_cache condition guarantees these
-                if self._current_task_hash is None or self._current_run_state is None:
-                    raise ValueError("Cache state is unexpectedly None after should_cache check")
+                    # Explicit checks to keep type checker happy - should_cache condition guarantees these
+                    if self._current_task_hash is None or self._current_run_state is None:
+                        raise ValueError("Cache state is unexpectedly None after should_cache check")
 
-                if threading.current_thread() is threading.main_thread():
-                    # Prevent a second SIGINT from interrupting the cache write.
-                    original_handler = signal.getsignal(signal.SIGINT)
-                    signal.signal(signal.SIGINT, signal.SIG_IGN)
-                    try:
+                    if threading.current_thread() is threading.main_thread():
+                        # Prevent a second SIGINT from interrupting the cache write.
+                        original_handler = signal.getsignal(signal.SIGINT)
+                        signal.signal(signal.SIGINT, signal.SIG_IGN)
+                        try:
+                            self._task_cache_ownership.save_state(
+                                cache_manager,
+                                self._current_task_hash,
+                                self._current_run_state,
+                                exec_env_dir,
+                            )
+                        finally:
+                            signal.signal(signal.SIGINT, original_handler)
+                    else:
                         self._task_cache_ownership.save_state(
                             cache_manager,
                             self._current_task_hash,
                             self._current_run_state,
                             exec_env_dir,
                         )
-                    finally:
-                        signal.signal(signal.SIGINT, original_handler)
-                else:
-                    self._task_cache_ownership.save_state(
-                        cache_manager,
-                        self._current_task_hash,
-                        self._current_run_state,
-                        exec_env_dir,
+                    self._logger.info(f"Cached state for task {self._current_task_hash}")
+                except BaseException as cleanup_failure:
+                    primary_exception = _record_session_cleanup_failure(
+                        primary_exception, "Cache checkpoint", cleanup_failure
                     )
-                self._logger.info(f"Cached state for task {self._current_task_hash}")
             # Save files from finish_params.paths based on depth
             if state.output_dir and self._last_finish_params and state.exec_env:
                 paths = getattr(self._last_finish_params, "paths", None)
@@ -1469,8 +1406,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             len(result.saved),
                             len(result.failed),
                         )
-                        if result.failed:
-                            raise RuntimeError(f"Failed to export output files: {result.failed}")
+                        for failed_source, reason in result.failed.items():
+                            logger.warning(
+                                "[%s] ROOT AGENT: Output file not saved: %s (%s)",
+                                self._name,
+                                failed_source,
+                                reason,
+                            )
                     else:
                         # SUBAGENT: Handle file transfer based on exec_env ownership
                         if not state.exec_env_owned:
@@ -1690,7 +1632,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         run_metadata: dict[str, list[Any]],
         task_hash: str,
     ) -> None:
-        """Snapshot canonical accepted messages and flat metadata for recovery."""
+        """Snapshot canonical accepted messages and flat metadata for recovery.
+
+        The snapshot stays in memory until the root session exits, so only endings that unwind
+        through ``__aexit__`` are recoverable. An abruptly terminated process (SIGKILL, SIGTERM,
+        OOM kill, ``docker stop``) loses every accepted result. Persisting each checkpoint would
+        earn its write cost only if abrupt termination is observed in practice.
+        """
         self._current_run_state = CacheState(
             msgs=list(messages),
             full_msg_history=[list(group) for group in full_message_history],
@@ -1817,10 +1765,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
     async def summarize_messages(
         self,
         messages: list[ChatMessage],
-        run_metadata: dict[str, list[Any]],
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
         """Summarize accepted messages without discarding their metadata."""
-        del run_metadata
         return await self._summarize_message_prefix(messages, len(messages))
 
     async def _summarize_older_context(
@@ -2005,6 +1951,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     restore_files_to=restore_dir,
                     finish_tools=self._finish_tools,
                 )
+                if cached is None:
+                    if cache_manager.has_cache(task_hash):
+                        # Starting fresh from a cache that exists replays every accepted tool call.
+                        self._logger.warning(f"Ignoring an unusable cache for task {task_hash}; starting fresh")
+                    else:
+                        self._logger.info(f"No cache found for task {task_hash}, starting fresh")
             if cached is not None:
                 msgs = cached.msgs
                 full_msg_history = cached.full_msg_history
@@ -2013,8 +1965,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._current_run_state = cached
                 resumed = True
                 self._logger.info(f"Resuming from cached state at turn {_get_turn_count(full_msg_history, msgs)}")
-            else:
-                self._logger.info(f"No cache found for task {task_hash}, starting fresh")
 
         if not resumed:
             msgs: list[ChatMessage] = [SystemMessage(content=full_system_prompt)]
@@ -2153,7 +2103,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 try:
-                    messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata)
+                    messages_to_summarize, msgs = await self.summarize_messages(msgs)
                 except ContextOverflowError as error:
                     self._checkpoint_run_state(msgs, full_msg_history, run_metadata, task_hash)
                     raise self._context_boundary_error(msgs) from error

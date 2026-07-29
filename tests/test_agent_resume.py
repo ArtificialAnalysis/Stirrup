@@ -28,6 +28,7 @@ from stirrup.core.models import (
 from stirrup.tools.code_backends.base import (
     CodeExecToolProvider,
     SaveOutputFilesResult,
+    UploadFilesResult,
 )
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
@@ -135,6 +136,26 @@ class RemoteOnlyProvider(LocalCodeExecToolProvider):
     @property
     def temp_dir(self) -> None:
         return None
+
+
+class ContainerPathProvider(LocalCodeExecToolProvider):
+    """Reports container-absolute upload destinations, as the Docker and E2B backends do."""
+
+    _CONTAINER_ROOT = "/workspace"
+
+    async def upload_files(
+        self,
+        *paths: Path | str,
+        source_env: CodeExecToolProvider | None = None,
+        dest_dir: str | None = None,
+    ) -> UploadFilesResult:
+        result = await super().upload_files(*paths, source_env=source_env, dest_dir=dest_dir)
+        for uploaded in result.uploaded:
+            uploaded.dest_path = f"{self._CONTAINER_ROOT}/{uploaded.dest_path}"
+        return result
+
+    async def read_file_bytes(self, path: str) -> bytes:
+        return await super().read_file_bytes(path.removeprefix(f"{self._CONTAINER_ROOT}/"))
 
 
 class ExportFailOnceProvider(LocalCodeExecToolProvider):
@@ -263,7 +284,8 @@ async def test_partial_batch_resumes_only_pending_calls_with_flat_typed_metadata
     assert resume_client.messages_seen and [
         message.tool_call_id for message in resume_client.messages_seen[0] if isinstance(message, ToolMessage)
     ] == ["first", "second"]
-    assert metadata["record"] == [ReceiptMetadata(labels=["first"]), ReceiptMetadata(labels=["second"])]
+    # Application metadata restored from cache comes back as plain dicts; only live results stay typed.
+    assert metadata["record"] == [{"labels": ["first"]}, ReceiptMetadata(labels=["second"])]
     restored = [message for group in history for message in group if isinstance(message, ToolMessage)]
     assert [message.tool_call_id for message in restored] == ["first", "second", "finish"]
 
@@ -334,7 +356,7 @@ async def test_atomic_text_only_image_result_resumes_later_call(
     )
 
 
-@pytest.mark.parametrize("failure_kind", ["callback", "logger-exit", "provider-exit", "output-export"])
+@pytest.mark.parametrize("failure_kind", ["callback", "logger-exit", "provider-exit"])
 async def test_terminal_checkpoint_survives_post_finish_failures_without_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -356,7 +378,6 @@ async def test_terminal_checkpoint_survives_post_finish_failures_without_replay(
     )
     logger: AgentLogger = _quiet_logger()
     tools: list[Tool | CodeExecToolProvider] = []
-    output_dir: Path | None = None
     provider: CodeExecToolProvider | None = None
     expected_error = ""
     if failure_kind == "callback":
@@ -365,18 +386,13 @@ async def test_terminal_checkpoint_survives_post_finish_failures_without_replay(
     elif failure_kind == "logger-exit":
         logger = FailExitLogger()
         expected_error = "logger teardown failed"
-    elif failure_kind == "provider-exit":
+    else:
         provider = TeardownFailOnceProvider()
         tools = [provider]
         expected_error = "provider teardown failed"
-    else:
-        provider = ExportFailOnceProvider()
-        tools = [provider]
-        output_dir = tmp_path / "output"
-        expected_error = "Failed to export output files"
 
     first = Agent(  # ty: ignore[no-matching-overload]
-        client=ScriptedClient([_finish("terminal", paths=["report.txt"] if output_dir else [])]),
+        client=ScriptedClient([_finish("terminal")]),
         name=f"terminal-{failure_kind}",
         max_turns=1,
         tools=tools,
@@ -384,7 +400,7 @@ async def test_terminal_checkpoint_survives_post_finish_failures_without_replay(
         logger=logger,
     )
     with pytest.raises(RuntimeError, match=expected_error):
-        async with first.session(resume=True, output_dir=output_dir) as session:
+        async with first.session(resume=True) as session:
             await session.run("finish once")
 
     resumed = Agent(
@@ -395,12 +411,12 @@ async def test_terminal_checkpoint_survives_post_finish_failures_without_replay(
         finish_tool=finish_tool,
         logger=_quiet_logger(),
     )
-    async with resumed.session(resume=True, output_dir=output_dir) as session:
+    async with resumed.session(resume=True) as session:
         finish_params, history, metadata = await session.run("finish once")
 
     assert finish_params is not None and finish_params.reason == "terminal"
     assert finish_executions == ["terminal"]
-    assert metadata[DEFAULT_FINISH_TOOL_NAME] == [ReceiptMetadata(labels=["terminal"])]
+    assert metadata[DEFAULT_FINISH_TOOL_NAME] == [{"labels": ["terminal"]}]
     assert (
         sum(
             isinstance(message, ToolMessage) and message.name == DEFAULT_FINISH_TOOL_NAME
@@ -410,6 +426,101 @@ async def test_terminal_checkpoint_survives_post_finish_failures_without_replay(
         == 1
     )
     assert CacheManager(cache_base_dir=cache_root).list_caches() == []
+
+
+async def test_output_is_exported_even_when_the_checkpoint_save_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cache_module, "DEFAULT_CACHE_DIR", tmp_path / "cache")
+
+    def fail_save_state(
+        self: CacheManager,
+        task_hash: str,
+        state: object,
+        exec_env_dir: Path | None = None,
+    ) -> None:
+        del self, task_hash, state, exec_env_dir
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(CacheManager, "save_state", fail_save_state)
+
+    write_turn = AssistantMessage(
+        content="write the report",
+        tool_calls=[
+            ToolCall(
+                name="code_exec",
+                arguments='{"cmd": "printf deliverable > report.txt"}',
+                tool_call_id="write",
+            )
+        ],
+        token_usage=TokenUsage(input=10, answer=2),
+    )
+    agent = Agent(
+        client=ScriptedClient([write_turn, _finish("done", paths=["report.txt"])]),
+        name="checkpoint-failure-agent",
+        max_turns=3,
+        tools=[LocalCodeExecToolProvider()],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+    output_dir = tmp_path / "output"
+    with pytest.raises(OSError, match="No space left on device"):
+        async with agent.session(resume=True, output_dir=output_dir) as session:
+            await session.run("write the report")
+
+    assert (output_dir / "report.txt").read_text() == "deliverable"
+
+
+async def test_container_absolute_upload_destinations_start_a_session(tmp_path: Path) -> None:
+    input_file = tmp_path / "data.txt"
+    input_file.write_text("payload")
+    skills_dir = tmp_path / "skills" / "review"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("review carefully")
+
+    agent = Agent(
+        client=ScriptedClient([_finish("done")]),
+        name="container-path-agent",
+        max_turns=1,
+        tools=[ContainerPathProvider()],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+    async with agent.session(input_files=[input_file], skills_dir=tmp_path / "skills") as session:
+        finish_params, _, _ = await session.run("read the input")
+
+    assert finish_params is not None and finish_params.reason == "done"
+
+
+async def test_unexportable_output_files_are_reported_without_failing_the_run(
+    tmp_path: Path,
+) -> None:
+    provider = ExportFailOnceProvider()
+    write_turn = AssistantMessage(
+        content="write the report",
+        tool_calls=[
+            ToolCall(
+                name="code_exec",
+                arguments='{"cmd": "printf deliverable > report.txt"}',
+                tool_call_id="write",
+            )
+        ],
+        token_usage=TokenUsage(input=10, answer=2),
+    )
+    agent = Agent(
+        client=ScriptedClient([write_turn, _finish("done", paths=["report.txt"])]),
+        name="export-failure-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        logger=_quiet_logger(),
+    )
+    async with agent.session(output_dir=tmp_path / "output") as session:
+        finish_params, _, _ = await session.run("write the report")
+
+    assert finish_params is not None and finish_params.reason == "done"
+    assert provider.fail_export is False
 
 
 async def test_exact_restore_preserves_cached_deletion_after_identity_upload(
