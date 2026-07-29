@@ -57,16 +57,11 @@ DEFAULT_WEBFETCH_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "identity",
+    "Accept-Encoding": "gzip, deflate",
 }
 WEB_FETCH_TIMEOUT = 60 * 3
 WEB_FETCH_MAX_REDIRECTS = 10
 WEB_FETCH_RETRY_WAIT = wait_exponential(multiplier=1, min=1, max=10)
-_WEB_FETCH_MAX_BODY_BYTES = 1024 * 1024
-_WEB_FETCH_TRUNCATION_NOTICE = (
-    f"\n... This page has been truncated to its first {_WEB_FETCH_MAX_BODY_BYTES} bytes before extraction ...\n"
-)
-_WEB_FETCH_BODY_CHUNK_BYTES = 64 * 1024
 # Keep IANA special-purpose policy stable across supported ``ipaddress`` versions.
 _EXPLICITLY_NON_PUBLIC_NETWORKS = (
     ipaddress.ip_network("192.0.0.0/24"),
@@ -189,25 +184,10 @@ def _get_fetch_web_page_tool(
         Tool configured to fetch web pages and extract clean markdown content
     """
 
-    async def _read_response_body(response: httpx.Response) -> tuple[bytes, bool]:
-        """Read at most ``_WEB_FETCH_MAX_BODY_BYTES`` and report whether the body was truncated."""
-        content_encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
-        if content_encoding != "identity":
-            # httpx's GZipDecoder expands a whole chunk with no max_length, so a compressed
-            # body cannot be bounded by the byte cap below. Refuse rather than decompress.
-            raise _WebFetchError(f"Unsupported Content-Encoding in web fetch response: {content_encoding}")
-
-        body = bytearray()
-        async for chunk in response.aiter_bytes(chunk_size=_WEB_FETCH_BODY_CHUNK_BYTES):
-            body.extend(chunk)
-            if len(body) > _WEB_FETCH_MAX_BODY_BYTES:
-                return bytes(body[:_WEB_FETCH_MAX_BODY_BYTES]), True
-        return bytes(body), False
-
     async def _send_request(
         logical_url: httpx.URL,
         destination_address: str,
-    ) -> tuple[httpx.Response, tuple[bytes, bool] | None]:
+    ) -> httpx.Response:
         connection_url = logical_url.copy_with(host=destination_address)
         request = client.build_request(
             "GET",
@@ -223,28 +203,21 @@ def _get_fetch_web_page_tool(
             extensions={"sni_hostname": logical_url.raw_host.decode("ascii")},
         )
         request.headers.pop("cookie", None)
-        response: httpx.Response | None = None
         try:
-            response = await client.send(request, follow_redirects=False, stream=True)
-            if response.has_redirect_location:
-                return response, None
-            response.raise_for_status()
-            return response, await _read_response_body(response)
+            response = await client.send(request, follow_redirects=False)
+            if not response.has_redirect_location:
+                response.raise_for_status()
+            return response
         finally:
-            try:
-                if response is not None:
-                    with CancelScope(shield=True):
-                        await response.aclose()
-            finally:
-                # Fetch never sends or retains cookies. The client is dedicated to
-                # this tool, so clearing the whole jar also handles HTTPX's special
-                # domain representation for IPv6 literals.
-                client.cookies.clear()
+            # Fetch never sends or retains cookies. The client is dedicated to
+            # this tool, so clearing the whole jar also handles HTTPX's special
+            # domain representation for IPv6 literals.
+            client.cookies.clear()
 
     async def _request_hop(
         logical_url: httpx.URL,
         public_addresses: tuple[str, ...],
-    ) -> tuple[httpx.Response, tuple[bytes, bool] | None]:
+    ) -> httpx.Response:
         """Try each validated address in turn, retrying the whole hop on network failure."""
         retryer = AsyncRetrying(
             retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
@@ -265,17 +238,15 @@ def _get_fetch_web_page_tool(
 
         raise RuntimeError("Web fetch retry loop completed without a response.")
 
-    async def _fetch_with_redirects(url: str) -> tuple[bytes, bool]:
+    async def _fetch_with_redirects(url: str) -> bytes:
         current_url = httpx.URL(url).copy_with(fragment=None)
         redirects_followed = 0
 
         while True:
             public_addresses = await _resolve_public_addresses(current_url)
-            response, body = await _request_hop(current_url, public_addresses)
+            response = await _request_hop(current_url, public_addresses)
             if not response.has_redirect_location:
-                if body is None:
-                    raise RuntimeError("Web fetch completed without a response body.")
-                return body
+                return response.content
 
             if redirects_followed >= WEB_FETCH_MAX_REDIRECTS:
                 raise _WebFetchError(f"Too many redirects (maximum {WEB_FETCH_MAX_REDIRECTS}).")
@@ -287,7 +258,7 @@ def _get_fetch_web_page_tool(
         """Fetch web page and extract main content as markdown using trafilatura."""
         try:
             with fail_after(timeout):
-                response_body, is_truncated = await _fetch_with_redirects(params.url)
+                response_body = await _fetch_with_redirects(params.url)
                 body_md = (
                     await to_thread.run_sync(
                         partial(trafilatura.extract, response_body, output_format="markdown"),
@@ -295,8 +266,6 @@ def _get_fetch_web_page_tool(
                     )
                     or ""
                 )
-                if is_truncated:
-                    body_md += _WEB_FETCH_TRUNCATION_NOTICE
             return ToolResult(
                 content=f"<web_fetch><url>{params.url}</url><body>"
                 f"{truncate_msg(body_md, MAX_LENGTH_WEB_FETCH_HTML)}</body></web_fetch>",

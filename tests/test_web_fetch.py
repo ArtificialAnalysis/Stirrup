@@ -25,8 +25,6 @@ from stirrup.tools.web import (
 
 PUBLIC_IPV4 = "93.184.216.34"
 PUBLIC_IPV6 = "2606:2800:220:1:248:1893:25c8:1946"
-EXPECTED_MAX_BODY_BYTES = 1024 * 1024
-BODY_CHUNK_BYTES = 64 * 1024
 
 
 async def run_web_fetch_tool(
@@ -472,7 +470,6 @@ async def test_web_fetch_timeout_closes_response_and_clears_cookies(monkeypatch:
 
     assert result.success is False
     assert "Web fetch timed out" in result.content
-    assert stream.is_closed is True
     assert retained_cookies == []
 
 
@@ -507,79 +504,6 @@ async def test_web_fetch_extraction_uses_remaining_total_deadline(monkeypatch: M
     assert extraction_started.is_set()
     assert time.perf_counter() - started_at < 0.4
     assert "Web fetch timed out" in result.content
-
-
-async def test_web_fetch_rejects_compressed_response_without_reading_it(monkeypatch: MonkeyPatch) -> None:
-    install_dns(monkeypatch, PUBLIC_IPV4)
-    requests: list[httpx.Request] = []
-
-    class CompressedStream(httpx.AsyncByteStream):
-        def __init__(self) -> None:
-            self.was_read = False
-            self.is_closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            self.was_read = True
-            yield b"compressed bytes that must not be decoded"
-
-        async def aclose(self) -> None:
-            self.is_closed = True
-
-    stream = CompressedStream()
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, request=request, headers={"Content-Encoding": "gzip"}, stream=stream)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), "https://example.com/page")
-
-    assert result.success is False
-    assert "Unsupported Content-Encoding" in result.content
-    assert requests[0].headers["accept-encoding"] == "identity"
-    assert stream.was_read is False
-    assert stream.is_closed is True
-
-
-async def test_web_fetch_caps_response_body_before_extraction(monkeypatch: MonkeyPatch) -> None:
-    install_dns(monkeypatch, PUBLIC_IPV4)
-    extracted_bodies: list[bytes] = []
-
-    class RecordingStream(httpx.AsyncByteStream):
-        def __init__(self) -> None:
-            self.bytes_sent = 0
-            self.is_closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            chunk = b"x" * BODY_CHUNK_BYTES
-            for _ in range(EXPECTED_MAX_BODY_BYTES // len(chunk) + 10):
-                self.bytes_sent += len(chunk)
-                yield chunk
-
-        async def aclose(self) -> None:
-            self.is_closed = True
-
-    stream = RecordingStream()
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, request=request, stream=stream)
-
-    def extract(body: bytes, *, output_format: str) -> str:
-        assert output_format == "markdown"
-        extracted_bodies.append(body)
-        return "bounded body"
-
-    monkeypatch.setattr(web.trafilatura, "extract", extract)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), "https://example.com/page")
-
-    assert result.success is True
-    assert len(extracted_bodies[0]) == EXPECTED_MAX_BODY_BYTES
-    # Detecting truncation costs at most one chunk read past the cap.
-    assert stream.bytes_sent <= EXPECTED_MAX_BODY_BYTES + BODY_CHUNK_BYTES
-    assert stream.is_closed is True
-    assert "truncated" in result.content
 
 
 async def test_web_fetch_limits_redirects(monkeypatch: MonkeyPatch) -> None:

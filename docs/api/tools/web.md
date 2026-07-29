@@ -24,12 +24,9 @@ Fetches a web page and returns its content as markdown.
 
 ### Limits
 
-- Response bodies are read up to 1 MiB; longer pages are truncated before extraction and the
-  returned markdown carries a truncation notice.
-- Compressed responses are refused rather than decoded, because the decoder expands a whole chunk
-  at a time and so cannot be bounded by the byte cap. If origins that ignore
-  `Accept-Encoding: identity` show up in practice, the fix is a bounded incremental decompressor,
-  not relaxing the check.
+- The response body is not bounded while it is downloaded and decompressed; only the extracted
+  markdown is truncated, to 40 000 characters. Bounding the download itself needs streaming reads
+  plus a bounded incremental decompressor, which is out of scope here.
 - There is no destination-port policy once an address validates: any port on a public address is
   reachable.
 - Internal services hosted on public IP addresses remain reachable by construction.
