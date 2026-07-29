@@ -1,6 +1,7 @@
 import contextvars
 import copy
 import glob as glob_module
+import hashlib
 import inspect
 import logging
 import re
@@ -23,7 +24,7 @@ from stirrup.constants import (
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.exceptions import CacheUnusableError, ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -147,6 +148,21 @@ def _release_custom_session_resources(resources: list[object]) -> None:
     with _SESSION_RESERVATIONS_LOCK:
         for resource in resources:
             _ACTIVE_SESSION_RESERVATIONS.pop(("custom", id(resource)), None)
+
+
+async def _fingerprint_exec_env_files(exec_env: CodeExecToolProvider, paths: list[str]) -> list[tuple[str, str]]:
+    """Digest execution environment files so their content takes part in cache identity.
+
+    Each path is used verbatim, both to read the file and as hash input. Backends record
+    destination paths in their own convention (relative for local, container-absolute for
+    Docker) and each resolves its own form; the path is never used to open or write a cache
+    path, so it needs no normalization.
+    """
+    fingerprints = []
+    for path in paths:
+        content = await exec_env.read_file_bytes(path)
+        fingerprints.append((path, hashlib.sha256(content).hexdigest()))
+    return sorted(fingerprints)
 
 
 def _record_session_cleanup_failure(
@@ -1556,6 +1572,83 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
                 run_metadata_by_turn.pop(dropped_turn_id, None)
 
+    def _tool_identity_definitions(self) -> list[dict[str, Any]]:
+        """Describe every tool the model can see, for cache identity.
+
+        Sorted by name rather than kept in presentation order: names are already unique
+        across `tools` and `finish_tool`, so sorting loses nothing, and provider-supplied
+        tools (MCP in particular) are not discovered in a guaranteed order.
+        """
+        return sorted(
+            (
+                {
+                    "name": name,
+                    "description": tool.description,
+                    "schema": tool.parameters.model_json_schema(),
+                    "is_finish": name in self._finish_tools,
+                }
+                for name, tool in self._active_tools.items()
+            ),
+            key=lambda definition: definition["name"],
+        )
+
+    async def _compute_task_hash(self, init_msgs: str | list[ChatMessage]) -> str | None:
+        """Compute this run's cache identity, or None when the run cannot be cached.
+
+        Returns None below depth 0, since only root sessions save or resume, and when a file
+        cannot be read back out of the execution environment. The latter disables caching
+        for the run rather than failing it: cache_on_interrupt is on by default, so a read
+        error would otherwise break runs that never wanted a cache.
+        """
+        state = _SESSION_STATE.get()
+        if state is not None and state.depth > 0:
+            return None
+
+        input_files: list[tuple[str, str]] = []
+        skill_files: list[tuple[str, str]] = []
+        if state is not None and state.exec_env is not None:
+            try:
+                input_files = await _fingerprint_exec_env_files(state.exec_env, state.uploaded_file_paths)
+                skill_names = await state.exec_env.list_files("skills")
+                skill_files = await _fingerprint_exec_env_files(
+                    state.exec_env, [f"skills/{name}" for name in skill_names]
+                )
+            except Exception as exc:
+                self._logger.warning(f"Cannot establish cache identity ({exc}); caching disabled for this run")
+                return None
+
+        return compute_task_hash(
+            init_msgs,
+            agent_name=self._name,
+            model_slug=self._client.model_slug,
+            system_prompt=self._system_prompt,
+            tool_definitions=self._tool_identity_definitions(),
+            input_files=input_files,
+            skill_files=skill_files,
+            skills=[(skill.name, skill.description) for skill in state.skills_metadata] if state else [],
+        )
+
+    def _checkpoint_run_state(
+        self,
+        msgs: list[ChatMessage],
+        full_msg_history: list[list[ChatMessage]],
+        run_metadata_by_turn: dict[str, dict[str, list[Any]]],
+        task_hash: str | None,
+    ) -> None:
+        """Record the state teardown would cache, so an interrupt keeps accepted turns.
+
+        Does nothing without an identity, because such a run is never cached.
+        """
+        if task_hash is None:
+            return
+        self._current_run_state = CacheState(
+            msgs=list(msgs),
+            full_msg_history=[list(group) for group in full_msg_history],
+            run_metadata_by_turn={turn_id: dict(metadata) for turn_id, metadata in run_metadata_by_turn.items()},
+            task_hash=task_hash,
+            agent_name=self._name,
+        )
+
     async def run(
         self,
         init_msgs: str | list[ChatMessage],
@@ -1617,7 +1710,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         depth: int | None = None,
     ) -> tuple[FinishParams | None, list[list[ChatMessage]], dict[str, Any]]:
         """Execute a run after its session ownership and ambient context are established."""
-        task_hash = compute_task_hash(init_msgs)
+        task_hash = await self._compute_task_hash(init_msgs)
         self._current_task_hash = task_hash
 
         # Initialize cache manager
@@ -1630,21 +1723,45 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             state = _SESSION_STATE.get()
             if state is None:
                 raise RuntimeError("Cannot resume an Agent run without an active session")
-            cached = cache_manager.load_state(task_hash)
-            if cached:
-                # Restore files to exec env
-                if state.exec_env and state.exec_env.temp_dir:
-                    cache_manager.restore_files(task_hash, state.exec_env.temp_dir)
+            if task_hash is not None:
+                # Validate before restoring, so a cache that will be refused never reaches
+                # the execution environment.
+                refusal_reason: str | None = None
+                try:
+                    cached = cache_manager.load_state(task_hash)
+                except CacheUnusableError as exc:
+                    cached = None
+                    refusal_reason = str(exc)
 
-                # Restore state
-                msgs = cached.msgs
-                full_msg_history = cached.full_msg_history
-                cached_run_metadata_by_turn = cached.run_metadata_by_turn
-                resumed = True
-                restored_turn = _get_turn_count(full_msg_history, msgs)
-                self._logger.info(f"Resuming from cached state at turn {restored_turn}")
-            else:
-                self._logger.info(f"No cache found for task {task_hash}, starting fresh")
+                if cached is not None and cache_manager.has_cached_files(task_hash):
+                    exec_env_dir = state.exec_env.temp_dir if state.exec_env else None
+                    if exec_env_dir is None:
+                        cached = None
+                        refusal_reason = "no execution environment to restore files into"
+                    else:
+                        try:
+                            cache_manager.restore_files(task_hash, exec_env_dir)
+                        except Exception as exc:
+                            # Named because the environment may now hold a partial copy; it
+                            # is not wiped, since stirrup does not own it in every setup.
+                            cached = None
+                            refusal_reason = f"file restore into {exec_env_dir} failed: {exc}"
+
+                if cached is not None:
+                    # Restore state
+                    msgs = cached.msgs
+                    full_msg_history = cached.full_msg_history
+                    cached_run_metadata_by_turn = cached.run_metadata_by_turn
+                    resumed = True
+                    restored_turn = _get_turn_count(full_msg_history, msgs)
+                    self._logger.info(f"Resuming from cached state at turn {restored_turn}")
+                elif refusal_reason is not None:
+                    self._logger.warning(
+                        f"Found a cache for task {task_hash} but it cannot be resumed ({refusal_reason}); "
+                        "starting fresh. Tool calls from the interrupted run will be made again."
+                    )
+                else:
+                    self._logger.info(f"No cache found for task {task_hash}, starting fresh")
 
         if not resumed:
             msgs: list[ChatMessage] = []
@@ -1689,13 +1806,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         while _get_turn_count(full_msg_history, msgs) < self._max_turns:
             turn = _get_turn_count(full_msg_history, msgs)
             # Capture current state for potential caching (before any async work)
-            self._current_run_state = CacheState(
-                msgs=list(msgs),
-                full_msg_history=[list(group) for group in full_msg_history],
-                run_metadata_by_turn={turn_id: dict(metadata) for turn_id, metadata in run_metadata_by_turn.items()},
-                task_hash=task_hash,
-                agent_name=self._name,
-            )
+            self._checkpoint_run_state(msgs, full_msg_history, run_metadata_by_turn, task_hash)
             if self._max_turns - turn <= self._turns_remaining_warning_threshold and turn != 0:
                 num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - turn)
                 msgs.append(num_turns_remaining_msg)
@@ -1715,6 +1826,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 except ContextOverflowError:
                     msgs, dropped_turn_id = self._unwind_context_overflow(msgs)
                     run_metadata_by_turn.pop(dropped_turn_id, None)
+                    # Not needed for correctness - the pre-unwind state is a valid superset -
+                    # but it stops a resume from immediately re-overflowing and redoing this.
+                    self._checkpoint_run_state(msgs, full_msg_history, run_metadata_by_turn, task_hash)
 
             # Update cumulative stats
             run_metadata_by_turn[assistant_message.id] = turn_metadata
@@ -1723,19 +1837,22 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             total_input_tokens += assistant_message.token_usage.input
             total_output_tokens += assistant_message.token_usage.output
 
-            # Call progress callback after step completes
-            if step_callback:
-                step_callback(accepted_turn, total_tool_calls, total_input_tokens, total_output_tokens)
-
             user_messages: list[UserMessage] = []
             if self._text_only_tool_responses:
                 tool_messages, user_messages = _handle_text_only_tool_responses(tool_messages)
 
+            msgs.extend([assistant_message, *tool_messages, *user_messages])
+            # Checkpoint the accepted turn before any further async work: an interrupt during
+            # summarization must not discard tool results that have already taken effect.
+            self._checkpoint_run_state(msgs, full_msg_history, run_metadata_by_turn, task_hash)
+
+            # Call progress callback after step completes
+            if step_callback:
+                step_callback(accepted_turn, total_tool_calls, total_input_tokens, total_output_tokens)
+
             # Log user messages (e.g., image content extracted from tool responses)
             for user_msg in user_messages:
                 self._logger.user_message(user_msg)
-
-            msgs.extend([assistant_message, *tool_messages, *user_messages])
 
             if finish_params:
                 break
@@ -1745,6 +1862,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
                 full_msg_history.append(messages_to_summarize)
+                self._checkpoint_run_state(msgs, full_msg_history, run_metadata_by_turn, task_hash)
 
             # Avoid successive assistant messages (only if next turn won't show turns remaining)
             next_turn_will_show_warning = self._max_turns - accepted_turn <= self._turns_remaining_warning_threshold
@@ -1773,7 +1891,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._last_run_metadata = run_metadata
 
         # Clear cache on successful completion (finish_params is set)
-        if finish_params is not None and cache_manager.clear_on_success:
+        if finish_params is not None and cache_manager.clear_on_success and task_hash is not None:
             cache_manager.clear_cache(task_hash)
             self._current_task_hash = None
             self._current_run_state = None

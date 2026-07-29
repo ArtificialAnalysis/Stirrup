@@ -14,7 +14,7 @@ from rich.console import Console
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent
-from stirrup.core.cache import CacheManager, compute_task_hash
+from stirrup.core.cache import CacheManager, CacheState
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -346,6 +346,16 @@ def _write_skill(skills_dir: Path, name: str) -> None:
 
 def _quiet_logger() -> AgentLogger:
     return AgentLogger(show_spinner=False)
+
+
+def _only_cached_state(cache_base_dir: Path) -> CacheState:
+    """Load the single cache a run left behind, without reproducing its identity."""
+    cache_manager = CacheManager(cache_base_dir=cache_base_dir)
+    task_hashes = cache_manager.list_caches()
+    assert len(task_hashes) == 1
+    cached = cache_manager.load_state(task_hashes[0])
+    assert cached is not None
+    return cached
 
 
 async def test_concurrent_exact_builtin_sessions_isolate_inputs_outputs_and_run_state(tmp_path: Path) -> None:
@@ -1104,8 +1114,7 @@ async def test_worker_thread_failure_is_cached_without_masking_original_error(
         await anyio.to_thread.run_sync(run_in_worker)  # ty: ignore[unresolved-attribute]
 
     assert exc_info.value is original_error
-    cached = CacheManager(cache_base_dir=tmp_path).load_state(compute_task_hash(prompt))
-    assert cached is not None
+    cached = _only_cached_state(tmp_path)
     assert cached.agent_name == "worker-cache"
 
 

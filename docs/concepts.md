@@ -149,6 +149,10 @@ Sessions handle:
 - Output file saving
 - Logging
 
+A session's cache state is keyed by everything the model can see — the prompt, model, system
+prompt, tool definitions, and the content of input and skill files — and a cached run is
+resumed only on an exact match. See [Caching and Resumption](guides/caching.md).
+
 ```python
 async with agent.session(
     output_dir="./output",           # Where to save output files

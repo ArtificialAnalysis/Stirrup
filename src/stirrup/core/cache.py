@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
+from stirrup.core.exceptions import CacheUnusableError
 from stirrup.core.models import (
     AudioContentBlock,
     ChatMessage,
@@ -31,31 +33,78 @@ logger = logging.getLogger(__name__)
 # Default cache directory relative to the project root
 DEFAULT_CACHE_DIR = Path("~/.cache/stirrup/").expanduser()
 
+# Version of the identity payload below. Bump it to invalidate every existing cache in one
+# edit, with no migration: caches written by an older version stop matching and are ignored.
+# Two changes require a bump - altering the identity payload's shape or meaning, and editing
+# src/stirrup/prompts/base_system_prompt.txt, whose text is the one model-visible input the
+# payload does not cover.
+CACHE_IDENTITY_VERSION = 1
+
 # TypeAdapter for deserializing ChatMessage discriminated union
 ChatMessageAdapter: TypeAdapter[ChatMessage] = TypeAdapter(ChatMessage)
 
 
-def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
-    """Compute deterministic hash from initial messages for cache identification.
+def compute_task_hash(
+    init_msgs: str | list[ChatMessage],
+    *,
+    agent_name: str = "",
+    model_slug: str = "",
+    system_prompt: str | None = None,
+    tool_definitions: Iterable[Mapping[str, Any]] = (),
+    input_files: Iterable[tuple[str, str]] = (),
+    skill_files: Iterable[tuple[str, str]] = (),
+    skills: Iterable[tuple[str, str]] = (),
+) -> str:
+    """Compute the identity of a resumable run from everything that shapes its transcript.
+
+    A cached run is resumed only when this value matches exactly, so every input that could
+    make a restored transcript wrong must appear here.
+
+    Deliberately excluded:
+        - max_turns: raising it and resuming is the reason a max-turns cache exists at all,
+          so including it would refuse that resume every time. It reaches the model only
+          through the base system prompt, which is replayed verbatim from the cache.
+        - The assembled system prompt: its identity-bearing parts (input file list, skills
+          section, tool guidance) are covered by the entries below, and the base template
+          text is covered by CACHE_IDENTITY_VERSION.
+        - Sampling parameters, API endpoint and credentials: never shown to the model, and a
+          credential must not reach a value used as a directory name.
+        - Run-control knobs (context summarization cutoff, turn warnings, output_dir): the
+          messages they inject are already recorded verbatim in the cached transcript.
 
     Args:
         init_msgs: Either a string prompt or list of ChatMessage objects.
+        agent_name: Name of the agent executing the run.
+        model_slug: Model identifier exposed by the LLM client.
+        system_prompt: User-supplied system prompt, before assembly.
+        tool_definitions: Name, description, parameter schema and finish flag for every tool
+            the model can see.
+        input_files: (destination path, sha256) for each file uploaded to the environment.
+        skill_files: (path, sha256) for each file in the uploaded skills tree.
+        skills: (name, description) for each loaded skill.
 
     Returns:
-        First 12 characters of SHA256 hash (hex) for readability.
+        SHA256 hash (full hex digest) of the canonical identity payload.
     """
+    serialized_init_msgs: dict[str, Any]
     if isinstance(init_msgs, str):
-        content = init_msgs
+        serialized_init_msgs = {"kind": "prompt", "value": init_msgs}
     else:
-        # Serialize messages to JSON for hashing
-        content = json.dumps(
-            [serialize_message(msg) for msg in init_msgs],
-            sort_keys=True,
-            ensure_ascii=True,
-        )
+        serialized_init_msgs = {"kind": "messages", "value": [serialize_message(msg) for msg in init_msgs]}
 
-    hash_bytes = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    return hash_bytes[:12]
+    identity = {
+        "identity_version": CACHE_IDENTITY_VERSION,
+        "init_msgs": serialized_init_msgs,
+        "agent_name": agent_name,
+        "model_slug": model_slug,
+        "system_prompt": system_prompt,
+        "tools": [dict(definition) for definition in tool_definitions],
+        "input_files": sorted(list(entry) for entry in input_files),
+        "skill_files": sorted(list(entry) for entry in skill_files),
+        "skills": sorted(list(entry) for entry in skills),
+    }
+    canonical_identity = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
 
 
 def _serialize_content_block(block: Any) -> dict | str:  # noqa: ANN401
@@ -287,7 +336,11 @@ class CacheState:
             task_hash=data["task_hash"],
             timestamp=data.get("timestamp", ""),
             agent_name=data.get("agent_name", ""),
-            run_metadata_by_turn=data["run_metadata_by_turn"],
+            # Rebuild rather than adopt: a malformed value must fail here, where the caller
+            # treats it as a refusal, not later when the run tries to merge it.
+            run_metadata_by_turn={
+                str(turn_id): dict(metadata) for turn_id, metadata in data["run_metadata_by_turn"].items()
+            },
         )
 
 
@@ -334,7 +387,10 @@ class CacheManager:
     ) -> None:
         """Save cache state and optionally archive execution environment files.
 
-        Uses atomic writes to prevent corrupted cache files if interrupted mid-write.
+        state.json is the commit point: it is removed first, the files are refreshed, and it
+        is written back last via an atomic rename. A save interrupted partway therefore
+        leaves an uncommitted cache that load_state refuses, never a state file paired with
+        half-copied files.
 
         Args:
             task_hash: Unique identifier for this task/cache.
@@ -345,72 +401,85 @@ class CacheManager:
         cache_dir = self._get_cache_dir(task_hash)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save state JSON using atomic write (write to temp file, then rename)
         state_file = self._get_state_file(task_hash)
-        temp_file = state_file.with_suffix(".json.tmp")
+        state_file.unlink(missing_ok=True)
 
-        try:
-            state_data = state.to_dict()
-            logger.debug("Serialized cache state: msgs=%d", len(state.msgs))
-
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(state_data, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())  # Ensure data is written to disk
-
-            logger.debug("Wrote temp file: %s", temp_file)
-
-            # Atomic rename (on POSIX systems)
-            temp_file.replace(state_file)
-            logger.info("Saved cache state to %s", state_file)
-        except Exception as e:
-            logger.exception("Failed to save cache state: %s", e)
-            # Try direct write as fallback
-            try:
-                logger.warning("Attempting direct write as fallback")
-                with open(state_file, "w", encoding="utf-8") as f:
-                    json.dump(state_data, f, indent=2, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
-                logger.info("Fallback write succeeded to %s", state_file)
-            except Exception as e2:
-                logger.exception("Fallback write also failed: %s", e2)
-            # Clean up temp file if it exists
-            if temp_file.exists():
-                temp_file.unlink()
-            raise
-
-        # Copy execution environment files if provided
-        if exec_env_dir and exec_env_dir.exists():
+        has_files = False
+        if exec_env_dir is not None and exec_env_dir.exists():
+            has_files = True
             files_dir = self._get_files_dir(task_hash)
-            if files_dir.exists():
-                shutil.rmtree(files_dir)  # Clear existing files
-            shutil.copytree(exec_env_dir, files_dir, dirs_exist_ok=True)
+            try:
+                if files_dir.exists():
+                    shutil.rmtree(files_dir)  # Clear existing files
+                shutil.copytree(exec_env_dir, files_dir, dirs_exist_ok=True)
+            except Exception as e:
+                # Leave the cache uncommitted rather than fail the run that was being cached.
+                logger.warning("Failed to cache execution environment files for task %s: %s", task_hash, e)
+                return
             logger.info("Saved execution environment files to %s", files_dir)
+
+        state_data = state.to_dict()
+        state_data["identity_version"] = CACHE_IDENTITY_VERSION
+        state_data["has_files"] = has_files
+        logger.debug("Serialized cache state: msgs=%d", len(state.msgs))
+
+        temp_file = state_file.with_suffix(".json.tmp")
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(state_data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())  # Ensure data is written to disk
+        temp_file.replace(state_file)  # Atomic rename (on POSIX systems) - commits the cache
+        logger.info("Saved cache state to %s", state_file)
+
+    def has_cached_files(self, task_hash: str) -> bool:
+        """Whether a cache holds archived execution environment files."""
+        return self._get_files_dir(task_hash).exists()
 
     def load_state(self, task_hash: str) -> CacheState | None:
         """Load cached state for a task hash.
+
+        Absence and refusal are distinct: a caller that finds no cache should start fresh
+        quietly, while a caller whose cache was rejected must say so, because tool calls the
+        cached run already made will be made again.
 
         Args:
             task_hash: Unique identifier for the task/cache.
 
         Returns:
-            CacheState if cache exists, None otherwise.
+            CacheState, or None when no cache exists for this task hash.
+
+        Raises:
+            CacheUnusableError: A cache exists but cannot be trusted to resume from.
         """
-        state_file = self._get_state_file(task_hash)
-        if not state_file.exists():
+        if not self._get_cache_dir(task_hash).exists():
             logger.debug("No cache found for task %s", task_hash)
             return None
 
+        state_file = self._get_state_file(task_hash)
         try:
             with open(state_file, encoding="utf-8") as f:
                 data = json.load(f)
+        except Exception as e:
+            raise CacheUnusableError(f"state file is unreadable: {e}") from e
+
+        identity_version = data.get("identity_version")
+        if identity_version != CACHE_IDENTITY_VERSION:
+            raise CacheUnusableError(f"identity version {identity_version} does not match {CACHE_IDENTITY_VERSION}")
+        if data.get("task_hash") != task_hash:
+            raise CacheUnusableError("the cached task identity does not match this run")
+        if data.get("has_files") and not self.has_cached_files(task_hash):
+            raise CacheUnusableError("cached execution environment files are missing")
+
+        try:
             state = CacheState.from_dict(data)
-            logger.info("Loaded cache state from %s", state_file)
-            return state
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning("Failed to load cache for task %s: %s", task_hash, e)
-            return None
+        except Exception as e:
+            # Anything that cannot be reconstructed is a refusal, never a run failure - the
+            # caller starts fresh. A narrower catch misses shape errors that surface deep in
+            # deserialization (a "msgs" that is a string raises AttributeError, not ValueError).
+            raise CacheUnusableError(f"state file is malformed: {e}") from e
+
+        logger.info("Loaded cache state from %s", state_file)
+        return state
 
     def restore_files(self, task_hash: str, dest_dir: Path) -> bool:
         """Restore cached files to the destination directory.
