@@ -31,8 +31,6 @@ dependencies = [
     "openai>=1.0.0",
     "pillow>=10.4.0",
     "pydantic>=2.0.0",
-    # 14.1 stacks live displays on one Console; before it, a second overlapping
-    # session's spinner raised "Only one live display may be active at once".
     "rich>=14.1.0",
     "tenacity>=5.0.0",
     "trafilatura>=1.9.0",
