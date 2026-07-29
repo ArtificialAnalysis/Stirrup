@@ -66,7 +66,7 @@ async def main() -> None:
     """Run an agent that searches the web and creates a chart."""
 
     # Create client using ChatCompletionsClient
-    # Automatically uses OPENROUTER_API_KEY environment variable
+    # The key is inferred from the endpoint: this OpenRouter base_url uses OPENROUTER_API_KEY
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
         model="anthropic/claude-sonnet-4.5",
