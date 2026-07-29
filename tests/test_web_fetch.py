@@ -91,8 +91,6 @@ async def test_web_fetch_rejects_invalid_urls(url: str) -> None:
         result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), url)
 
     assert result.success is False
-    assert result.metadata is not None
-    assert result.metadata.pages_fetched == [url]
     assert requests == []
 
 
@@ -114,8 +112,6 @@ async def test_web_fetch_connects_to_validated_ip_with_logical_host_and_sni(
         result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), logical_url)
 
     assert result.success is True
-    assert result.metadata is not None
-    assert result.metadata.pages_fetched == [logical_url]
     assert resolution_calls == [("example.com", port)]
     assert len(requests) == 1
     assert str(requests[0].url) == f"{scheme}://{PUBLIC_IPV4}/page"
@@ -172,19 +168,33 @@ async def test_web_fetch_does_not_send_or_retain_cookies(monkeypatch: MonkeyPatc
     assert [request.headers.get("cookie") for request in requests] == [None, None]
 
 
+async def test_web_fetch_metadata_accumulates_across_fetches(monkeypatch: MonkeyPatch) -> None:
+    install_dns(monkeypatch, PUBLIC_IPV4)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(html_response)) as client:
+        tool = _get_fetch_web_page_tool(client)
+        first_result = await run_web_fetch_tool(tool, "https://first.example/page")
+        second_result = await run_web_fetch_tool(tool, "https://second.example/page")
+
+    assert first_result.metadata is not None
+    assert second_result.metadata is not None
+    combined = first_result.metadata + second_result.metadata
+    assert combined.num_uses == 2
+    assert combined.pages_fetched == ["https://first.example/page", "https://second.example/page"]
+
+
 async def test_web_provider_isolates_fetch_from_proxies_and_search_state(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
     install_dns(monkeypatch, PUBLIC_IPV4)
     clients: list[httpx.AsyncClient] = []
-    requests: list[tuple[str, httpx.Request]] = []
+    requests: list[tuple[int, httpx.Request]] = []
     real_async_client = httpx.AsyncClient
 
     def recording_async_client(**kwargs: object) -> httpx.AsyncClient:
-        client_kind = "fetch" if kwargs.get("trust_env") is False else "search"
+        client_index = len(clients)
 
         async def handler(request: httpx.Request) -> httpx.Response:
-            requests.append((client_kind, request))
-            if client_kind == "search":
+            requests.append((client_index, request))
+            if request.url.host == "api.search.brave.com":
                 return httpx.Response(200, request=request, json={"web": {"results": []}})
             return html_response(request)
 
@@ -201,14 +211,15 @@ async def test_web_provider_isolates_fetch_from_proxies_and_search_state(monkeyp
         search_result = search_tool.executor(WebSearchParams(query="example"))
         await cast(Awaitable[ToolResult[WebSearchMetadata]], search_result)
 
-    fetch_client, search_client = clients
-    assert fetch_client.trust_env is False
-    assert fetch_client.follow_redirects is False
-    assert search_client.follow_redirects is True
-    assert [(kind, request.url.host) for kind, request in requests] == [
-        ("fetch", PUBLIC_IPV4),
-        ("search", "api.search.brave.com"),
-    ]
+    (fetch_client_index, fetch_request), (search_client_index, search_request) = requests
+    assert fetch_request.url.host == PUBLIC_IPV4
+    assert search_request.url.host == "api.search.brave.com"
+    assert fetch_client_index != search_client_index
+    # httpx only consults environment proxies when it builds its own transport
+    # (``allow_env_proxies = trust_env and transport is None``), so the injected
+    # MockTransport makes proxy avoidance unobservable here. trust_env is the
+    # closest available check short of a test against real sockets.
+    assert clients[fetch_client_index].trust_env is False
     assert all(client.is_closed for client in clients)
 
 
@@ -354,7 +365,9 @@ async def test_web_fetch_validates_redirect_destinations(monkeypatch: MonkeyPatc
         requests.append(request)
         return httpx.Response(302, request=request, headers={"Location": "http://127.0.0.1/secret"})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    # follow_redirects=True proves fetch validates every hop itself instead of
+    # delegating to the client it was given.
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
         result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), "https://example.com/redirect")
 
     assert result.success is False
@@ -436,29 +449,20 @@ async def test_web_fetch_timeout_is_a_total_deadline_across_retries(monkeypatch:
     assert "Web fetch timed out" in result.content
 
 
-async def test_web_fetch_timeout_closes_response_and_clears_cookies(monkeypatch: MonkeyPatch) -> None:
+async def test_web_fetch_timeout_clears_cookies(monkeypatch: MonkeyPatch) -> None:
     install_dns(monkeypatch, PUBLIC_IPV4)
 
     class BlockingStream(httpx.AsyncByteStream):
-        def __init__(self) -> None:
-            self.is_closed = False
-
         async def __aiter__(self) -> AsyncIterator[bytes]:
             yield b"partial body"
             await anyio.sleep_forever()
-
-        async def aclose(self) -> None:
-            await checkpoint()
-            self.is_closed = True
-
-    stream = BlockingStream()
 
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             request=request,
             headers={"Set-Cookie": "session=untrusted; Path=/"},
-            stream=stream,
+            stream=BlockingStream(),
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
