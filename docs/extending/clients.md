@@ -24,9 +24,9 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 
 `context_window_tokens` is an optional client capability, not a member of the
 runtime-checkable `LLMClient` protocol. When it returns a value, that positive
-context capacity is used for Agent summarization calculations. `Agent` reads it
-once during initialization. If it is absent or `None`, `Agent` falls back to
-`max_tokens`, preserving compatibility with existing custom clients.
+context capacity is used for Agent summarization calculations. If it is absent or
+`None`, `Agent` falls back to `max_tokens`, preserving compatibility with
+existing custom clients.
 
 Custom clients that adapt provider stop reasons should raise
 `OutputTokenLimitError` when the provider exhausts the response budget. Reserve

@@ -29,7 +29,7 @@ Example usage:
 
 from stirrup import tools
 from stirrup.core.agent import Agent, SessionAgent
-from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     Addable,
     AssistantMessage,
@@ -62,6 +62,7 @@ __all__ = [
     "ContextOverflowError",
     "EmptyParams",
     "ImageContentBlock",
+    "IncompleteResponseError",
     "LLMClient",
     "OutputTokenLimitError",
     "SessionAgent",

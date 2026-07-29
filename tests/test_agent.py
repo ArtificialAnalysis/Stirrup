@@ -66,11 +66,9 @@ class ContextWindowLLMClient(MockLLMClient):
     ) -> None:
         super().__init__(responses, max_tokens=max_tokens)
         self._configured_context_window_tokens = context_window_tokens
-        self.context_window_reads = 0
 
     @property
     def context_window_tokens(self) -> int | None:
-        self.context_window_reads += 1
         return self._configured_context_window_tokens
 
 
@@ -163,7 +161,6 @@ async def test_output_limit_does_not_control_context_summarization() -> None:
 
     assert finish_params is not None
     assert client.call_count == 2
-    assert client.context_window_reads == 1
 
 
 async def test_legacy_llmclient_subclass_falls_back_to_max_tokens() -> None:
@@ -238,7 +235,6 @@ async def test_none_context_capability_falls_back_to_max_tokens() -> None:
 
     assert finish_params is not None
     assert client.call_count == 3
-    assert client.context_window_reads == 1
     assert any(isinstance(message, SummaryMessage) for message in history[-1])
 
 

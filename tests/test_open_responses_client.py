@@ -3,7 +3,9 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
 from stirrup.clients.open_responses_client import (
     OpenResponsesClient,
@@ -13,7 +15,7 @@ from stirrup.clients.open_responses_client import (
     _to_open_responses_input,
     _to_open_responses_tools,
 )
-from stirrup.core.exceptions import OutputTokenLimitError
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     SystemMessage,
@@ -456,6 +458,35 @@ class TestOpenResponsesClient:
         assert provider_request is not None
         assert provider_request.kwargs["max_output_tokens"] == 456
         assert client.context_window_tokens == 120_000
+
+    @pytest.mark.asyncio
+    async def test_context_length_rejection_surfaces_as_context_overflow(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        response = httpx.Response(
+            400,
+            json={"error": {"message": "boom", "type": "invalid_request_error", "code": "context_length_exceeded"}},
+            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        )
+        client._client.responses.create = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+            side_effect=BadRequestError("boom", response=response, body=response.json()["error"])
+        )
+
+        with pytest.raises(ContextOverflowError):
+            await client.generate(messages=[UserMessage(content="Very long request")], tools={})
+
+    @pytest.mark.asyncio
+    async def test_non_output_limit_incomplete_raises_stirrup_error(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        mock_response = MagicMock(
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason="content_filter"),
+            output=[],
+            usage=None,
+        )
+        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(IncompleteResponseError, match="content_filter"):
+            await client.generate(messages=[UserMessage(content="Hi")], tools={})
 
     @pytest.mark.asyncio
     async def test_instructions_from_system_message(self) -> None:

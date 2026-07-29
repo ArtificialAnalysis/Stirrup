@@ -7,9 +7,11 @@ import pytest
 
 pytest.importorskip("litellm")
 
+from litellm.exceptions import ContextWindowExceededError
+
 from stirrup.clients import litellm_client as litellm_module
 from stirrup.clients.litellm_client import LiteLLMClient
-from stirrup.core.exceptions import OutputTokenLimitError
+from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 
 
 def test_context_window_defaults_to_max_tokens() -> None:
@@ -45,3 +47,18 @@ async def test_output_limit_is_forwarded_and_reported_without_retry(
     assert provider_request is not None
     assert provider_request.kwargs["max_tokens"] == 789
     assert client.context_window_tokens == 76_543
+
+
+async def test_context_window_rejection_surfaces_as_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider_call = AsyncMock(
+        side_effect=ContextWindowExceededError(
+            message="boom",
+            model="test/provider-model",
+            llm_provider="test",
+        )
+    )
+    monkeypatch.setattr(litellm_module, "acompletion", provider_call)
+    client = LiteLLMClient(model="test/provider-model", max_tokens=8_192, context_window_tokens=76_543)
+
+    with pytest.raises(ContextOverflowError):
+        await client.generate([], {})

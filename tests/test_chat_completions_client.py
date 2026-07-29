@@ -3,12 +3,29 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
-from stirrup import OutputTokenLimitError
+from stirrup import ContextOverflowError, OutputTokenLimitError
 from stirrup.clients import chat_completions_client as chat_completions_module
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.core.models import UserMessage
+
+
+def _bad_request_error(code: str) -> BadRequestError:
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "boom", "type": "invalid_request_error", "code": code}},
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+    return BadRequestError("boom", response=response, body=response.json()["error"])
+
+
+def _client_with_provider_call(monkeypatch: pytest.MonkeyPatch, provider_call: AsyncMock) -> ChatCompletionsClient:
+    provider_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=provider_call)))
+    monkeypatch.setattr(chat_completions_module, "AsyncOpenAI", lambda **_kwargs: provider_client)
+    return ChatCompletionsClient(model="gpt-4o", api_key="test-key", context_window_tokens=64_000)
 
 
 def test_context_window_defaults_to_max_tokens() -> None:
@@ -55,3 +72,19 @@ async def test_output_limit_is_forwarded_and_reported_without_retry(
     assert provider_request is not None
     assert provider_request.kwargs["max_completion_tokens"] == 321
     assert client.context_window_tokens == 64_000
+
+
+async def test_context_length_rejection_surfaces_as_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client_with_provider_call(
+        monkeypatch, AsyncMock(side_effect=_bad_request_error("context_length_exceeded"))
+    )
+
+    with pytest.raises(ContextOverflowError):
+        await client.generate([UserMessage(content="hello")], {})
+
+
+async def test_unrelated_bad_request_is_not_mapped_to_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client_with_provider_call(monkeypatch, AsyncMock(side_effect=_bad_request_error("invalid_value")))
+
+    with pytest.raises(BadRequestError):
+        await client.generate([UserMessage(content="hello")], {})

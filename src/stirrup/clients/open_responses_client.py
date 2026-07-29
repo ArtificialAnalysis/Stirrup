@@ -14,13 +14,13 @@ from openai import (
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
+    BadRequestError,
     InternalServerError,
-    OpenAIError,
     RateLimitError,
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.core.exceptions import OutputTokenLimitError
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     AudioContentBlock,
@@ -390,8 +390,11 @@ class OpenResponsesClient(LLMClient):
             and token usage statistics.
 
         Raises:
+            ContextOverflowError: If the provider rejects the request because the input
+                exceeds the model's context capacity.
             OutputTokenLimitError: If the provider exhausts ``max_tokens``.
-            OpenAIError: If the response is incomplete for another provider reason.
+            IncompleteResponseError: If the response is incomplete for another provider
+                reason, such as a content filter.
         """
         # Convert messages to OpenResponses format
         instructions, input_items = _to_open_responses_input(messages)
@@ -422,7 +425,15 @@ class OpenResponsesClient(LLMClient):
 
         # Make API call
         request_start_time = perf_counter()
-        response = await self._client.responses.create(**request_kwargs)
+        try:
+            response = await self._client.responses.create(**request_kwargs)
+        except BadRequestError as e:
+            # Only OpenAI's own code is recognised. Compatible endpoints that report a
+            # different code surface as a bad request instead of being recovered;
+            # widening this deliberately trades that for false positives.
+            if e.code != "context_length_exceeded":
+                raise
+            raise ContextOverflowError(str(e)) from e
         request_end_time = perf_counter()
 
         if response.status == "incomplete":
@@ -434,7 +445,7 @@ class OpenResponsesClient(LLMClient):
                     max_tokens=self._max_tokens,
                     provider_reason=incomplete_reason,
                 )
-            raise OpenAIError(f"Response incomplete for model {self.model_slug}: {incomplete_reason}")
+            raise IncompleteResponseError(f"Response incomplete for model {self.model_slug}: {incomplete_reason}")
 
         # Parse response output
         content, tool_calls, reasoning = _parse_response_output(response.output)

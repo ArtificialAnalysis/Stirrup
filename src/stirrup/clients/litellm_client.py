@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 try:
     from litellm import acompletion
-    from litellm.exceptions import APIConnectionError, RateLimitError, Timeout
+    from litellm.exceptions import APIConnectionError, ContextWindowExceededError, RateLimitError, Timeout
 except ImportError as e:
     raise ImportError(
         "Requires installation of the litellm extra. "
@@ -23,7 +23,7 @@ except ImportError as e:
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from stirrup.clients.utils import to_openai_messages, to_openai_tools
-from stirrup.core.exceptions import OutputTokenLimitError
+from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -118,16 +118,19 @@ class LiteLLMClient(LLMClient):
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
         """Generate assistant response with optional tool calls. Retries up to 3 times on timeout/connection errors."""
         request_start_time = perf_counter()
-        r = await acompletion(
-            model=self.model_slug,
-            messages=to_openai_messages(messages),
-            tools=to_openai_tools(tools) if tools else None,
-            tool_choice="auto" if tools else None,
-            max_tokens=self._max_tokens,
-            reasoning_effort=self._reasoning_effort,
-            api_key=self._api_key,
-            **self._kwargs,
-        )
+        try:
+            r = await acompletion(
+                model=self.model_slug,
+                messages=to_openai_messages(messages),
+                tools=to_openai_tools(tools) if tools else None,
+                tool_choice="auto" if tools else None,
+                max_tokens=self._max_tokens,
+                reasoning_effort=self._reasoning_effort,
+                api_key=self._api_key,
+                **self._kwargs,
+            )
+        except ContextWindowExceededError as e:
+            raise ContextOverflowError(str(e)) from e
         request_end_time = perf_counter()
 
         choice = r["choices"][0]

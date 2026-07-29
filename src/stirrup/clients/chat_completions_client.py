@@ -16,13 +16,14 @@ from openai import (
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
+    BadRequestError,
     InternalServerError,
     RateLimitError,
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from stirrup.clients.utils import to_openai_messages, to_openai_tools
-from stirrup.core.exceptions import OutputTokenLimitError
+from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -165,6 +166,8 @@ class ChatCompletionsClient(LLMClient):
             and token usage statistics.
 
         Raises:
+            ContextOverflowError: If the provider rejects the request because the input
+                exceeds the model's context capacity.
             OutputTokenLimitError: If the provider exhausts ``max_tokens``.
         """
         # Build request kwargs
@@ -186,7 +189,15 @@ class ChatCompletionsClient(LLMClient):
 
         # Make API call
         request_start_time = perf_counter()
-        response = await self._client.chat.completions.create(**request_kwargs)
+        try:
+            response = await self._client.chat.completions.create(**request_kwargs)
+        except BadRequestError as e:
+            # Only OpenAI's own code is recognised. Compatible endpoints (vLLM, Ollama,
+            # OpenRouter) that report a different code surface as a bad request instead of
+            # being recovered; widening this deliberately trades that for false positives.
+            if e.code != "context_length_exceeded":
+                raise
+            raise ContextOverflowError(str(e)) from e
         request_end_time = perf_counter()
 
         choice = response.choices[0]

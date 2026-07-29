@@ -202,6 +202,12 @@ The agent receives a list of available skills in its system prompt and can read 
 
 Stirrup supports multiple ways to connect to LLM providers.
 
+`max_tokens` and `context_window_tokens` are separate budgets: the first caps a single response,
+the second is the history size the agent summarizes against. The examples in this repository set an
+explicit `max_tokens=8_192` to make that separation visible, which is well under the `64_000` client
+default. Exceeding a response budget raises `OutputTokenLimitError` and aborts the run rather than
+retrying, so raise `max_tokens` if your task needs long responses.
+
 ### ChatCompletionsClient
 
 Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
@@ -453,6 +459,15 @@ agent = Agent(
     recover_from_context_overflow=False,
 )
 ```
+
+Recovery only covers `ContextOverflowError`. Two other client failures deliberately abort the run:
+
+- Summarization is itself a model call, so `summarize_messages` can raise `OutputTokenLimitError`
+  out of `session.run()` even though you never call it directly. Retrying it with the same
+  `max_tokens` cannot succeed, so it is not recovered.
+- `OpenResponsesClient` raises `IncompleteResponseError` for incomplete responses that are not
+  output-limit stops, such as `incomplete_details.reason == "content_filter"`. Before token
+  budgets were split these unwound a turn and retried; only context overflow does that now.
 
 ## Logging
 
