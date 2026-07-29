@@ -229,6 +229,15 @@ def _detach_builtin_provider(provider: ToolProvider, replacements: dict[int, Too
     return None
 
 
+def _is_exact_builtin_provider(provider: ToolProvider) -> bool:
+    """Report whether a session detaches this provider privately instead of reserving it.
+
+    Asks _detach_builtin_provider rather than repeating its type list, so the two cannot disagree
+    about which types are exact built-ins. The discarded shallow copy is cheap and side-effect free.
+    """
+    return _detach_builtin_provider(provider, {}) is not None
+
+
 def _detach_logger(configured_logger: AgentLoggerBase) -> tuple[AgentLoggerBase, bool]:
     """Detach exact built-in logger state; identify custom sequential owners."""
     logger_type = type(configured_logger)

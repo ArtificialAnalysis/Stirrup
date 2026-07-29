@@ -23,7 +23,7 @@ from typing import Any, Self
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from stirrup.core.agent import Agent, _detach_builtin_provider
+from stirrup.core.agent import Agent, _is_exact_builtin_provider
 from stirrup.core.models import (
     AssistantMessage,
     LLMClient,
@@ -362,7 +362,7 @@ class SlackBot:
             # copied provider's reference to a shared one (e.g. ViewImageToolProvider's backend).
             memo: dict[int, Any] = {}
             for tool in config.tools:
-                if not isinstance(tool, ToolProvider) or _detach_builtin_provider(tool, {}) is not None:
+                if not isinstance(tool, ToolProvider) or _is_exact_builtin_provider(tool):
                     memo[id(tool)] = tool
             tools = [copy.deepcopy(tool, memo) for tool in config.tools]
 
