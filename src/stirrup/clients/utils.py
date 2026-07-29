@@ -40,7 +40,7 @@ def _resolve_openai_endpoint_and_api_key(
     """Resolve the effective endpoint and a credential safe to send to it."""
     effective_base_url = base_url
     if effective_base_url is None:
-        effective_base_url = os.environ.get("OPENAI_BASE_URL", _DEFAULT_OPENAI_BASE_URL)
+        effective_base_url = os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
 
     endpoint = httpx.URL(effective_base_url)
     if endpoint.scheme not in ("http", "https") or not endpoint.host:
@@ -48,25 +48,24 @@ def _resolve_openai_endpoint_and_api_key(
     if endpoint.userinfo:
         raise httpx.InvalidURL("base_url must not include userinfo")
 
-    canonical_host = endpoint.host.lower().rstrip(".")
-    endpoint = endpoint.copy_with(host=canonical_host)
-
-    if api_key is not None:
+    if api_key:
         return endpoint, api_key
     if endpoint.scheme != "https":
         raise OpenAIError("HTTP endpoints require an explicit api_key")
 
     if endpoint.port is not None:
         raise OpenAIError("Custom endpoints require an explicit api_key")
-    if canonical_host == "api.openai.com":
+    # Extend these hosts only for a provider whose credential Stirrup infers from a documented
+    # environment variable; any other endpoint must be given an explicit api_key.
+    if endpoint.host == "api.openai.com":
         environment_variable = "OPENAI_API_KEY"
-    elif canonical_host == "openrouter.ai":
+    elif endpoint.host == "openrouter.ai":
         environment_variable = "OPENROUTER_API_KEY"
     else:
         raise OpenAIError("Custom endpoints require an explicit api_key")
 
     resolved_api_key = os.environ.get(environment_variable)
-    if resolved_api_key is None:
+    if not resolved_api_key:
         raise OpenAIError(f"Endpoint requires api_key or the {environment_variable} environment variable")
     return endpoint, resolved_api_key
 

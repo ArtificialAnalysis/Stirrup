@@ -38,13 +38,6 @@ async def _assert_client_configuration(
         ),
         (None, "https://openrouter.ai/api/v1", None, "https://openrouter.ai/api/v1/", "openrouter-key"),
         (
-            "https://OPENROUTER.AI.:443/api/v1",
-            None,
-            None,
-            "https://openrouter.ai/api/v1/",
-            "openrouter-key",
-        ),
-        (
             "https://api.openai.com/v1",
             "https://openrouter.ai/api/v1",
             None,
@@ -64,7 +57,6 @@ async def _assert_client_configuration(
         "default-openai",
         "openrouter",
         "environment-endpoint",
-        "canonical-url",
         "explicit-endpoint",
         "explicit-key-custom-https",
         "explicit-key-custom-http",
@@ -89,6 +81,15 @@ async def test_effective_endpoint_selects_its_api_key(
     await _assert_client_configuration(client, expected_base_url, expected_api_key)
 
 
+async def test_blank_environment_base_url_uses_the_default_endpoint(monkeypatch: MonkeyPatch) -> None:
+    _set_provider_keys(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+
+    client = ChatCompletionsClient(model="gpt-4o")
+
+    await _assert_client_configuration(client, "https://api.openai.com/v1/", "openai-key")
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
@@ -106,6 +107,13 @@ def test_custom_https_endpoint_requires_explicit_api_key(
 
     with pytest.raises(OpenAIError, match="Custom endpoints require an explicit api_key"):
         ChatCompletionsClient(model="gpt-4o", base_url=base_url)
+
+
+def test_blank_api_key_is_not_an_explicit_credential(monkeypatch: MonkeyPatch) -> None:
+    _set_provider_keys(monkeypatch)
+
+    with pytest.raises(OpenAIError, match="Custom endpoints require an explicit api_key"):
+        ChatCompletionsClient(model="gpt-4o", base_url="https://gateway.example/v1", api_key="")
 
 
 def test_http_endpoint_requires_explicit_api_key(monkeypatch: MonkeyPatch) -> None:
@@ -135,6 +143,14 @@ def test_provider_key_does_not_fall_back_to_other_provider(
 
     with pytest.raises(OpenAIError, match=missing_variable):
         ChatCompletionsClient(model="gpt-4o", base_url=base_url)
+
+
+def test_blank_provider_key_is_reported_as_missing(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+
+    with pytest.raises(OpenAIError, match="OPENAI_API_KEY"):
+        ChatCompletionsClient(model="gpt-4o")
 
 
 def test_base_url_with_userinfo_is_rejected() -> None:

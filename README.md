@@ -132,6 +132,12 @@ When `base_url` is omitted, clients use `OPENAI_BASE_URL` or OpenAI's standard
 endpoint. When `api_key` is omitted, exact OpenAI/OpenRouter HTTPS endpoints use
 their provider environment key; custom and HTTP endpoints require an explicit key.
 
+> **Breaking change:** provider environment keys are no longer sent to custom or
+> HTTP endpoints, so a proxy or gateway configured through `OPENAI_BASE_URL` now
+> raises at construction unless you pass a key. The key inferred for the default
+> endpoint also changed from `OPENROUTER_API_KEY` to `OPENAI_API_KEY`. To migrate,
+> pass the key explicitly: `api_key=os.environ["OPENROUTER_API_KEY"]`.
+
 ```python
 # Create client using Deepseek's OpenAI-compatible endpoint
 client = ChatCompletionsClient(

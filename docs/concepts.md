@@ -219,6 +219,20 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
 | `max_retries` | `int` | `2` | Number of retries for transient errors |
 
+!!! warning "Breaking change"
+    Provider environment keys are no longer sent to custom or HTTP endpoints, so a
+    proxy or gateway configured through `OPENAI_BASE_URL` now raises at construction
+    unless you pass a key. The key inferred for the default endpoint also changed from
+    `OPENROUTER_API_KEY` to `OPENAI_API_KEY`. To migrate, pass the key explicitly:
+
+    ```python
+    client = ChatCompletionsClient(
+        model="gpt-4o",
+        base_url="https://litellm.mycorp.internal/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
+    )
+    ```
+
 ### LiteLLMClient
 
 Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](https://docs.litellm.ai/docs/providers):
