@@ -95,20 +95,20 @@ async def test_accepted_configurations(
 
 
 @pytest.mark.parametrize(
-    ("base_url", "environment_base_url", "api_key", "environment_overrides", "expected_message"),
+    ("base_url", "api_key", "environment_overrides", "expected_message"),
     [
-        ("https://gateway.example/v1", None, None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://gateway.example/v1", None, "", {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://api.openrouter.ai/api/v1", None, None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://chat.openai.com/v1", None, None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://openrouter.ai.evil.example/api/v1", None, None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://api.openai.com.evil.example/v1", None, None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://evil-openai.com/v1", None, None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://api.openai.com:8443/v1", None, None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        (None, "https://litellm.mycorp.internal/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("http://openrouter.ai/api/v1", None, None, {}, "HTTP endpoints require an explicit api_key"),
+        ("https://gateway.example/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://gateway.example/v1", "", {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://api.openrouter.ai/api/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://chat.openai.com/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://xapi.openai.com/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://openrouter.ai.evil.example/api/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://api.openai.com.evil.example/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://evil-openai.com/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("https://api.openai.com:8443/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
+        (None, None, {"OPENAI_BASE_URL": "https://litellm.mycorp.internal/v1"}, _CUSTOM_ENDPOINT_MESSAGE),
+        ("http://openrouter.ai/api/v1", None, {}, "HTTP endpoints require an explicit api_key"),
         (
-            None,
             None,
             None,
             {"OPENAI_API_KEY": None, "OPENROUTER_API_KEY": "other-provider-key"},
@@ -117,19 +117,19 @@ async def test_accepted_configurations(
         (
             "https://openrouter.ai/api/v1",
             None,
-            None,
             {"OPENROUTER_API_KEY": None, "OPENAI_API_KEY": "other-provider-key"},
             "OPENROUTER_API_KEY",
         ),
-        (None, None, None, {"OPENAI_API_KEY": ""}, "OPENAI_API_KEY"),
-        ("https://user:password@openrouter.ai/api/v1", None, "explicit-key", {}, "userinfo"),
-        ("ftp://api.openai.com/v1", None, "explicit-key", {}, r"absolute HTTP\(S\) URL"),
+        (None, None, {"OPENAI_API_KEY": ""}, "OPENAI_API_KEY"),
+        ("https://user:password@openrouter.ai/api/v1", "explicit-key", {}, "userinfo"),
+        ("ftp://api.openai.com/v1", "explicit-key", {}, r"absolute HTTP\(S\) URL"),
     ],
     ids=[
         "custom-host",
         "blank-api-key-is-not-explicit",
         "unrecognized-openrouter-subdomain",
         "unrecognized-openai-subdomain",
+        "openai-suffix-lookalike",
         "deceptive-openrouter-host",
         "deceptive-openai-host",
         "openai-lookalike-host",
@@ -146,13 +146,13 @@ async def test_accepted_configurations(
 def test_rejected_configurations(
     monkeypatch: MonkeyPatch,
     base_url: str | None,
-    environment_base_url: str | None,
     api_key: str | None,
     environment_overrides: Mapping[str, str | None],
     expected_message: str,
 ) -> None:
     _set_provider_keys(monkeypatch)
-    _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": environment_base_url, **environment_overrides})
+    # OPENAI_BASE_URL is absent unless a row asks for it.
+    _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": None, **environment_overrides})
 
     with pytest.raises(OpenAIError, match=expected_message):
         ChatCompletionsClient(model="gpt-4o", base_url=base_url, api_key=api_key)
