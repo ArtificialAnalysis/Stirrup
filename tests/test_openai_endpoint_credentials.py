@@ -102,6 +102,7 @@ async def test_blank_environment_base_url_uses_the_default_endpoint(monkeypatch:
     [
         ("https://gateway.example/v1", None),
         ("https://api.openrouter.ai/api/v1", None),
+        ("https://chat.openai.com/v1", None),
         ("https://openrouter.ai.evil.example/api/v1", None),
         ("https://api.openai.com.evil.example/v1", None),
         ("https://evil-openai.com/v1", None),
@@ -111,6 +112,7 @@ async def test_blank_environment_base_url_uses_the_default_endpoint(monkeypatch:
     ids=[
         "custom",
         "unrecognized-subdomain",
+        "unrecognized-openai-subdomain",
         "deceptive-host",
         "deceptive-openai-host",
         "unrecognized-openai-lookalike",
