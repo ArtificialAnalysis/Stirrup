@@ -130,7 +130,8 @@ Speed metrics are available directly on each `AssistantMessage` via `request_sta
 
 ## Session
 
-The `session()` method returns the agent configured as an async context manager. Sessions handle:
+The `session()` method returns a `SessionAgent` — one session of the agent, used as an async
+context manager. Sessions handle:
 
 - Tool lifecycle (setup and teardown of ToolProviders)
 - File uploads to execution environment
@@ -146,6 +147,16 @@ async with agent.session(
 ) as session:
     result = await session.run("Your task")
 ```
+
+Each session owns its own active tools, pending configuration, and cache state. What it cannot own
+is the agent's tool providers and logger, which hold per-session state of their own, so sessions
+from one `Agent` must not overlap. An overlapping session is refused as it enters a shared resource:
+
+```
+RuntimeError: Overlapping sessions cannot share configured LocalCodeExecToolProvider.
+```
+
+Give each concurrent session its own `Agent`. Sequential sessions from one `Agent` are supported.
 
 ### Passing Input Files to the Agent
 

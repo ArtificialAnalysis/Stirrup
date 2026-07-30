@@ -5,13 +5,14 @@ import inspect
 import logging
 import re
 import signal
+import threading
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
 from pathlib import Path
 from time import perf_counter
 from types import TracebackType
-from typing import Annotated, Any, Self, overload
+from typing import Annotated, Any, overload
 
 import anyio
 from pydantic import BaseModel, Field, ValidationError
@@ -67,8 +68,8 @@ class SessionState:
     Kept minimal - only contains resources that need async lifecycle management
     (exit_stack, exec_env) and session-specific configuration (output_dir).
 
-    Tool availability is managed via Agent._active_tools (instance-scoped),
-    and run results are stored on the agent instance temporarily.
+    Owned by the SessionAgent that created it; ``context_token`` restores whatever
+    session was ambient before this one, so a closed session never outlives itself.
 
     For subagent file transfer:
     - parent_exec_env: Reference to the parent's exec env (for cross-env transfers)
@@ -81,6 +82,7 @@ class SessionState:
     """
 
     exit_stack: AsyncExitStack
+    context_token: "contextvars.Token[SessionState] | None" = None
     exec_env: CodeExecToolProvider | None = None
     output_dir: str | None = None  # String path (contextual: local for root, in parent env for subagent)
     parent_exec_env: CodeExecToolProvider | None = None
@@ -104,6 +106,33 @@ __all__ = [
 ]
 
 LOGGER = logging.getLogger(__name__)
+
+# Providers and loggers claimed by a session that has not exited yet, keyed by id().
+# The value keeps the object alive so an id can never be recycled while it is reserved.
+_RESERVED_SESSION_RESOURCES: dict[int, object] = {}
+_SESSION_RESERVATION_LOCK = threading.Lock()
+
+
+def _reserve_session_resource(resource: object) -> None:
+    """Claim a provider or logger for one session, refusing a second overlapping claim.
+
+    Providers and loggers hold per-session state (a temp directory, an HTTP client, a live
+    console), so two sessions using one instance corrupt each other. Failing at entry is the
+    only honest option: the objects are supplied by the caller and cannot be duplicated here.
+    """
+    with _SESSION_RESERVATION_LOCK:
+        if id(resource) in _RESERVED_SESSION_RESOURCES:
+            raise RuntimeError(
+                f"Overlapping sessions cannot share configured {type(resource).__name__}. "
+                "Provider and logger instances hold per-session state, so give each "
+                "concurrent session its own Agent."
+            )
+        _RESERVED_SESSION_RESOURCES[id(resource)] = resource
+
+
+def _release_session_resource(resource: object) -> None:
+    with _SESSION_RESERVATION_LOCK:
+        _RESERVED_SESSION_RESOURCES.pop(id(resource), None)
 
 
 def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessage:
@@ -278,6 +307,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         async with agent.session(output_dir="./output") as session:
             finish_params, history, metadata = await session.run("Your task here")
     """
+
+    # Set only on the SessionAgent that owns a live session; None on a configured Agent.
+    _session_state: "SessionState | None" = None
 
     @overload
     def __init__(
@@ -454,7 +486,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
     @property
     def tools(self) -> dict[str, Tool]:
-        """Currently active tools (available after entering session context)."""
+        """Currently active tools. ToolProvider-created tools appear only on a SessionAgent."""
         return self._active_tools
 
     @property
@@ -487,8 +519,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         resume: bool = False,
         clear_cache_on_success: bool = True,
         cache_on_interrupt: bool = True,
-    ) -> Self:
-        """Configure a session and return self for use as async context manager.
+    ) -> "SessionAgent[FinishParams, FinishMeta]":
+        """Create a session for use as an async context manager.
 
         Args:
             output_dir: Directory to save output files from finish_params.paths
@@ -515,24 +547,29 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                be registered from non-main threads.
 
         Returns:
-            Self, for use with `async with agent.session(...) as session:`
+            A SessionAgent owning this session's runtime state, for use with
+            `async with agent.session(...) as session:`
 
         Example:
             async with agent.session(output_dir="./output", input_files="data/*.csv") as session:
                 result = await session.run("Analyze the CSV files")
 
         Note:
-            Multiple concurrent sessions from the same Agent instance are supported.
-            Each session maintains isolated state via ContextVar.
+            Sessions from one Agent instance must not overlap: they would share that
+            Agent's tool providers and logger, which hold per-session state. An
+            overlapping session is refused when it tries to enter a shared resource.
+            Give each concurrent session its own Agent.
 
         """
-        self._pending_output_dir = Path(output_dir) if output_dir else None
-        self._pending_input_files = input_files
-        self._pending_skills_dir = Path(skills_dir) if skills_dir else None
-        self._resume = resume
-        self._clear_cache_on_success = clear_cache_on_success
-        self._cache_on_interrupt = cache_on_interrupt
-        return self
+        return SessionAgent.from_agent(
+            self,
+            output_dir=output_dir,
+            input_files=input_files,
+            skills_dir=skills_dir,
+            resume=resume,
+            clear_cache_on_success=clear_cache_on_success,
+            cache_on_interrupt=cache_on_interrupt,
+        )
 
     def _handle_interrupt(self, _signum: int, _frame: object) -> None:
         """Handle SIGINT to ensure caching before exit.
@@ -636,7 +673,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         )
 
         # Check for code execution without output directory
-        state = _SESSION_STATE.get(None)
+        state = self._session_state
         if state and state.exec_env and not state.output_dir:
             warnings.append(
                 "Code execution environment is configured but no output_dir is set. "
@@ -669,7 +706,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             parts.append(" You are not able to interact with the user during the task.")
 
         # Input files section (if any were uploaded)
-        state = _SESSION_STATE.get(None)
+        state = self._session_state
         if state and state.uploaded_file_paths:
             files_section = "\n\nThe following input files have been provided for this task:"
             for file_path in state.uploaded_file_paths:
@@ -752,13 +789,33 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                 raise
                             # cell_contents can raise ValueError if empty - ignore
 
+    async def _enter_provider(self, provider: ToolProvider, exit_stack: AsyncExitStack) -> Tool | list[Tool]:
+        """Reserve a provider for this session, then enter it.
+
+        Reserving here rather than up front keeps providers a session never enters -- the
+        sub-agent's own backend under share_parent_exec_env -- out of the reservation.
+        """
+        _reserve_session_resource(provider)
+        exit_stack.callback(_release_session_resource, provider)
+        return await exit_stack.enter_async_context(provider)
+
+    @staticmethod
+    def _restore_ambient_session(state: SessionState) -> None:
+        """Make whatever session was ambient before this one ambient again."""
+        if state.context_token is not None:
+            _SESSION_STATE.reset(state.context_token)
+            state.context_token = None
+
     async def __aenter__(self) -> "SessionAgent[FinishParams, FinishMeta]":
         """Enter session context: set up tools, logging, and resources.
 
-        Returns a SessionAgent wrapping this agent's state, providing access to
-        both static tools and ToolProvider-created tools. The SessionAgent shares
-        this agent's __dict__, so state changes are visible to __aexit__.
+        Only a SessionAgent, created by ``Agent.session(...)``, owns the runtime state a
+        session needs; entering a configured Agent directly would let two sessions of that
+        Agent overwrite each other's tools, pending inputs, and cache state.
         """
+        if not isinstance(self, SessionAgent):
+            raise RuntimeError("Use `async with agent.session(...) as session:` to enter an Agent session")
+
         exit_stack = AsyncExitStack()
         await exit_stack.__aenter__()
 
@@ -767,7 +824,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         current_depth = _PARENT_DEPTH.get()
 
-        # Create session state and store in ContextVar
+        # Create session state, own it, and make it the ambient session
         state = SessionState(
             exit_stack=exit_stack,
             output_dir=str(self._pending_output_dir) if self._pending_output_dir else None,
@@ -775,7 +832,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             depth=current_depth,
             logger=self._logger,
         )
-        _SESSION_STATE.set(state)
+        self._session_state = state
+        state.context_token = _SESSION_STATE.set(state)
 
         try:
             # === TWO-PASS TOOL INITIALIZATION ===
@@ -819,7 +877,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
                 if code_exec_providers:
                     provider = code_exec_providers[0]
-                    result = await exit_stack.enter_async_context(provider)
+                    result = await self._enter_provider(provider, exit_stack)
                     if isinstance(result, list):
                         active_tools.extend(result)
                     else:
@@ -834,7 +892,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
                 if isinstance(tool, ToolProvider):
                     # ToolProvider: enter context and get returned tool(s)
-                    result = await exit_stack.enter_async_context(tool)
+                    result = await self._enter_provider(tool, exit_stack)
                     # Handle both single Tool and list[Tool] returns (e.g., MCPToolProvider)
                     if isinstance(result, list):
                         active_tools.extend(result)
@@ -942,6 +1000,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     await state.exec_env.upload_files("skills", source_env=parent_state.exec_env)
 
             # Configure and enter logger context
+            _reserve_session_resource(self._logger)
+            exit_stack.callback(_release_session_resource, self._logger)
             self._logger.name = self._name
             self._logger.model = self._client.model_slug
             self._logger.max_turns = self._max_turns
@@ -953,10 +1013,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._original_sigint = signal.getsignal(signal.SIGINT)
                 signal.signal(signal.SIGINT, self._handle_interrupt)
 
-            return SessionAgent.from_agent(self, state)
+            return self
 
         except Exception:
-            await exit_stack.__aexit__(None, None, None)
+            try:
+                await exit_stack.__aexit__(None, None, None)
+            finally:
+                self._restore_ambient_session(state)
             raise
 
     async def __aexit__(
@@ -971,7 +1034,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         - Root agent (depth=0): Saves files to local filesystem output_dir
         - Subagent (depth>0): Transfers files to parent's exec env at output_dir path
         """
-        state = _SESSION_STATE.get()
+        state = self._session_state
+        if state is None:
+            raise RuntimeError("Agent session is not active")
 
         try:
             # Cache state on non-success exit (only at root level)
@@ -1112,26 +1177,31 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                 state.depth,
                             )
         finally:
-            # Restore original signal handler (root agent only)
-            if hasattr(self, "_original_sigint"):
-                signal.signal(signal.SIGINT, self._original_sigint)
-                del self._original_sigint
+            try:
+                # Restore original signal handler (root agent only)
+                if hasattr(self, "_original_sigint"):
+                    signal.signal(signal.SIGINT, self._original_sigint)
+                    del self._original_sigint
 
-            # Exit logger context
-            self._logger.finish_params = state.finish_params
-            self._logger.run_metadata = state.run_metadata
-            self._logger.output_dir = str(state.output_dir) if state.output_dir else None
-            self._logger.__exit__(exc_type, exc_val, exc_tb)
+                # Exit logger context
+                self._logger.finish_params = state.finish_params
+                self._logger.run_metadata = state.run_metadata
+                self._logger.output_dir = str(state.output_dir) if state.output_dir else None
+                self._logger.__exit__(exc_type, exc_val, exc_tb)
 
-            # Reset active tools to static-only (remove session-initialized tools)
-            self._active_tools = {}
-            for tool in self._tools:
-                if isinstance(tool, Tool):
-                    self._active_tools[tool.name] = tool
-            self._active_tools.update(self._finish_tools)
-
-            # Cleanup all async resources
-            await state.exit_stack.__aexit__(exc_type, exc_val, exc_tb)
+                # Reset this session's active tools to static-only (its providers are torn down)
+                self._active_tools = {}
+                for tool in self._tools:
+                    if isinstance(tool, Tool):
+                        self._active_tools[tool.name] = tool
+                self._active_tools.update(self._finish_tools)
+            finally:
+                # A failure above must not strand the reservations, or every later session
+                # of this Agent would be refused for the rest of the process.
+                try:
+                    await state.exit_stack.__aexit__(exc_type, exc_val, exc_tb)
+                finally:
+                    self._restore_ambient_session(state)
 
     async def run_tool(self, tool_call: ToolCall, run_metadata: dict[str, list[Any]]) -> ToolMessage:
         """Execute a single tool call with error handling for invalid JSON/arguments.
@@ -1384,7 +1454,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 f"Use `async with agent.session(...) as session: await session.run(...)` instead."
             )
 
-        session_state = _SESSION_STATE.get(None) if isinstance(self, SessionAgent) else None
+        session_state = self._session_state
         if session_state is not None:
             session_state.run_started = True
             session_state.finish_params = None
@@ -1402,7 +1472,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Try to resume from cache if requested
         if self._resume:
-            state = _SESSION_STATE.get()
+            if session_state is None:
+                raise RuntimeError("Cannot resume an Agent run outside an active session")
+            state = session_state
             cached = cache_manager.load_state(task_hash)
             if cached:
                 # Restore files to exec env
@@ -1585,21 +1657,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             parent_depth = _PARENT_DEPTH.get()
             sub_agent_depth = parent_depth + 1
 
-            # Save parent's session state so we can restore it after subagent completes
-            # This ensures sibling subagents see the parent's state, not a previous sibling's stale state
-            parent_session_state = _SESSION_STATE.get(None)
-            logger.debug(
-                "[%s] PRE-SESSION: _SESSION_STATE=%s, exec_env=%s, exec_env._temp_dir=%s",
-                agent.name,
-                id(parent_session_state) if parent_session_state else None,
-                type(parent_session_state.exec_env).__name__
-                if parent_session_state and parent_session_state.exec_env
-                else None,
-                getattr(parent_session_state.exec_env, "_temp_dir", "N/A")
-                if parent_session_state and parent_session_state.exec_env
-                else None,
-            )
-
             # Set _PARENT_DEPTH to subagent's depth BEFORE entering session
             # so that __aenter__ reads the correct depth for SessionState.depth
             prev_depth = _PARENT_DEPTH.set(sub_agent_depth)
@@ -1618,7 +1675,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 ) as agent_session:
                     agent_session._logger.depth = sub_agent_depth  # noqa: SLF001
                     finish_params, msg_history, run_metadata = await agent_session.run(init_msgs)
-                    completed_state = _SESSION_STATE.get()
 
                 # Output transfer happens during session exit, so compose the response afterwards.
                 last_assistant_msg: AssistantMessage | None = None
@@ -1644,9 +1700,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
                 available_paths: list[str] = []
                 transfer_failures: dict[str, str] = {}
-                if completed_state.output_files_result is not None:
-                    available_paths = [str(saved.output_path) for saved in completed_state.output_files_result.saved]
-                    transfer_failures = completed_state.output_files_result.failed
+                output_files_result = agent_session.last_output_files_result
+                if output_files_result is not None:
+                    available_paths = [str(saved.output_path) for saved in output_files_result.saved]
+                    transfer_failures = output_files_result.failed
 
                 if available_paths:
                     content_parts.append(f"Files available in your environment: {available_paths}")
@@ -1683,25 +1740,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     metadata=error_metadata,
                 )
             finally:
-                # DEBUG: Log SESSION_STATE after subagent session
-                post_session_state = _SESSION_STATE.get(None)
-                logger.debug(
-                    "[%s] POST-SESSION: _SESSION_STATE=%s, exec_env=%s, exec_env._temp_dir=%s",
-                    agent.name,
-                    id(post_session_state) if post_session_state else None,
-                    type(post_session_state.exec_env).__name__
-                    if post_session_state and post_session_state.exec_env
-                    else None,
-                    getattr(post_session_state.exec_env, "_temp_dir", "N/A")
-                    if post_session_state and post_session_state.exec_env
-                    else None,
-                )
-
-                # Restore parent's depth
+                # Restore parent's depth. The sub-agent's session restores the parent's
+                # ambient session state itself when it exits.
                 _PARENT_DEPTH.reset(prev_depth)
-                # Restore parent's session state so next sibling subagent sees it
-                if parent_session_state is not None:
-                    _SESSION_STATE.set(parent_session_state)
 
         return Tool[SubAgentParams, SubAgentMetadata](
             name=self._name,
@@ -1712,12 +1753,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
 
 class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, FinishMeta]):
-    """Agent running inside an active session with full tool access.
+    """One session of an Agent, created by ``Agent.session(...)``.
 
-    Returned by ``async with agent.session(...) as session``. A SessionAgent
-    shares its ``__dict__`` with the parent Agent, so it has the same
-    configuration and state. The key difference is that ToolProvider-created
-    tools have been initialized and are available in ``_active_tools``.
+    Configuration is shared with the Agent that created it -- the LLM client, the
+    configured tools, the finish tools, the logger. Everything a session mutates while
+    it runs belongs to the SessionAgent: its active tools, its pending session
+    configuration, its cache state, and its SessionState. Two sessions of one Agent
+    therefore cannot overwrite each other's runtime state; what they still cannot do is
+    share the Agent's providers and logger, which ``__aenter__`` refuses.
 
     ``Agent.run()`` raises ``RuntimeError`` when ToolProviders are present
     but the caller is not a SessionAgent. This makes the invalid state
@@ -1725,23 +1768,36 @@ class SessionAgent[FinishParams: BaseModel, FinishMeta](Agent[FinishParams, Fini
     distinction rather than just a runtime flag.
     """
 
-    __slots__ = ("_output_state",)
-
-    _output_state: SessionState
-
     @property
     def last_output_files_result(self) -> SaveOutputFilesResult | None:
         """Return this session's output-saving result."""
-        return self._output_state.output_files_result
+        return self._session_state.output_files_result if self._session_state else None
 
     @classmethod
     def from_agent(
         cls,
         agent: Agent[FinishParams, FinishMeta],
-        output_state: SessionState,
+        *,
+        output_dir: Path | str | None = None,
+        input_files: str | Path | list[str | Path] | None = None,
+        skills_dir: Path | str | None = None,
+        resume: bool = False,
+        clear_cache_on_success: bool = True,
+        cache_on_interrupt: bool = True,
     ) -> "SessionAgent[FinishParams, FinishMeta]":
-        """Create a SessionAgent sharing configuration but retaining its own result state."""
-        session_agent: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
-        session_agent.__dict__ = agent.__dict__
-        session_agent._output_state = output_state
-        return session_agent
+        """Create a session that shares the Agent's configuration but owns its runtime state."""
+        session: SessionAgent[FinishParams, FinishMeta] = object.__new__(cls)
+        session.__dict__ = agent.__dict__.copy()
+        session._active_tools = dict(agent._active_tools)  # noqa: SLF001
+
+        session._pending_output_dir = Path(output_dir) if output_dir else None
+        session._pending_input_files = input_files
+        session._pending_skills_dir = Path(skills_dir) if skills_dir else None
+        session._resume = resume
+        session._clear_cache_on_success = clear_cache_on_success
+        session._cache_on_interrupt = cache_on_interrupt
+
+        session._current_task_hash = None
+        session._current_run_state = None
+        session._session_state = None
+        return session
