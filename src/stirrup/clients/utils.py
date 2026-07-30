@@ -7,6 +7,8 @@ formats, these utilities are shared between both client implementations.
 
 from typing import Any
 
+from openai import AsyncOpenAI, OpenAIError
+
 from stirrup.core.models import (
     AssistantMessage,
     AudioContentBlock,
@@ -172,3 +174,21 @@ def to_openai_messages(msgs: list[ChatMessage]) -> list[dict[str, Any]]:
             raise NotImplementedError(f"Unsupported message type: {type(m)}")
 
     return out
+
+
+def build_openai_client(
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    timeout: float | None,
+    max_retries: int,
+) -> AsyncOpenAI:
+    """Build the SDK client, refusing an endpoint that did not bring its own key.
+
+    Without a ``base_url`` the SDK resolves its own endpoint and ``OPENAI_API_KEY``.
+    Naming an endpoint means naming its key, so no other endpoint's credential can
+    reach it.
+    """
+    if base_url is not None and not api_key:
+        raise OpenAIError("base_url requires an explicit api_key")
+    return AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)

@@ -8,13 +8,10 @@ This is the default client for Stirrup.
 """
 
 import logging
-import os
 from time import perf_counter
 from typing import Any
 
-from openai import AsyncOpenAI
-
-from stirrup.clients.utils import to_openai_messages, to_openai_tools
+from stirrup.clients.utils import build_openai_client, to_openai_messages, to_openai_tools
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
@@ -87,14 +84,8 @@ class ChatCompletionsClient(LLMClient):
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
 
-        # Initialize AsyncOpenAI client
-        # Read from OPENROUTER_API_KEY if no api_key provided
-        resolved_api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
-        self._client = AsyncOpenAI(
-            api_key=resolved_api_key,
-            base_url=base_url,
-            timeout=timeout,
-            max_retries=max_retries,
+        self._client = build_openai_client(
+            base_url=base_url, api_key=api_key, timeout=timeout, max_retries=max_retries
         )
 
     @property
