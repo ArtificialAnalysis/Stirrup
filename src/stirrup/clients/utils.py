@@ -24,6 +24,7 @@ from stirrup.core.models import (
 )
 
 __all__ = [
+    "build_openai_client",
     "content_to_openai",
     "to_openai_messages",
     "to_openai_tools",
