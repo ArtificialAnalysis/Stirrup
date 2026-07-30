@@ -139,6 +139,10 @@ the OpenAI SDK reads `OPENAI_API_KEY` itself.
 > construction unless you pass the key that endpoint expects — OpenRouter included,
 > as are proxies and gateways named through `OPENAI_BASE_URL`. To migrate, name the
 > key: `api_key=os.environ["OPENROUTER_API_KEY"]`.
+>
+> A `base_url` carrying userinfo, a query or a fragment is rejected too. The OpenAI
+> SDK appends its route *after* a query, so such a URL was already being sent
+> somewhere other than where it read.
 
 ```python
 # Create client using Deepseek's OpenAI-compatible endpoint

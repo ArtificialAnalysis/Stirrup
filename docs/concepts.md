@@ -236,6 +236,10 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
     Only the default endpoint may omit `api_key`, and there the OpenAI SDK — not
     Stirrup — reads `OPENAI_API_KEY` and raises its own error when it is unset.
 
+    A `base_url` carrying userinfo, a query or a fragment is rejected too. The OpenAI
+    SDK appends its route *after* a query, so such a URL was already being sent
+    somewhere other than where it read.
+
 ### LiteLLMClient
 
 Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](https://docs.litellm.ai/docs/providers):
