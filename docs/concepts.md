@@ -208,6 +208,8 @@ Stirrup supports multiple ways to connect to LLM providers.
 
 Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 
+Stirrup reads no credential from the environment: setting `base_url` means naming that endpoint's key via `api_key`, or the client refuses to construct. Without a `base_url` the OpenAI SDK resolves its own endpoint and `OPENAI_API_KEY` exactly as it always has.
+
 ```python
 --8<-- "examples/deepseek_example.py:client"
 ```
@@ -217,9 +219,14 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 | `model` | `str` | required | Model identifier (e.g., `"gpt-5"`, `"deepseek-chat"`) |
 | `max_tokens` | `int` | `64_000` | Context window size |
 | `base_url` | `str \| None` | `None` | Custom API URL (for Deepseek, vLLM, etc.) |
-| `api_key` | `str \| None` | `None` | API key (defaults to `OPENROUTER_API_KEY` env var) |
+| `api_key` | `str \| None` | `None` | API key. Required whenever `base_url` is set |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
 | `max_retries` | `int` | `2` | Number of retries for transient errors |
+
+!!! warning "Breaking change"
+    `ChatCompletionsClient` used to fall back to `OPENROUTER_API_KEY` and `OpenResponsesClient` to
+    `OPENAI_API_KEY`, whatever `base_url` pointed at. If you relied on that, pass the key
+    explicitly: `api_key=os.environ["OPENROUTER_API_KEY"]`.
 
 ### LiteLLMClient
 

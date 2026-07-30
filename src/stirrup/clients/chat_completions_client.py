@@ -70,8 +70,8 @@ class ChatCompletionsClient(LLMClient):
             max_tokens: Maximum context window size in tokens. Defaults to 64,000.
             base_url: API base URL. If None, uses OpenAI's standard URL.
                 Use for OpenAI-compatible providers (e.g., 'http://localhost:8000/v1').
-            api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
-                environment variable.
+            api_key: API key for authentication. Required whenever base_url is set.
+                If both are None, the OpenAI SDK resolves OPENAI_API_KEY itself.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
@@ -84,9 +84,7 @@ class ChatCompletionsClient(LLMClient):
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
 
-        self._client = build_openai_client(
-            base_url=base_url, api_key=api_key, timeout=timeout, max_retries=max_retries
-        )
+        self._client = build_openai_client(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=max_retries)
 
     @property
     def max_tokens(self) -> int:

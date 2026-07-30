@@ -17,6 +17,7 @@ Example .mcp/mcp.json:
 """
 
 import asyncio
+import os
 from pathlib import Path
 
 from stirrup import Agent
@@ -33,6 +34,7 @@ async def main() -> None:
         base_url="https://openrouter.ai/api/v1",
         model="anthropic/claude-sonnet-4.5",
         max_tokens=50_000,
+        api_key=os.environ["OPENROUTER_API_KEY"],
     )
 
     # Create agent with default tools + MCP tools

@@ -57,6 +57,7 @@ pip install 'stirrup[browser]'  # or: uv add 'stirrup[browser]'
 
 ```python
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -66,10 +67,11 @@ async def main() -> None:
     """Run an agent that searches the web and creates a chart."""
 
     # Create client using ChatCompletionsClient
-    # Automatically uses OPENROUTER_API_KEY environment variable
+    # Naming an endpoint means naming its key - Stirrup reads no credential from the environment
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
         model="anthropic/claude-sonnet-4.5",
+        api_key=os.environ["OPENROUTER_API_KEY"],
     )
 
     # As no tools are provided, the agent will use the default tools, which consist of:
@@ -128,6 +130,8 @@ For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, us
 
 ### OpenAI-Compatible APIs
 
+Stirrup reads no credential from the environment: setting `base_url` means naming that endpoint's key via `api_key`, or the client refuses to construct. Without a `base_url` the OpenAI SDK resolves its own endpoint and `OPENAI_API_KEY` exactly as it always has.
+
 ```python
 # Create client using Deepseek's OpenAI-compatible endpoint
 client = ChatCompletionsClient(
@@ -138,6 +142,8 @@ client = ChatCompletionsClient(
 
 agent = Agent(client=client, name="deepseek_agent")
 ```
+
+> **Breaking change:** `ChatCompletionsClient` used to fall back to `OPENROUTER_API_KEY` and `OpenResponsesClient` to `OPENAI_API_KEY`, whatever `base_url` pointed at. If you relied on that, pass the key explicitly: `api_key=os.environ["OPENROUTER_API_KEY"]`.
 
 ### LiteLLM (Anthropic, Google, etc.)
 
@@ -172,6 +178,7 @@ When you create an `Agent` without specifying tools, it uses `DEFAULT_TOOLS`:
 
 ```python
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -181,6 +188,7 @@ from stirrup.tools import CALCULATOR_TOOL, DEFAULT_TOOLS
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
     model="anthropic/claude-sonnet-4.5",
+    api_key=os.environ["OPENROUTER_API_KEY"],
 )
 
 # Create agent with default tools + calculator tool
@@ -194,6 +202,8 @@ agent = Agent(
 ## Defining Custom Tools
 
 ```python
+import os
+
 from pydantic import BaseModel, Field
 
 from stirrup import Agent, Tool, ToolResult, ToolUseCountMetadata
@@ -228,6 +238,7 @@ GREET_TOOL = Tool(
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
     model="anthropic/claude-sonnet-4.5",
+    api_key=os.environ["OPENROUTER_API_KEY"],
 )
 
 # Add custom tool to default tools

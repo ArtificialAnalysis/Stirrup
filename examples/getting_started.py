@@ -9,6 +9,7 @@ Demonstrates the core pattern:
 
 # --8<-- [start:simple]
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -18,10 +19,11 @@ async def main() -> None:
     """Run an agent that searches the web and creates a chart."""
 
     # Create client using ChatCompletionsClient
-    # Automatically uses OPENROUTER_API_KEY environment variable
+    # Naming an endpoint means naming its key - Stirrup reads no credential from the environment
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
         model="anthropic/claude-sonnet-4.5",
+        api_key=os.environ["OPENROUTER_API_KEY"],
     )
 
     # As no tools are provided, the agent will use the default tools, which consist of:

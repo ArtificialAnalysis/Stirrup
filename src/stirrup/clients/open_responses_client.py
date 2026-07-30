@@ -288,8 +288,8 @@ class OpenResponsesClient(LLMClient):
             max_tokens: Maximum output tokens. Defaults to 64,000.
             base_url: API base URL. If None, uses OpenAI's standard URL.
                 Use for OpenAI-compatible providers.
-            api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
-                environment variable.
+            api_key: API key for authentication. Required whenever base_url is set.
+                If both are None, the OpenAI SDK resolves OPENAI_API_KEY itself.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
