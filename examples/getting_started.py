@@ -9,6 +9,7 @@ Demonstrates the core pattern:
 
 # --8<-- [start:simple]
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -18,9 +19,10 @@ async def main() -> None:
     """Run an agent that searches the web and creates a chart."""
 
     # Create client using ChatCompletionsClient
-    # The key is inferred from the endpoint: this OpenRouter base_url uses OPENROUTER_API_KEY
+    # Every endpoint but OpenAI's own needs its key passed explicitly
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
         model="anthropic/claude-sonnet-4.5",
     )
 

@@ -5,6 +5,7 @@ using Pydantic and register it with an agent.
 """
 
 import asyncio
+import os
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,7 @@ GREET_TOOL = Tool(
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
     model="anthropic/claude-sonnet-4.5",
 )
 

@@ -57,6 +57,7 @@ pip install 'stirrup[browser]'  # or: uv add 'stirrup[browser]'
 
 ```python
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -66,9 +67,10 @@ async def main() -> None:
     """Run an agent that searches the web and creates a chart."""
 
     # Create client using ChatCompletionsClient
-    # The key is inferred from the endpoint: this OpenRouter base_url uses OPENROUTER_API_KEY
+    # Every endpoint but OpenAI's own needs its key passed explicitly
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
         model="anthropic/claude-sonnet-4.5",
     )
 
@@ -129,17 +131,14 @@ For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, us
 ### OpenAI-Compatible APIs
 
 When `base_url` is omitted, clients use `OPENAI_BASE_URL` or OpenAI's standard
-endpoint. When `api_key` is omitted, exact OpenAI/OpenRouter HTTPS endpoints use
-their provider environment key; custom and HTTP endpoints require an explicit key.
+endpoint. Stirrup never reads a credential from the environment: every endpoint
+needs an explicit `api_key`, except OpenAI's own `https://api.openai.com`, where
+the OpenAI SDK reads `OPENAI_API_KEY` itself.
 
-> **Breaking change:** provider environment keys are no longer sent to custom or
-> HTTP endpoints, so a proxy or gateway configured through `OPENAI_BASE_URL` now
-> raises at construction unless you pass the key that endpoint expects, for example
-> `api_key=os.environ["MY_GATEWAY_API_KEY"]`. `ChatCompletionsClient` also changes
-> the key it infers for the default endpoint, from `OPENROUTER_API_KEY` to
-> `OPENAI_API_KEY`; `OpenResponsesClient` already used `OPENAI_API_KEY` there. If you
-> relied on that old default, pass `base_url="https://openrouter.ai/api/v1"` and the
-> OpenRouter key is inferred again.
+> **Breaking change:** any `base_url` other than OpenAI's own now raises at
+> construction unless you pass the key that endpoint expects — OpenRouter included,
+> as are proxies and gateways named through `OPENAI_BASE_URL`. To migrate, name the
+> key: `api_key=os.environ["OPENROUTER_API_KEY"]`.
 
 ```python
 # Create client using Deepseek's OpenAI-compatible endpoint
@@ -185,6 +184,7 @@ When you create an `Agent` without specifying tools, it uses `DEFAULT_TOOLS`:
 
 ```python
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -193,6 +193,7 @@ from stirrup.tools import CALCULATOR_TOOL, DEFAULT_TOOLS
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
     model="anthropic/claude-sonnet-4.5",
 )
 
@@ -207,6 +208,8 @@ agent = Agent(
 ## Defining Custom Tools
 
 ```python
+import os
+
 from pydantic import BaseModel, Field
 
 from stirrup import Agent, Tool, ToolResult, ToolUseCountMetadata
@@ -240,6 +243,7 @@ GREET_TOOL = Tool(
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
     model="anthropic/claude-sonnet-4.5",
 )
 

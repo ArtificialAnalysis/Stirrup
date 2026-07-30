@@ -8,12 +8,13 @@ from pytest import MonkeyPatch
 
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-_CUSTOM_ENDPOINT_MESSAGE = "Custom endpoints require an explicit api_key"
+_EXPLICIT_KEY_MESSAGE = "requires an explicit api_key"
+_SDK_MISSING_KEY_MESSAGE = "The api_key client option must be set"
 
 
-def _set_provider_keys(monkeypatch: MonkeyPatch) -> None:
+def _set_openai_key(monkeypatch: MonkeyPatch) -> None:
+    """Make ``OPENAI_API_KEY`` available, so a rejection also proves it was not sent."""
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
 
 
 def _apply_environment_overrides(monkeypatch: MonkeyPatch, overrides: Mapping[str, str | None]) -> None:
@@ -42,40 +43,38 @@ async def _assert_client_configuration(
     [
         (None, None, None, "https://api.openai.com/v1/", "openai-key"),
         (None, "", None, "https://api.openai.com/v1/", "openai-key"),
-        ("https://openrouter.ai/api/v1", None, None, "https://openrouter.ai/api/v1/", "openrouter-key"),
-        (None, "https://openrouter.ai/api/v1", None, "https://openrouter.ai/api/v1/", "openrouter-key"),
         (
             "https://api.openai.com/v1",
-            "https://openrouter.ai/api/v1",
+            "https://gateway.example/v1",
             None,
             "https://api.openai.com/v1/",
             "openai-key",
         ),
         (
-            "https://gateway.example/v1",
-            "https://openrouter.ai/api/v1",
-            "explicit-key",
-            "https://gateway.example/v1/",
-            "explicit-key",
-        ),
-        ("http://localhost:8000/v1", None, "local-key", "http://localhost:8000/v1/", "local-key"),
-        (
             "https://openrouter.ai/api/v1",
             None,
-            "explicit-key",
+            "openrouter-key",
             "https://openrouter.ai/api/v1/",
-            "explicit-key",
+            "openrouter-key",
         ),
+        (
+            "https://gateway.example/v1",
+            "https://api.openai.com/v1",
+            "gateway-key",
+            "https://gateway.example/v1/",
+            "gateway-key",
+        ),
+        ("http://localhost:8000/v1", None, "local-key", "http://localhost:8000/v1/", "local-key"),
+        ("https://api.openai.com:8443/v1", None, "port-key", "https://api.openai.com:8443/v1/", "port-key"),
     ],
     ids=[
-        "default-openai",
+        "default-endpoint-defers-key-lookup-to-sdk",
         "blank-environment-endpoint-falls-back-to-default",
-        "openrouter",
-        "environment-endpoint",
         "explicit-endpoint-overrides-environment",
+        "explicit-key-provider-host",
         "explicit-key-custom-https",
         "explicit-key-custom-http",
-        "explicit-key-overrides-provider-key",
+        "explicit-key-openai-host-on-other-port",
     ],
 )
 async def test_accepted_configurations(
@@ -86,7 +85,7 @@ async def test_accepted_configurations(
     expected_base_url: str,
     expected_api_key: str,
 ) -> None:
-    _set_provider_keys(monkeypatch)
+    _set_openai_key(monkeypatch)
     _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": environment_base_url})
 
     client = ChatCompletionsClient(model="gpt-4o", base_url=base_url, api_key=api_key)
@@ -94,51 +93,43 @@ async def test_accepted_configurations(
     await _assert_client_configuration(client, expected_base_url, expected_api_key)
 
 
+def test_default_endpoint_without_openai_key_raises_the_sdk_error(monkeypatch: MonkeyPatch) -> None:
+    """Stirrup sends no credential of its own, so the SDK reports the missing key itself."""
+    _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": None, "OPENAI_API_KEY": None})
+
+    with pytest.raises(OpenAIError, match=_SDK_MISSING_KEY_MESSAGE):
+        ChatCompletionsClient(model="gpt-4o")
+
+
 @pytest.mark.parametrize(
     ("base_url", "api_key", "environment_overrides", "expected_message"),
     [
-        ("https://gateway.example/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://gateway.example/v1", "", {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://api.openrouter.ai/api/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://chat.openai.com/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://xapi.openai.com/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://openrouter.ai.evil.example/api/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://api.openai.com.evil.example/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://evil-openai.com/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("https://api.openai.com:8443/v1", None, {}, _CUSTOM_ENDPOINT_MESSAGE),
-        (None, None, {"OPENAI_BASE_URL": "https://litellm.mycorp.internal/v1"}, _CUSTOM_ENDPOINT_MESSAGE),
-        ("http://openrouter.ai/api/v1", None, {}, "HTTP endpoints require an explicit api_key"),
-        (
-            None,
-            None,
-            {"OPENAI_API_KEY": None, "OPENROUTER_API_KEY": "other-provider-key"},
-            "OPENAI_API_KEY",
-        ),
-        (
-            "https://openrouter.ai/api/v1",
-            None,
-            {"OPENROUTER_API_KEY": None, "OPENAI_API_KEY": "other-provider-key"},
-            "OPENROUTER_API_KEY",
-        ),
-        (None, None, {"OPENAI_API_KEY": ""}, "OPENAI_API_KEY"),
-        ("https://user:password@openrouter.ai/api/v1", "explicit-key", {}, "userinfo"),
+        ("https://gateway.example/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("https://gateway.example/v1", "", {}, _EXPLICIT_KEY_MESSAGE),
+        ("https://openrouter.ai/api/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("https://chat.openai.com/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("https://xapi.openai.com/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("https://api.openai.com.evil.example/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("https://api.openai.com:8443/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("http://api.openai.com/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("http://localhost:8000/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        (None, None, {"OPENAI_BASE_URL": "https://litellm.mycorp.internal/v1"}, _EXPLICIT_KEY_MESSAGE),
+        (None, None, {"OPENAI_BASE_URL": "https://openrouter.ai/api/v1"}, _EXPLICIT_KEY_MESSAGE),
+        ("https://user:password@api.openai.com/v1", "explicit-key", {}, "userinfo"),
         ("ftp://api.openai.com/v1", "explicit-key", {}, r"absolute HTTP\(S\) URL"),
     ],
     ids=[
         "custom-host",
         "blank-api-key-is-not-explicit",
-        "unrecognized-openrouter-subdomain",
+        "provider-host",
         "unrecognized-openai-subdomain",
-        "openai-suffix-lookalike",
-        "deceptive-openrouter-host",
+        "openai-prefix-lookalike",
         "deceptive-openai-host",
-        "openai-lookalike-host",
-        "provider-host-on-other-port",
+        "openai-host-on-other-port",
+        "openai-host-over-http",
+        "custom-http-host",
         "custom-environment-endpoint",
-        "http-provider-host",
-        "openai-key-does-not-fall-back-to-openrouter",
-        "openrouter-key-does-not-fall-back-to-openai",
-        "blank-provider-key-is-missing",
+        "provider-environment-endpoint",
         "userinfo-in-base-url",
         "non-http-scheme",
     ],
@@ -150,7 +141,7 @@ def test_rejected_configurations(
     environment_overrides: Mapping[str, str | None],
     expected_message: str,
 ) -> None:
-    _set_provider_keys(monkeypatch)
+    _set_openai_key(monkeypatch)
     # OPENAI_BASE_URL is absent unless a row asks for it.
     _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": None, **environment_overrides})
 

@@ -80,10 +80,10 @@ class ChatCompletionsClient(LLMClient):
             base_url: API base URL. If None, reads ``OPENAI_BASE_URL`` before
                 using OpenAI's standard URL. Use for OpenAI-compatible providers
                 (e.g., 'http://localhost:8000/v1').
-            api_key: API key for authentication. Explicit values take precedence.
-                If None, exact OpenAI and OpenRouter HTTPS endpoints use
-                ``OPENAI_API_KEY`` and ``OPENROUTER_API_KEY``, respectively.
-                Custom and HTTP endpoints require an explicit key.
+            api_key: API key for authentication. Required for every endpoint except
+                OpenAI's own ``https://api.openai.com``, where the OpenAI SDK reads
+                ``OPENAI_API_KEY`` itself. Stirrup never reads a credential from the
+                environment.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
@@ -93,10 +93,11 @@ class ChatCompletionsClient(LLMClient):
 
         Raises:
             openai.OpenAIError: If the effective base URL is not an absolute HTTP(S) URL,
-                includes userinfo, or names an endpoint whose credential Stirrup does not
-                infer while ``api_key`` is omitted. A base URL httpx cannot parse at all
-                (a non-numeric port, say) still surfaces as ``httpx.InvalidURL``, since
-                httpx parses it before Stirrup inspects it.
+                includes userinfo, or is any endpoint other than OpenAI's own HTTPS one
+                while ``api_key`` is omitted. The OpenAI SDK raises the same error type
+                when that endpoint is used and ``OPENAI_API_KEY`` is unset. A base URL
+                httpx cannot parse at all (a non-numeric port, say) still surfaces as
+                ``httpx.InvalidURL``, since httpx parses it before Stirrup inspects it.
         """
         self._model = model
         self._max_tokens = max_tokens

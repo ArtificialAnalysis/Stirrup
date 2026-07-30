@@ -7,6 +7,7 @@ to specialized sub-agents. The supervisor coordinates:
 """
 
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -19,6 +20,7 @@ async def main() -> None:
     # Create client for OpenRouter (shared across all agents)
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
         model="anthropic/claude-sonnet-4.5",
         max_tokens=64_000,
     )

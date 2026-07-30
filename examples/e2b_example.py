@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from dotenv import load_dotenv
 
@@ -12,6 +13,7 @@ async def main() -> None:
 
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
         model="anthropic/claude-sonnet-4.5",
     )
 

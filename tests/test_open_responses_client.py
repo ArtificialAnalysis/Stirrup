@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pytest import MonkeyPatch
 
 from stirrup.clients.open_responses_client import (
     OpenResponsesClient,
@@ -297,12 +296,10 @@ class TestOpenResponsesClient:
     )
     async def test_resolver_wiring_strips_only_a_trailing_responses_suffix(
         self,
-        monkeypatch: MonkeyPatch,
         base_url: str,
         expected_base_url: str,
     ) -> None:
-        monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
-        client = OpenResponsesClient(model="gpt-4o", base_url=base_url)
+        client = OpenResponsesClient(model="gpt-4o", base_url=base_url, api_key="openrouter-key")
 
         try:
             assert str(client._client.base_url) == expected_base_url  # noqa: SLF001

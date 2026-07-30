@@ -29,6 +29,7 @@ from stirrup.integrations.slack import SlackAgentConfig, SlackBot, SlackBotConfi
 client = ChatCompletionsClient(
     model="google/gemini-3-flash-preview",
     base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
 )
 
 # Default agent — used when no agent: prefix is specified

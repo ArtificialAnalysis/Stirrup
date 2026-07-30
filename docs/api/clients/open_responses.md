@@ -27,7 +27,7 @@ For models that support extended thinking (like o1/o3), you can configure the re
 | `model` | `str` | required | Model identifier (e.g., `"gpt-4o"`, `"o1"`) |
 | `max_tokens` | `int` | `64_000` | Maximum output tokens |
 | `base_url` | `str \| None` | `None` | API URL. Falls back to `OPENAI_BASE_URL`, then OpenAI's standard URL |
-| `api_key` | `str \| None` | `None` | API key. Exact OpenAI/OpenRouter HTTPS endpoints use their provider environment key; other endpoints require an explicit key |
+| `api_key` | `str \| None` | `None` | API key. Required for every endpoint except OpenAI's own `https://api.openai.com`, where the OpenAI SDK reads `OPENAI_API_KEY` itself |
 | `reasoning_effort` | `str \| None` | `None` | Reasoning effort for o1/o3 models: `"low"`, `"medium"`, `"high"` |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
 | `max_retries` | `int` | `2` | Number of retries for transient errors |

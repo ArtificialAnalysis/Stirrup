@@ -31,13 +31,19 @@ __all__ = [
 ]
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_OPENAI_HOST = "api.openai.com"
 
 
 def _resolve_openai_endpoint_and_api_key(
     base_url: str | None,
     api_key: str | None,
-) -> tuple[httpx.URL, str]:
-    """Resolve the effective endpoint and a credential safe to send to it."""
+) -> tuple[httpx.URL, str | None]:
+    """Resolve the effective endpoint and the credential to send to it.
+
+    Stirrup never reads a credential from the environment, so every endpoint needs an
+    explicit ``api_key`` except OpenAI's own, where ``None`` hands the ``OPENAI_API_KEY``
+    lookup to the OpenAI SDK.
+    """
     effective_base_url = base_url
     if effective_base_url is None:
         effective_base_url = os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
@@ -50,24 +56,14 @@ def _resolve_openai_endpoint_and_api_key(
 
     if api_key:
         return endpoint, api_key
-    if endpoint.scheme != "https":
-        raise OpenAIError("HTTP endpoints require an explicit api_key")
-
-    if endpoint.port is not None:
-        raise OpenAIError("Custom endpoints require an explicit api_key")
-    # Extend these hosts only for a provider whose credential Stirrup infers from a documented
-    # environment variable; any other endpoint must be given an explicit api_key.
-    if endpoint.host == "api.openai.com":
-        environment_variable = "OPENAI_API_KEY"
-    elif endpoint.host == "openrouter.ai":
-        environment_variable = "OPENROUTER_API_KEY"
-    else:
-        raise OpenAIError("Custom endpoints require an explicit api_key")
-
-    resolved_api_key = os.environ.get(environment_variable)
-    if not resolved_api_key:
-        raise OpenAIError(f"Endpoint requires api_key or the {environment_variable} environment variable")
-    return endpoint, resolved_api_key
+    # Cleartext would expose the SDK's key, and another port is another endpoint, so
+    # neither may borrow OpenAI's credential however familiar the host looks.
+    if endpoint.scheme == "https" and endpoint.host == _OPENAI_HOST and endpoint.port is None:
+        return endpoint, None
+    raise OpenAIError(
+        f"{endpoint} requires an explicit api_key; only https://{_OPENAI_HOST} reads OPENAI_API_KEY, "
+        "and the OpenAI SDK does that itself"
+    )
 
 
 def to_openai_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:

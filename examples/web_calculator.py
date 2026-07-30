@@ -9,6 +9,7 @@ This example demonstrates how to create an agent that can:
 # --8<-- [start:setup]
 import argparse
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -21,6 +22,7 @@ DEFAULT_OPENROUTER_SLUG = "anthropic/claude-sonnet-4.5"
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
     model=DEFAULT_OPENROUTER_SLUG,
 )
 
@@ -40,6 +42,7 @@ async def main(openrouter_slug: str) -> None:
     # Create client for OpenRouter
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
         model=openrouter_slug,
         max_tokens=50_000,
     )

@@ -215,30 +215,26 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 | `model` | `str` | required | Model identifier (e.g., `"gpt-5"`, `"deepseek-chat"`) |
 | `max_tokens` | `int` | `64_000` | Context window size |
 | `base_url` | `str \| None` | `None` | API URL. Falls back to `OPENAI_BASE_URL`, then OpenAI's standard URL |
-| `api_key` | `str \| None` | `None` | API key. Exact OpenAI/OpenRouter HTTPS endpoints use their provider environment key; other endpoints require an explicit key |
+| `api_key` | `str \| None` | `None` | API key. Required for every endpoint except OpenAI's own `https://api.openai.com`, where the OpenAI SDK reads `OPENAI_API_KEY` itself |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
 | `max_retries` | `int` | `2` | Number of retries for transient errors |
 
 !!! warning "Breaking change"
-    Provider environment keys are no longer sent to custom or HTTP endpoints, so a
-    proxy or gateway configured through `OPENAI_BASE_URL` now raises at construction
-    unless you pass the key that endpoint expects:
+    Stirrup no longer reads a credential from the environment. Any `base_url` other
+    than OpenAI's own — OpenRouter included, as are proxies and gateways named
+    through `OPENAI_BASE_URL` — now raises at construction unless you pass the key
+    that endpoint expects:
 
     ```python
     client = ChatCompletionsClient(
-        model="gpt-4o",
-        base_url="https://litellm.mycorp.internal/v1",
-        api_key=os.environ["MY_GATEWAY_API_KEY"],
+        model="anthropic/claude-sonnet-4.5",
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
     )
     ```
 
-    The key inferred for the default endpoint also changed from `OPENROUTER_API_KEY`
-    to `OPENAI_API_KEY`. If you relied on that old default, name the OpenRouter
-    endpoint and its key is inferred again:
-
-    ```python
-    client = ChatCompletionsClient(model="gpt-4o", base_url="https://openrouter.ai/api/v1")
-    ```
+    Only the default endpoint may omit `api_key`, and there the OpenAI SDK — not
+    Stirrup — reads `OPENAI_API_KEY` and raises its own error when it is unset.
 
 ### LiteLLMClient
 
