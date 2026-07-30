@@ -106,6 +106,27 @@ __all__ = [
 LOGGER = logging.getLogger(__name__)
 
 
+def _record_session_cleanup_failure(
+    primary_exception: BaseException | None,
+    phase: str,
+    cleanup_failure: BaseException,
+) -> BaseException:
+    """Keep the failure already in flight and record a later cleanup failure against it.
+
+    A failure while tearing a session down must never replace the failure the caller is
+    trying to diagnose, so it is attached as a note rather than raised. Notes on a
+    cancellation exception are never seen - the cancel scope swallows it - so every
+    cleanup failure is logged as well.
+    """
+    logger.warning("%s failed during session cleanup", phase, exc_info=cleanup_failure)
+    if primary_exception is None:
+        return cleanup_failure
+    primary_exception.add_note(
+        f"{phase} failed during session cleanup: {type(cleanup_failure).__name__}: {cleanup_failure}"
+    )
+    return primary_exception
+
+
 def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessage:
     """Create a user message warning the agent about remaining turns before max_turns is reached."""
     if number_of_turns_remaining == 1:
@@ -777,6 +798,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         )
         _SESSION_STATE.set(state)
 
+        logger_entered = False
         try:
             # === TWO-PASS TOOL INITIALIZATION ===
             # First pass initializes CodeExecToolProvider so that dependent tools
@@ -947,6 +969,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             self._logger.max_turns = self._max_turns
             # depth is already set (0 for main agent, passed in for sub-agents)
             self._logger.__enter__()
+            logger_entered = True
 
             # Set up signal handler for graceful caching on interrupt (root agent only)
             if current_depth == 0 and self._cache_on_interrupt:
@@ -955,8 +978,20 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             return SessionAgent.from_agent(self, state)
 
-        except Exception:
-            await exit_stack.__aexit__(None, None, None)
+        except BaseException as entry_failure:
+            # Providers already entered own containers, sandboxes and subprocesses. Shield
+            # so cancellation cannot abandon their release, and run every phase so that one
+            # failing phase cannot skip the next.
+            with anyio.CancelScope(shield=True):
+                if logger_entered:
+                    try:
+                        self._logger.__exit__(type(entry_failure), entry_failure, entry_failure.__traceback__)
+                    except BaseException as cleanup_failure:
+                        _record_session_cleanup_failure(entry_failure, "Logger", cleanup_failure)
+                try:
+                    await exit_stack.__aexit__(type(entry_failure), entry_failure, entry_failure.__traceback__)
+                except BaseException as cleanup_failure:
+                    _record_session_cleanup_failure(entry_failure, "Tool provider", cleanup_failure)
             raise
 
     async def __aexit__(
@@ -967,11 +1002,33 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
     ) -> None:
         """Exit session context: save files, cleanup resources.
 
+        Teardown releases containers, cloud sandboxes and subprocesses, so it runs inside a
+        shielded cancel scope: cancelling a session must not abandon those resources. The
+        scope makes teardown itself uninterruptible, which is the intended trade.
+        """
+        state = _SESSION_STATE.get()
+        with anyio.CancelScope(shield=True):
+            await self._exit_session(state, exc_type, exc_val, exc_tb)
+
+    async def _exit_session(
+        self,
+        state: SessionState,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Run every session teardown phase, keeping the first failure ahead of later ones.
+
+        Each phase is guarded so that a failing phase cannot skip the phases after it, and
+        so that a cleanup failure never replaces the exception the caller is already
+        propagating. Add new teardown work as another guarded phase, never as a bare
+        statement between two of them.
+
         File handling is depth-aware:
         - Root agent (depth=0): Saves files to local filesystem output_dir
         - Subagent (depth>0): Transfers files to parent's exec env at output_dir path
         """
-        state = _SESSION_STATE.get()
+        primary_exception = exc_val
 
         try:
             # Cache state on non-success exit (only at root level)
@@ -1111,27 +1168,48 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                 "Files will not be transferred.",
                                 state.depth,
                             )
-        finally:
-            # Restore original signal handler (root agent only)
+        except BaseException as finalization_failure:
+            primary_exception = _record_session_cleanup_failure(
+                primary_exception, "Session finalization", finalization_failure
+            )
+
+        # Restore original signal handler (root agent only)
+        try:
             if hasattr(self, "_original_sigint"):
                 signal.signal(signal.SIGINT, self._original_sigint)
                 del self._original_sigint
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Signal handler", cleanup_failure)
 
-            # Exit logger context
+        # Exit logger context
+        try:
             self._logger.finish_params = state.finish_params
             self._logger.run_metadata = state.run_metadata
             self._logger.output_dir = str(state.output_dir) if state.output_dir else None
             self._logger.__exit__(exc_type, exc_val, exc_tb)
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Logger", cleanup_failure)
 
-            # Reset active tools to static-only (remove session-initialized tools)
+        # Reset active tools to static-only (remove session-initialized tools)
+        try:
             self._active_tools = {}
             for tool in self._tools:
                 if isinstance(tool, Tool):
                     self._active_tools[tool.name] = tool
             self._active_tools.update(self._finish_tools)
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Active tool reset", cleanup_failure)
 
-            # Cleanup all async resources
+        # Cleanup all async resources
+        try:
             await state.exit_stack.__aexit__(exc_type, exc_val, exc_tb)
+        except BaseException as cleanup_failure:
+            primary_exception = _record_session_cleanup_failure(primary_exception, "Tool provider", cleanup_failure)
+
+        # A session that succeeded but failed to clean up must still fail; when the body
+        # already raised, that exception propagates on its own with the notes attached.
+        if exc_val is None and primary_exception is not None:
+            raise primary_exception
 
     async def run_tool(self, tool_call: ToolCall, run_metadata: dict[str, list[Any]]) -> ToolMessage:
         """Execute a single tool call with error handling for invalid JSON/arguments.
