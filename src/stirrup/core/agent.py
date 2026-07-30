@@ -1149,6 +1149,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         finally:
             # Restore original signal handler (root agent only)
             if state.interrupt_handler_installed:
+                state.interrupt_handler_installed = False
                 _release_interrupt_handler()
 
             # Exit logger context
