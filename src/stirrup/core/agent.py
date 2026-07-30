@@ -5,12 +5,14 @@ import inspect
 import logging
 import re
 import signal
+import threading
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from itertools import chain, takewhile
 from pathlib import Path
 from time import perf_counter
-from types import TracebackType
+from types import FrameType, TracebackType
 from typing import Annotated, Any, Self, overload
 
 import anyio
@@ -93,6 +95,7 @@ class SessionState:
     finish_params: Any = None
     run_metadata: dict[str, Any] = field(default_factory=dict)
     output_files_result: SaveOutputFilesResult | None = None
+    interrupt_handler_installed: bool = False
 
 
 _SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("session_state")
@@ -104,6 +107,48 @@ __all__ = [
 ]
 
 LOGGER = logging.getLogger(__name__)
+
+_SigintHandler = Callable[[int, FrameType | None], Any] | int | None
+
+# The SIGINT handler is process-wide, so it is refcounted across root sessions rather
+# than saved per Agent: the first root session installs it, the last one restores it.
+_INTERRUPT_HANDLER_LOCK = threading.Lock()
+_ACTIVE_INTERRUPT_SESSIONS = 0
+_ORIGINAL_SIGINT_HANDLER: _SigintHandler = None
+
+
+def _handle_interrupt_signal(_signum: int, _frame: FrameType | None) -> None:
+    """Turn SIGINT into a KeyboardInterrupt so active sessions cache state on exit."""
+    raise KeyboardInterrupt("Agent interrupted - state will be cached")
+
+
+def _install_interrupt_handler() -> bool:
+    """Install the interrupt handler if no root session has already done so.
+
+    Returns True when the caller owns a matching `_release_interrupt_handler()`.
+    Returns False off the main thread, where signal handlers cannot be registered.
+    """
+    global _ACTIVE_INTERRUPT_SESSIONS, _ORIGINAL_SIGINT_HANDLER
+
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    with _INTERRUPT_HANDLER_LOCK:
+        if _ACTIVE_INTERRUPT_SESSIONS == 0:
+            _ORIGINAL_SIGINT_HANDLER = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, _handle_interrupt_signal)
+        _ACTIVE_INTERRUPT_SESSIONS += 1
+    return True
+
+
+def _release_interrupt_handler() -> None:
+    """Restore the original interrupt handler once the last root session exits."""
+    global _ACTIVE_INTERRUPT_SESSIONS, _ORIGINAL_SIGINT_HANDLER
+
+    with _INTERRUPT_HANDLER_LOCK:
+        _ACTIVE_INTERRUPT_SESSIONS -= 1
+        if _ACTIVE_INTERRUPT_SESSIONS == 0:
+            signal.signal(signal.SIGINT, _ORIGINAL_SIGINT_HANDLER)
+            _ORIGINAL_SIGINT_HANDLER = None
 
 
 def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessage:
@@ -510,9 +555,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                    when the agent completes successfully. Set to False
                                    to preserve caches for inspection or debugging.
             cache_on_interrupt: If True (default), set up a SIGINT handler to cache
-                               state on Ctrl+C. Set to False when running agents in
-                               threads or subprocesses where signal handlers cannot
-                               be registered from non-main threads.
+                               state on Ctrl+C. Ignored off the main thread, where
+                               signal handlers cannot be registered.
 
         Returns:
             Self, for use with `async with agent.session(...) as session:`
@@ -533,14 +577,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._clear_cache_on_success = clear_cache_on_success
         self._cache_on_interrupt = cache_on_interrupt
         return self
-
-    def _handle_interrupt(self, _signum: int, _frame: object) -> None:
-        """Handle SIGINT to ensure caching before exit.
-
-        Converts the signal to a KeyboardInterrupt exception so that __aexit__
-        is properly called and can cache the state before cleanup.
-        """
-        raise KeyboardInterrupt("Agent interrupted - state will be cached")
 
     def _resolve_input_files(self, input_files: str | Path | list[str | Path]) -> list[Path]:
         """Resolve input file paths, expanding globs and normalizing to Path objects.
@@ -950,8 +986,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
             # Set up signal handler for graceful caching on interrupt (root agent only)
             if current_depth == 0 and self._cache_on_interrupt:
-                self._original_sigint = signal.getsignal(signal.SIGINT)
-                signal.signal(signal.SIGINT, self._handle_interrupt)
+                state.interrupt_handler_installed = _install_interrupt_handler()
 
             return SessionAgent.from_agent(self, state)
 
@@ -1113,9 +1148,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                             )
         finally:
             # Restore original signal handler (root agent only)
-            if hasattr(self, "_original_sigint"):
-                signal.signal(signal.SIGINT, self._original_sigint)
-                del self._original_sigint
+            if state.interrupt_handler_installed:
+                _release_interrupt_handler()
 
             # Exit logger context
             self._logger.finish_params = state.finish_params

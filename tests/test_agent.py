@@ -1,11 +1,15 @@
 """Tests for agent core functionality."""
 
+import asyncio
 import json
+import signal
+import threading
 from collections.abc import Awaitable, Callable
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 from PIL import Image
 from pydantic import BaseModel
@@ -31,6 +35,7 @@ from stirrup.core.models import (
 )
 from stirrup.tools import default_tools
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
+from stirrup.utils.logging import AgentLogger
 
 
 class MockLLMClient(LLMClient):
@@ -1796,3 +1801,64 @@ def test_agents_do_not_share_default_tool_instances() -> None:
 
     assert [type(tool) for tool in first._tools] == [type(tool) for tool in second._tools]  # noqa: SLF001
     assert all(a is not b for a, b in zip(first._tools, second._tools, strict=True))  # noqa: SLF001
+
+
+def _quiet_agent(name: str) -> Agent:
+    return Agent(client=MockLLMClient([]), name=name, tools=[], logger=AgentLogger(show_spinner=False))
+
+
+async def test_overlapping_root_sessions_restore_the_original_interrupt_handler() -> None:
+    """SIGINT is process-wide, so the handler must survive until the last root session exits.
+
+    The handler is installed once and restored once; leaking it would leave the process
+    with a dead Agent's handler and silently discard the host application's own.
+    """
+    first, second = _quiet_agent("first"), _quiet_agent("second")
+    first_entered, second_entered, first_exited = anyio.Event(), anyio.Event(), anyio.Event()
+    original_handler = signal.getsignal(signal.SIGINT)
+    installed_handler: object = None
+
+    async def run_first_session() -> None:
+        nonlocal installed_handler
+        async with first.session():
+            installed_handler = signal.getsignal(signal.SIGINT)
+            assert installed_handler is not original_handler
+            first_entered.set()
+            await second_entered.wait()
+        first_exited.set()
+
+    async def run_second_session() -> None:
+        await first_entered.wait()
+        async with second.session():
+            second_entered.set()
+            await first_exited.wait()
+            # The still-running session keeps the handler; the first exit must not drop it.
+            assert signal.getsignal(signal.SIGINT) is installed_handler
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_first_session)
+        task_group.start_soon(run_second_session)
+
+    assert signal.getsignal(signal.SIGINT) is original_handler
+
+
+def test_session_off_the_main_thread_skips_the_interrupt_handler() -> None:
+    """Signal handlers only register on the main thread, so a worker session must not fail."""
+    agent = _quiet_agent("worker")
+    failures: list[BaseException] = []
+
+    async def enter_and_exit_session() -> None:
+        async with agent.session():
+            pass
+
+    def run_in_worker_thread() -> None:
+        try:
+            asyncio.run(enter_and_exit_session())
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=run_in_worker_thread)
+    worker.start()
+    worker.join()
+
+    assert not failures
