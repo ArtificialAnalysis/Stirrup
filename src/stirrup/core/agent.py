@@ -115,6 +115,16 @@ def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessa
     )
 
 
+def _tool_arguments_json(tool_call: ToolCall) -> str:
+    """Return the call's arguments as JSON, treating an empty string as no arguments.
+
+    Every client coerces a missing arguments field to "", so both places that validate a
+    call must agree on that. They previously did not: a finish tool whose parameters are
+    all optional would execute and then fail to parse, losing the completed run.
+    """
+    return tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+
+
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
     """Extract image blocks from tool messages and convert them to user messages for text-only models."""
     user_messages: list[UserMessage] = []
@@ -1140,9 +1150,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         if tool:
             try:
-                # Normalize empty arguments to valid empty JSON object
-                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
-                params = tool.parameters.model_validate_json(args)
+                params = tool.parameters.model_validate_json(_tool_arguments_json(tool_call))
 
                 # Set parent depth for sub-agent tools to read
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)
@@ -1304,7 +1312,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     tool_message = await self.run_tool(tool_call, run_metadata)
                     if tool_message.success and tool_message.name in self._finish_tools:
                         finish_tool = self._finish_tools[tool_message.name]
-                        finish_params = finish_tool.parameters.model_validate_json(tool_call.arguments)
+                        finish_params = finish_tool.parameters.model_validate_json(_tool_arguments_json(tool_call))
 
                 tool_messages.append(tool_message)
                 self._logger.tool_result(tool_message)

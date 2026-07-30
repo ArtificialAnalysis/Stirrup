@@ -221,6 +221,41 @@ async def test_nonterminal_finish_allows_later_tool_calls(
     assert [message.success for message in tool_messages] == [False, True]
 
 
+@pytest.mark.parametrize("arguments", ["", "   "], ids=["empty", "whitespace"])
+async def test_finish_without_arguments_completes_the_run(arguments: str) -> None:
+    # Every client coerces a missing arguments field to "", so a finish tool whose
+    # parameters are all optional must still complete rather than execute and then
+    # fail to parse.
+    class DefaultedParams(BaseModel):
+        reason: str = "task complete"
+
+    def finish(params: DefaultedParams) -> ToolResult:
+        return ToolResult(content=params.reason)
+
+    response = AssistantMessage(
+        content="Done",
+        tool_calls=[ToolCall(name="finish", arguments=arguments, tool_call_id="call_finish")],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[],
+        finish_tool=Tool[DefaultedParams, None](
+            name="finish",
+            description="Finish with defaulted parameters",
+            parameters=DefaultedParams,
+            executor=finish,  # ty: ignore[invalid-argument-type]
+        ),
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert finish_params == DefaultedParams(reason="task complete")
+    assert [message.success for message in tool_messages] == [True]
+
+
 async def test_agent_max_turns() -> None:
     """Test agent stops after max_turns is reached."""
     # Create mock responses (never calls finish)
