@@ -43,7 +43,7 @@ from stirrup.core.models import (
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 from stirrup.tools.code_backends.base import (
     CodeExecToolProvider,
     SavedFile,
@@ -369,9 +369,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             max_turns: Maximum number of turns before stopping
             system_prompt: System prompt to prepend to all runs (when using string prompts)
             tools: List of Tools and/or ToolProviders available to the agent.
-                   If None, uses DEFAULT_TOOLS. ToolProviders are automatically
+                   If None, uses default_tools(). ToolProviders are automatically
                    set up and torn down by Agent.session().
-                   Use [*DEFAULT_TOOLS, extra_tool] to extend defaults.
+                   Use [*default_tools(), extra_tool] to extend defaults.
             finish_tool: Tool or list of Tools used to signal task completion.
                          Defaults to SIMPLE_FINISH_TOOL. If a list is provided,
                          a successful call to any listed tool ends the run.
@@ -404,7 +404,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._name = name
         self._max_turns = max_turns
         self._system_prompt = system_prompt
-        self._tools = tools if tools is not None else DEFAULT_TOOLS
+        self._tools = tools if tools is not None else default_tools()
         self._finish_tools: dict[str, Tool[Any, Any]] = _normalize_finish_tools(finish_tool)
         self._context_summarization_cutoff = context_summarization_cutoff
         self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
@@ -613,8 +613,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 )
                 break
 
-        # Check for missing default tools (across entire agent tree)
-        for default_tool in DEFAULT_TOOLS:
+        # Check for missing default tools (across entire agent tree).
+        # These throwaway instances are only inspected for their types; constructing
+        # them costs nothing and keeps this check in step with default_tools().
+        for default_tool in default_tools():
             default_type = type(default_tool)
 
             # Special case: For code exec providers, check if ANY CodeExecToolProvider is present

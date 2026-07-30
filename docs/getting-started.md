@@ -60,7 +60,7 @@ Extend with additional tools:
 --8<-- "examples/web_calculator.py:setup"
 ```
 
-→ See [Tools](concepts.md#tools) for full documentation on DEFAULT_TOOLS, custom tools, sub-agents, and tool providers.
+→ See [Tools](concepts.md#tools) for full documentation on default_tools(), custom tools, sub-agents, and tool providers.
 
 ## Choosing a Client
 

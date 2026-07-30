@@ -21,9 +21,10 @@ pip install -e '.[all]'  # or: uv venv && uv pip install -e '.[all]'
 After editable installation, import as usual:
 
 ```python
-from stirrup import Agent, DEFAULT_TOOLS
+from stirrup import Agent
 from stirrup.core.models import SystemMessage, UserMessage
 from stirrup.clients import ChatCompletionsClient
+from stirrup.tools import default_tools
 ```
 
 ## Project Structure
