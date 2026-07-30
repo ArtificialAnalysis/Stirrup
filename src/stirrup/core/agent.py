@@ -1257,6 +1257,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             max_turns: Maximum turns for logging
 
         Returns the assistant message, tool execution results, and finish tool call (if present).
+        There is one tool result per requested call, ordered as the calls were executed: every
+        ordinary call first, then any finish call.
 
         """
         assistant_message = await self._client.generate(messages, self._active_tools)
@@ -1274,24 +1276,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
             reject_all_finish_calls = len(finish_call_names) > 1
 
-            # Tool call order is treated as semantically meaningful: every call positioned after a
-            # successful finish is dropped. For providers that emit genuinely parallel calls, array
-            # position therefore decides which of the model's intents survives.
-            for tool_call in assistant_message.tool_calls:
-                if finish_params is not None:
-                    # The run breaks out of the turn loop immediately after this turn, so the model
-                    # never reads this content — it exists only to keep the final history 1:1 with
-                    # the assistant message's tool calls, as provider APIs require.
-                    tool_message = ToolMessage(
-                        content=(
-                            f"Skipped tool '{tool_call.name}' because a finish tool "
-                            "completed successfully earlier in the same turn."
-                        ),
-                        tool_call_id=tool_call.tool_call_id,
-                        name=tool_call.name,
-                        success=False,
-                    )
-                elif reject_all_finish_calls and tool_call.name in self._finish_tools:
+            # Every ordinary call runs before any finish call, so a successful finish is always the
+            # last thing that happens in the turn and no side effect can follow the run ending.
+            # `sorted` is stable, so calls keep their relative order within each group. The returned
+            # messages are in this execution order; providers match them to calls by tool_call_id.
+            for tool_call in sorted(assistant_message.tool_calls, key=lambda tc: tc.name in self._finish_tools):
+                if reject_all_finish_calls and tool_call.name in self._finish_tools:
                     tool_message = ToolMessage(
                         content=(
                             f"Cannot call finish tool '{tool_call.name}': multiple finish tools "
