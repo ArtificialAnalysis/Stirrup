@@ -5,13 +5,14 @@ that isolates fetch transport and state from search and safely cleans up resourc
 
 Example usage:
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
+    from stirrup.tools import default_tools
 
-    # As part of DEFAULT_TOOLS in Agent
+    # As part of default_tools() in Agent
     client = ChatCompletionsClient(model="gpt-5")
     agent = Agent(
         client=client,
         name="assistant",
-        tools=DEFAULT_TOOLS,  # Includes WebToolProvider
+        tools=default_tools(),  # Includes WebToolProvider
     )
 
     # Standalone usage

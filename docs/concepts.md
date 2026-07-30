@@ -19,7 +19,7 @@ agent = Agent(
     name="my_agent",                                      # (required) Agent name for logging
     max_turns=30,                                         # (default: 30) Max iterations before stopping
     system_prompt="You are an agent specializing in ...", # (default: None) Instructions prepended to runs
-    tools=None,                                           # (default: DEFAULT_TOOLS) Available tools
+    tools=None,                                           # (default: default_tools()) Available tools
     finish_tool=None,                                     # (default: SIMPLE_FINISH_TOOL) Completion signal(s)
     context_summarization_cutoff=0.7,                     # (default: 0.7) Context % before summarization
     run_sync_in_thread=True,                              # (default: True) Run sync tools in thread
@@ -38,7 +38,7 @@ agent = Agent(
     | `name` | `str` | required | Agent name for logging |
     | `max_turns` | `int` | `30` | Maximum turns before stopping |
     | `system_prompt` | `str \| None` | `None` | System prompt prepended to runs |
-    | `tools` | `list[Tool \| ToolProvider] \| None` | `DEFAULT_TOOLS` | Available tools |
+    | `tools` | `list[Tool \| ToolProvider] \| None` | `default_tools()` | Available tools |
     | `finish_tool` | `Tool \| list[Tool]` | `SIMPLE_FINISH_TOOL` | Tool(s) to signal completion |
     | `context_summarization_cutoff` | `float` | `0.7` | Context % before summarization |
     | `run_sync_in_thread` | `bool` | `True` | Run sync tools in separate thread |
@@ -264,14 +264,14 @@ class MyCustomClient(LLMClient):
 
 ## Tools
 
-### DEFAULT_TOOLS
+### default_tools()
 
-When you create an Agent without specifying tools, it uses `DEFAULT_TOOLS`:
+When you create an Agent without specifying tools, it uses `default_tools()`:
 
 ```python
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
-# DEFAULT_TOOLS contains:
+# default_tools() returns a fresh list containing:
 # - LocalCodeExecToolProvider() → provides "code_exec" tool
 # - WebToolProvider() → provides "web_fetch" and "web_search" tools
 ```
@@ -280,6 +280,13 @@ from stirrup.tools import DEFAULT_TOOLS
 |--------------|----------------|-------------|
 | `LocalCodeExecToolProvider` | `code_exec` | Execute shell commands in an isolated temp directory |
 | `WebToolProvider` | `web_fetch`, `web_search` | Fetch web pages and search (search requires `BRAVE_API_KEY`) |
+
+Each call returns fresh provider instances. Provider instances hold per-session state (a temp
+directory, an HTTP client), so concurrent sessions must not share them.
+
+**Breaking change:** the `DEFAULT_TOOLS` list was removed because every caller shared the same two
+provider instances. Migrate `tools=DEFAULT_TOOLS` to `tools=default_tools()`, and
+`tools=[*DEFAULT_TOOLS, extra_tool]` to `tools=[*default_tools(), extra_tool]`.
 
 #### Extending vs Replacing
 

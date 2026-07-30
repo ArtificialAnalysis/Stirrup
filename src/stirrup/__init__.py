@@ -1,8 +1,9 @@
 """Artificial Analysis' reference agent harness - originally built for running evaluations, simple to use and extend.
 
 Example usage:
-    from stirrup import Agent, DEFAULT_TOOLS
+    from stirrup import Agent
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
+    from stirrup.tools import default_tools
     from stirrup.tools.mcp import MCPToolProvider
 
     # Create a client for your LLM provider
@@ -23,7 +24,7 @@ Example usage:
     agent = Agent(
         client=client,
         name="assistant",
-        tools=[*DEFAULT_TOOLS, MCPToolProvider.from_config("mcp.json")],
+        tools=[*default_tools(), MCPToolProvider.from_config("mcp.json")],
     )
 """
 

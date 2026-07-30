@@ -2,14 +2,14 @@
 
 The `stirrup.tools` module provides tools, tool providers, and the default tool set.
 
-## DEFAULT_TOOLS
+## default_tools()
 
 The standard set of tool providers included with every agent (unless overridden):
 
 ```python
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
-# DEFAULT_TOOLS contains:
+# default_tools() returns a fresh list containing:
 # - LocalCodeExecToolProvider() → provides "code_exec" tool
 # - WebToolProvider() → provides "web_fetch" and "web_search" tools
 ```

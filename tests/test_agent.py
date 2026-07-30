@@ -29,6 +29,7 @@ from stirrup.core.models import (
     TurnWarningMessage,
     UserMessage,
 )
+from stirrup.tools import default_tools
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
@@ -1773,3 +1774,25 @@ async def test_failed_second_run_in_same_session_does_not_reuse_first_finish(tmp
 
     assert not (output_dir / "report.txt").exists()
     assert session.last_output_files_result is None
+
+
+def test_default_tools_returns_fresh_instances() -> None:
+    """Each call must build new providers so concurrent sessions never share one."""
+    first = default_tools()
+    second = default_tools()
+
+    assert [type(tool) for tool in first] == [type(tool) for tool in second]
+    assert all(a is not b for a, b in zip(first, second, strict=True))
+
+
+def test_agents_do_not_share_default_tool_instances() -> None:
+    """The default path must not hand two Agents the same providers.
+
+    Providers hold per-session state, so a shared instance lets one session's teardown
+    destroy another's execution environment.
+    """
+    first = Agent(client=MockLLMClient([]), name="first")
+    second = Agent(client=MockLLMClient([]), name="second")
+
+    assert [type(tool) for tool in first._tools] == [type(tool) for tool in second._tools]  # noqa: SLF001
+    assert all(a is not b for a, b in zip(first._tools, second._tools, strict=True))  # noqa: SLF001

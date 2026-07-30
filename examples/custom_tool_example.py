@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from stirrup import Agent, Tool, ToolResult, ToolUseCountMetadata
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
 
 # --8<-- [start:tool]
@@ -47,7 +47,7 @@ client = ChatCompletionsClient(
 agent = Agent(
     client=client,
     name="greeting_agent",
-    tools=[*DEFAULT_TOOLS, GREET_TOOL],
+    tools=[*default_tools(), GREET_TOOL],
 )
 # --8<-- [end:tool]
 
