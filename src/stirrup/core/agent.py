@@ -118,11 +118,10 @@ def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessa
 def _tool_arguments_json(tool_call: ToolCall) -> str:
     """Return the call's arguments as JSON, treating an empty string as no arguments.
 
-    Every client coerces a missing arguments field to "", so both places that validate a
-    call must agree on that. They previously did not: a finish tool whose parameters are
-    all optional would execute and then fail to parse, losing the completed run.
+    Clients coerce a missing arguments field to "", so every site that validates a call
+    must normalize it the same way.
     """
-    return tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+    return tool_call.arguments if tool_call.arguments.strip() else "{}"
 
 
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
@@ -1293,7 +1292,6 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         success=False,
                     )
                 elif reject_all_finish_calls and tool_call.name in self._finish_tools:
-                    now = perf_counter()
                     tool_message = ToolMessage(
                         content=(
                             f"Cannot call finish tool '{tool_call.name}': multiple finish tools "
@@ -1303,10 +1301,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         ),
                         tool_call_id=tool_call.tool_call_id,
                         name=tool_call.name,
-                        args_was_valid=True,
                         success=False,
-                        tool_start_time=now,
-                        tool_end_time=now,
                     )
                 else:
                     tool_message = await self.run_tool(tool_call, run_metadata)

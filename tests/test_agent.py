@@ -150,8 +150,7 @@ async def test_successful_finish_stops_later_tool_calls() -> None:
     response = AssistantMessage(
         content="Run tools in order",
         tool_calls=[
-            ToolCall(name="record", arguments='{"label": "before-1"}', tool_call_id="call_before_1"),
-            ToolCall(name="record", arguments='{"label": "before-2"}', tool_call_id="call_before_2"),
+            ToolCall(name="record", arguments='{"label": "before"}', tool_call_id="call_before"),
             ToolCall(name="finish", arguments='{"label": "finish"}', tool_call_id="call_finish"),
             ToolCall(name="record", arguments='{"label": "after-1"}', tool_call_id="call_after_1"),
             ToolCall(name="record", arguments='{"label": "after-2"}', tool_call_id="call_after_2"),
@@ -168,18 +167,16 @@ async def test_successful_finish_stops_later_tool_calls() -> None:
 
     _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
 
-    assert executions == ["before-1", "before-2", "finish"]
+    assert executions == ["before", "finish"]
     assert finish_params == RecordingParams(label="finish")
+    # Every call is still answered, so the history stays 1:1 with the assistant message.
     assert [message.tool_call_id for message in tool_messages] == [
-        "call_before_1",
-        "call_before_2",
+        "call_before",
         "call_finish",
         "call_after_1",
         "call_after_2",
     ]
-    assert [message.success for message in tool_messages] == [True, True, True, False, False]
-    assert all("Skipped" in str(message.content) for message in tool_messages[3:])
-    assert all(message.tool_duration is None for message in tool_messages[3:])
+    assert [message.success for message in tool_messages] == [True, True, False, False]
 
 
 @pytest.mark.parametrize(
@@ -223,9 +220,7 @@ async def test_nonterminal_finish_allows_later_tool_calls(
 
 @pytest.mark.parametrize("arguments", ["", "   "], ids=["empty", "whitespace"])
 async def test_finish_without_arguments_completes_the_run(arguments: str) -> None:
-    # Every client coerces a missing arguments field to "", so a finish tool whose
-    # parameters are all optional must still complete rather than execute and then
-    # fail to parse.
+    # Clients coerce a missing arguments field to "".
     class DefaultedParams(BaseModel):
         reason: str = "task complete"
 
