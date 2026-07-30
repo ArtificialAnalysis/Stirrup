@@ -1,7 +1,7 @@
 """Tests for agent core functionality."""
 
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -70,6 +70,23 @@ UNVALIDATED_FINISH_TOOL = Tool[FinishParams, None](
 )
 
 
+class RecordingParams(BaseModel):
+    label: str
+
+
+def recording_tool(name: str, executions: list[str], *, success: bool = True) -> Tool[RecordingParams, None]:
+    def record(params: RecordingParams) -> ToolResult:
+        executions.append(params.label)
+        return ToolResult(content=params.label, success=success)
+
+    return Tool[RecordingParams, None](
+        name=name,
+        description="Record an execution label",
+        parameters=RecordingParams,
+        executor=record,  # ty: ignore[invalid-argument-type]
+    )
+
+
 def _sample_png_block() -> ImageContentBlock:
     img = Image.new("RGB", (1, 1), color=(255, 0, 0))
     buffer = BytesIO()
@@ -124,6 +141,135 @@ async def test_agent_basic_finish() -> None:
     assert "token_usage" in run_metadata
     assert len(message_history) == 1  # One turn
     assert client.call_count == 1
+
+
+async def test_finish_runs_last_however_the_provider_ordered_the_calls(tmp_path: Path) -> None:
+    """The finish call ends the turn, so it executes after every ordinary call in that turn.
+
+    The finish tool validates that its declared file exists, the way SIMPLE_FINISH_TOOL does: the
+    provider put the finish first, so executing calls in array order would fail it on a file the
+    same turn goes on to write.
+    """
+    executions: list[str] = []
+
+    class PathParams(BaseModel):
+        name: str
+
+    def write_file(params: PathParams) -> ToolResult:
+        (tmp_path / params.name).write_text("report")
+        executions.append(params.name)
+        return ToolResult(content=f"Wrote {params.name}")
+
+    def finish(params: PathParams) -> ToolResult:
+        executions.append("finish")
+        if not (tmp_path / params.name).exists():
+            return ToolResult(content=f"File does not exist: {params.name}", success=False)
+        return ToolResult(content="Done")
+
+    def path_tool(name: str, executor: Callable[[PathParams], ToolResult]) -> Tool[PathParams, None]:
+        return Tool[PathParams, None](
+            name=name,
+            description=name,
+            parameters=PathParams,
+            executor=executor,  # ty: ignore[invalid-argument-type]
+        )
+
+    response = AssistantMessage(
+        content="Finish first, but the other work must still happen",
+        tool_calls=[
+            ToolCall(name="finish", arguments='{"name": "report.md"}', tool_call_id="call_finish"),
+            ToolCall(name="write_file", arguments='{"name": "report.md"}', tool_call_id="call_report"),
+            ToolCall(name="write_file", arguments='{"name": "notes.md"}', tool_call_id="call_notes"),
+        ],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[path_tool("write_file", write_file)],
+        finish_tool=path_tool("finish", finish),
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert executions == ["report.md", "notes.md", "finish"]
+    assert finish_params == PathParams(name="report.md")
+    # Every call is answered exactly once, so the history stays 1:1 with the assistant message.
+    assert [message.tool_call_id for message in tool_messages] == ["call_report", "call_notes", "call_finish"]
+    assert all(message.success for message in tool_messages)
+
+
+@pytest.mark.parametrize(
+    ("finish_arguments", "finish_succeeds", "expected_executions"),
+    [
+        pytest.param("{}", True, ["ordinary"], id="invalid-arguments"),
+        pytest.param('{"label": "finish"}', False, ["ordinary", "finish"], id="unsuccessful"),
+    ],
+)
+async def test_unsuccessful_finish_does_not_terminate_the_run(
+    finish_arguments: str,
+    finish_succeeds: bool,
+    expected_executions: list[str],
+) -> None:
+    executions: list[str] = []
+    record = recording_tool("record", executions)
+    finish = recording_tool("finish", executions, success=finish_succeeds)
+    response = AssistantMessage(
+        content="Attempt a finish that will not succeed",
+        tool_calls=[
+            ToolCall(name="finish", arguments=finish_arguments, tool_call_id="call_finish"),
+            ToolCall(name="record", arguments='{"label": "ordinary"}', tool_call_id="call_ordinary"),
+        ],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[record],
+        finish_tool=finish,
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert executions == expected_executions
+    assert finish_params is None
+    assert [message.tool_call_id for message in tool_messages] == ["call_ordinary", "call_finish"]
+    assert [message.success for message in tool_messages] == [True, False]
+
+
+@pytest.mark.parametrize("arguments", ["", "   "], ids=["empty", "whitespace"])
+async def test_finish_without_arguments_completes_the_run(arguments: str) -> None:
+    # Clients coerce a missing arguments field to "".
+    class DefaultedParams(BaseModel):
+        reason: str = "task complete"
+
+    def finish(params: DefaultedParams) -> ToolResult:
+        return ToolResult(content=params.reason)
+
+    response = AssistantMessage(
+        content="Done",
+        tool_calls=[ToolCall(name="finish", arguments=arguments, tool_call_id="call_finish")],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[],
+        finish_tool=Tool[DefaultedParams, None](
+            name="finish",
+            description="Finish with defaulted parameters",
+            parameters=DefaultedParams,
+            executor=finish,  # ty: ignore[invalid-argument-type]
+        ),
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert finish_params == DefaultedParams(reason="task complete")
+    assert [message.success for message in tool_messages] == [True]
 
 
 async def test_agent_max_turns() -> None:
@@ -888,9 +1034,11 @@ async def test_agent_continues_after_failed_finish_tool_from_multiple_finish_too
 async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
     """When multiple finish tools are called in one turn, all are rejected without executing.
 
-    The agent must not terminate; the model gets another chance to finish with a single call.
+    The ordinary calls in that turn still run, and the agent must not terminate; the model gets
+    another chance to finish with a single call.
     """
     executions: list[str] = []
+    record = recording_tool("record", executions)
 
     class FinishAParams(BaseModel):
         reason: str
@@ -925,6 +1073,7 @@ async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
             tool_calls=[
                 ToolCall(name="finish_a", arguments='{"reason": "first"}', tool_call_id="call_1"),
                 ToolCall(name="finish_b", arguments='{"reason": "second"}', tool_call_id="call_2"),
+                ToolCall(name="record", arguments='{"label": "ordinary"}', tool_call_id="call_ordinary"),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -942,15 +1091,15 @@ async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
         client=client,
         name="test-agent",
         max_turns=5,
-        tools=[],
+        tools=[record],
         finish_tool=[finish_a, finish_b],
     )
 
     async with agent.session() as session:
         finish_params, history, _ = await session.run([UserMessage(content="Test task")])
 
-    # Neither finish tool was executed in turn 1 — agent recovered on turn 2.
-    assert executions == ["finish_a"]
+    # Neither finish tool was executed in turn 1, but the ordinary call still ran.
+    assert executions == ["ordinary", "finish_a"]
     assert client.call_count == 2
     assert finish_params is not None
     assert isinstance(finish_params, FinishAParams)

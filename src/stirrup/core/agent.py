@@ -115,6 +115,15 @@ def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessa
     )
 
 
+def _tool_arguments_json(tool_call: ToolCall) -> str:
+    """Return the call's arguments as JSON, treating an empty string as no arguments.
+
+    Clients coerce a missing arguments field to "", so every site that validates a call
+    must normalize it the same way.
+    """
+    return tool_call.arguments if tool_call.arguments.strip() else "{}"
+
+
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
     """Extract image blocks from tool messages and convert them to user messages for text-only models."""
     user_messages: list[UserMessage] = []
@@ -1140,9 +1149,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         if tool:
             try:
-                # Normalize empty arguments to valid empty JSON object
-                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
-                params = tool.parameters.model_validate_json(args)
+                params = tool.parameters.model_validate_json(_tool_arguments_json(tool_call))
 
                 # Set parent depth for sub-agent tools to read
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)
@@ -1250,6 +1257,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             max_turns: Maximum turns for logging
 
         Returns the assistant message, tool execution results, and finish tool call (if present).
+        There is one tool result per requested call, ordered as the calls were executed: every
+        ordinary call first, then any finish call.
 
         """
         assistant_message = await self._client.generate(messages, self._active_tools)
@@ -1267,10 +1276,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
             reject_all_finish_calls = len(finish_call_names) > 1
 
-            tool_messages = []
-            for tool_call in assistant_message.tool_calls:
+            # Every ordinary call runs before any finish call, so a successful finish is always the
+            # last thing that happens in the turn and no side effect can follow the run ending.
+            # `sorted` is stable, so calls keep their relative order within each group. The returned
+            # messages are in this execution order; providers match them to calls by tool_call_id.
+            for tool_call in sorted(assistant_message.tool_calls, key=lambda tc: tc.name in self._finish_tools):
                 if reject_all_finish_calls and tool_call.name in self._finish_tools:
-                    now = perf_counter()
                     tool_message = ToolMessage(
                         content=(
                             f"Cannot call finish tool '{tool_call.name}': multiple finish tools "
@@ -1280,23 +1291,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         ),
                         tool_call_id=tool_call.tool_call_id,
                         name=tool_call.name,
-                        args_was_valid=True,
                         success=False,
-                        tool_start_time=now,
-                        tool_end_time=now,
                     )
-                    tool_messages.append(tool_message)
-                    self._logger.tool_result(tool_message)
-                    continue
+                else:
+                    tool_message = await self.run_tool(tool_call, run_metadata)
+                    if tool_message.success and tool_message.name in self._finish_tools:
+                        finish_tool = self._finish_tools[tool_message.name]
+                        finish_params = finish_tool.parameters.model_validate_json(_tool_arguments_json(tool_call))
 
-                tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
-
-                if tool_message.success and tool_message.name in self._finish_tools:
-                    finish_tool = self._finish_tools[tool_message.name]
-                    finish_params = finish_tool.parameters.model_validate_json(tool_call.arguments)
-
-                # Log tool result immediately
                 self._logger.tool_result(tool_message)
 
         return assistant_message, tool_messages, finish_params
