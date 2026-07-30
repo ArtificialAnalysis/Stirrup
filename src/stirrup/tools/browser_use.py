@@ -5,13 +5,14 @@ session and exposes browser automation actions as individual Tool objects.
 
 Example usage:
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
+    from stirrup.tools import default_tools
     from stirrup.tools.browser_use import BrowserUseToolProvider
 
     client = ChatCompletionsClient(model="gpt-5")
     agent = Agent(
         client=client,
         name="browser_agent",
-        tools=[*DEFAULT_TOOLS, BrowserUseToolProvider()],
+        tools=[*default_tools(), BrowserUseToolProvider()],
     )
 
     async with agent.session() as session:

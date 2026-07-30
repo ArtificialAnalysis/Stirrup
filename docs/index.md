@@ -53,7 +53,7 @@ pip install 'stirrup[browser]'  # or: uv add 'stirrup[browser]'
 - **`session()`** - Context manager that sets up tools, manages files, and handles cleanup
 - **`Tool`** - Define tools with Pydantic parameters
 - **`ToolProvider`** - Manage tools that require lifecycle (connections, temp directories, etc.)
-- **`DEFAULT_TOOLS`** - Standard tools included by default: code execution and web tools
+- **`default_tools()`** - Standard tools included by default: code execution and web tools
 
 ## Using Other LLM Providers
 
@@ -75,7 +75,7 @@ See [LiteLLM Example](examples.md#litellm-multi-provider-support) or [Deepseek E
 
 ## Default Tools
 
-When you create an `Agent` without specifying tools, it uses `DEFAULT_TOOLS`:
+When you create an `Agent` without specifying tools, it uses `default_tools()`:
 
 | Tool Provider | Tools Provided | Description |
 |--------------|----------------|-------------|

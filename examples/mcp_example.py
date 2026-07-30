@@ -21,7 +21,7 @@ from pathlib import Path
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 from stirrup.tools.mcp import MCPToolProvider
 
 
@@ -40,7 +40,7 @@ async def main() -> None:
     agent = Agent(
         client=client,
         name="mcp_example_agent",
-        tools=[*DEFAULT_TOOLS, MCPToolProvider.from_config(".mcp/mcp.json")],
+        tools=[*default_tools(), MCPToolProvider.from_config(".mcp/mcp.json")],
         max_turns=20,
     )
 

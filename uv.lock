@@ -5709,12 +5709,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiolimiter", marker = "extra == 'e2b-throttle'", specifier = ">=1.1.0" },
-    { name = "anyio", specifier = ">=4.0.0" },
+    { name = "anyio", specifier = ">=4.1.0" },
     { name = "browser-use", marker = "extra == 'browser'", specifier = ">=0.11.3" },
     { name = "docker", marker = "extra == 'docker'", specifier = ">=7.0.0" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = ">=2.3.0" },
     { name = "filetype", specifier = ">=1.0.0" },
-    { name = "httpx", specifier = ">=0.20.0" },
+    { name = "httpx", specifier = ">=0.25.0" },
     { name = "json-schema-to-pydantic", specifier = ">=0.2.0" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.79.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.9.0" },

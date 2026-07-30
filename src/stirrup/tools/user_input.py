@@ -5,13 +5,13 @@ and receive text responses from users during task execution.
 
 Example usage:
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
-    from stirrup.tools import DEFAULT_TOOLS, USER_INPUT_TOOL
+    from stirrup.tools import USER_INPUT_TOOL, default_tools
 
     client = ChatCompletionsClient(model="gpt-5")
     agent = Agent(
         client=client,
         name="assistant",
-        tools=[*DEFAULT_TOOLS, USER_INPUT_TOOL],
+        tools=[*default_tools(), USER_INPUT_TOOL],
     )
 
     async with agent.session() as session:

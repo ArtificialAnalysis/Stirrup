@@ -16,6 +16,26 @@ The `WebToolProvider` provides web fetching and search capabilities.
 
 Fetches a web page and returns its content as markdown.
 
+!!! note "Fetch security"
+    Web fetch resolves and validates every destination and redirect, rejects non-public
+    addresses, ignores environment proxy settings, and neither sends nor retains cookies.
+    Its transport and state are isolated from search, and provider cleanup is safe even
+    when startup is interrupted.
+
+### Limits
+
+- The response body is not bounded while it is downloaded and decompressed; only the extracted
+  markdown is truncated, to 40 000 characters. A compressed body is the sharper case, since it
+  expands without bound and httpx decodes a whole chunk before any size could be measured.
+  Refusing compressed responses outright was considered and rejected: it taxes every fetch with
+  full uncompressed bandwidth and breaks origins that ignore `Accept-Encoding: identity`, while
+  still leaving the uncompressed body unbounded. The bounded fix is streaming reads plus an
+  incremental decompressor, which is out of scope here. Revisit if a fetch is observed to exhaust
+  memory in practice.
+- There is no destination-port policy once an address validates: any port on a public address is
+  reachable.
+- Internal services hosted on public IP addresses remain reachable by construction.
+
 ::: stirrup.tools.web.FetchWebPageParams
 
 ## Web Search Tool

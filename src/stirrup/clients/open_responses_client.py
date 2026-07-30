@@ -10,15 +10,7 @@ import os
 from time import perf_counter
 from typing import Any
 
-from openai import (
-    APIConnectionError,
-    APITimeoutError,
-    AsyncOpenAI,
-    BadRequestError,
-    InternalServerError,
-    RateLimitError,
-)
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from openai import AsyncOpenAI, BadRequestError
 
 from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
@@ -264,7 +256,7 @@ class OpenResponsesClient(LLMClient):
     Supports custom base_url for OpenAI-compatible providers that implement
     the Responses API.
 
-    Includes automatic retries for transient failures and token usage tracking.
+    Delegates retries for transient failures to the OpenAI SDK and tracks token usage.
 
     Example:
         >>> # Standard OpenAI usage
@@ -311,6 +303,7 @@ class OpenResponsesClient(LLMClient):
                 (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
             max_retries: Number of retries for transient errors. Defaults to 2.
+                The OpenAI SDK handles retries internally.
             instructions: Default system-level instructions. Can be overridden by
                 SystemMessage in the messages list.
             kwargs: Additional arguments passed to responses.create().
@@ -359,27 +352,12 @@ class OpenResponsesClient(LLMClient):
         """Model identifier."""
         return self._model
 
-    @retry(
-        retry=retry_if_exception_type(
-            (
-                APIConnectionError,
-                APITimeoutError,
-                RateLimitError,
-                InternalServerError,
-            )
-        ),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-    )
     async def generate(
         self,
         messages: list[ChatMessage],
         tools: dict[str, Tool],
     ) -> AssistantMessage:
         """Generate assistant response with optional tool calls using Responses API.
-
-        Retries up to 3 times on transient errors (connection, timeout, rate limit,
-        internal server errors) with exponential backoff.
 
         Args:
             messages: List of conversation messages.

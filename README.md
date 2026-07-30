@@ -120,7 +120,7 @@ See the [Full Customization guide](https://stirrup.artificialanalysis.ai/extendi
 - **`session()`** - Context manager that sets up tools, manages files, and handles cleanup
 - **`Tool`** - Define tools with Pydantic parameters
 - **`ToolProvider`** - Manage tools that require lifecycle (connections, temp directories, etc.)
-- **`DEFAULT_TOOLS`** - Standard tools included by default: code execution and web tools
+- **`default_tools()`** - Standard tools included by default: code execution and web tools
 
 ## Using Other LLM Providers
 
@@ -162,12 +162,19 @@ See [LiteLLM Example](https://stirrup.artificialanalysis.ai/examples/#litellm-mu
 
 ## Default Tools
 
-When you create an `Agent` without specifying tools, it uses `DEFAULT_TOOLS`:
+When you create an `Agent` without specifying tools, it uses `default_tools()`:
 
 | Tool Provider               | Tools Provided            | Description                                                  |
 | --------------------------- | ------------------------- | ------------------------------------------------------------ |
 | `LocalCodeExecToolProvider` | `code_exec`               | Execute shell commands in an isolated temp directory         |
 | `WebToolProvider`           | `web_fetch`, `web_search` | Fetch web pages and search (search requires `BRAVE_API_KEY`) |
+
+Each call returns fresh provider instances. Provider instances hold per-session state (a temp
+directory, an HTTP client), so concurrent sessions must not share them.
+
+**Breaking change:** the `DEFAULT_TOOLS` list was removed because every caller shared the same two
+provider instances. Migrate `tools=DEFAULT_TOOLS` to `tools=default_tools()`, and
+`tools=[*DEFAULT_TOOLS, extra_tool]` to `tools=[*default_tools(), extra_tool]`.
 
 ## Extending with Pre-Built Tools
 
@@ -176,7 +183,7 @@ import asyncio
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import CALCULATOR_TOOL, DEFAULT_TOOLS
+from stirrup.tools import CALCULATOR_TOOL, default_tools
 
 # Create client for OpenRouter
 client = ChatCompletionsClient(
@@ -188,7 +195,7 @@ client = ChatCompletionsClient(
 agent = Agent(
     client=client,
     name="web_calculator_agent",
-    tools=[*DEFAULT_TOOLS, CALCULATOR_TOOL],
+    tools=[*default_tools(), CALCULATOR_TOOL],
 )
 ```
 
@@ -199,7 +206,7 @@ from pydantic import BaseModel, Field
 
 from stirrup import Agent, Tool, ToolResult, ToolUseCountMetadata
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
 
 class GreetParams(BaseModel):
@@ -235,7 +242,7 @@ client = ChatCompletionsClient(
 agent = Agent(
     client=client,
     name="greeting_agent",
-    tools=[*DEFAULT_TOOLS, GREET_TOOL],
+    tools=[*default_tools(), GREET_TOOL],
 )
 ```
 

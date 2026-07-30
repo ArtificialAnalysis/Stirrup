@@ -6,7 +6,7 @@ import os
 import shlex
 import shutil
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import ClassVar, Self
 
 import anyio
@@ -34,10 +34,14 @@ from .base import (
     CodeExecToolProvider,
     CodeExecutionParams,
     CommandResult,
-    SavedFile,
+    OutputSourceRoot,
     SaveOutputFilesResult,
     UploadedFile,
     UploadFilesResult,
+    _host_output_destination_identity,
+    _relative_to_canonical_host_root,
+    _safe_output_relative_path,
+    _save_host_output_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -443,18 +447,15 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
 
         # Handle absolute host paths, absolute container paths, and relative paths
         if source_path.is_absolute():
-            temp_dir_prefix = str(self._temp_dir) + os.sep
-            working_dir_prefix = self._working_dir + "/"
-            if str(source_path).startswith(temp_dir_prefix):
-                # Already a valid host path within the temp directory
-                host_path = source_path
-            elif str(source_path).startswith(working_dir_prefix):
-                # Convert container absolute path to host path
-                # e.g., /workspace/output.txt -> <temp_dir>/output.txt
-                relative = source_path.relative_to(self._working_dir)
-                host_path = self._temp_dir / relative
+            host_relative_path = _relative_to_canonical_host_root(path, (OutputSourceRoot.for_host(self._temp_dir),))
+            if host_relative_path is not None:
+                host_path = self._temp_dir / host_relative_path
             else:
-                raise ValueError(f"Path is outside mounted directory: {path}")
+                try:
+                    relative = source_path.relative_to(self._working_dir)
+                except ValueError as exc:
+                    raise ValueError(f"Path is outside mounted directory: {path}") from exc
+                host_path = self._temp_dir / relative
         else:
             host_path = self._temp_dir / source_path
 
@@ -590,14 +591,29 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             raise RuntimeError(
                 "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
             )
-        if timeout is None:
-            timeout = self._shell_timeout
-        container = self._container  # Capture for lambda type narrowing
 
         # With an allowlist, the parsed argv must run directly (no shell).
         argv, rejection = self._prepare_command(cmd)
         if rejection is not None:
             return rejection
+        return await self._run_command_unchecked(cmd, timeout=timeout, argv=argv)
+
+    async def _run_command_unchecked(
+        self, cmd: str, *, timeout: int | None = None, argv: list[str] | None = None
+    ) -> CommandResult:
+        """Execute a trusted maintenance command or a prevalidated user command.
+
+        ``argv`` is the shlex-parsed command from an active allowlist; when set,
+        it runs directly with no shell. Trusted internal callers (e.g. ownership
+        repair) pass only ``cmd`` and run through a shell.
+        """
+        if self._container is None:
+            raise RuntimeError(
+                "ExecutionEnvironment not started. Ensure current Agent is equipped with a CodeExecToolProvider."
+            )
+        if timeout is None:
+            timeout = self._shell_timeout
+        container = self._container  # Capture for lambda type narrowing
 
         # Enforce the timeout inside the container via coreutils `timeout(1)`.
         # It runs the command in its own process group and sends SIGKILL to the
@@ -693,14 +709,16 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         """Fix ownership of files created by the container.
 
         Files and directories created inside the Docker container run as root,
-        which causes permission issues when trying to move/delete them from the host.
+        which can prevent the host process from reading them.
         This method runs chown inside the container to fix ownership.
 
         Args:
             paths: Specific paths to fix. If None, fixes all files in working_dir.
-                   Paths should be container paths (absolute or relative to working_dir).
+                   For each regular file inside the mount, repairs that file and
+                   the in-root parents needed for host traversal. Directory
+                   sources are skipped and never trigger a recursive chown.
         """
-        if self._container is None:
+        if self._container is None or self._temp_dir is None:
             return
 
         try:
@@ -709,17 +727,70 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             host_gid = os.getgid()
 
             if paths:
-                # Normalize paths - handle both relative and absolute
-                container_paths = [
-                    f"{self._working_dir}/{path}" if not path.startswith("/") else path for path in paths
-                ]
-                quoted_paths = " ".join(shlex.quote(p) for p in container_paths)
-                chown_cmd = f"chown -R {host_uid}:{host_gid} {quoted_paths} 2>/dev/null || true"
-                await self.run_command(chown_cmd, timeout=10)
+                container_root = PurePosixPath(self._working_dir)
+                host_roots = (
+                    PurePosixPath(str(self._temp_dir)),
+                    PurePosixPath(str(self._temp_dir.resolve(strict=False))),
+                )
+                container_paths: list[str] = []
+                for path in paths:
+                    if not path or "\x00" in path:
+                        continue
+                    source_path = PurePosixPath(path)
+                    if ".." in source_path.parts or not source_path.name:
+                        continue
+
+                    relative_path: PurePosixPath | None = None
+                    if source_path.is_absolute():
+                        for host_root in host_roots:
+                            try:
+                                relative_path = source_path.relative_to(host_root)
+                            except ValueError:
+                                continue
+                            break
+                        if relative_path is None:
+                            try:
+                                relative_path = source_path.relative_to(container_root)
+                            except ValueError:
+                                try:
+                                    relative_path = _relative_to_canonical_host_root(
+                                        path,
+                                        (OutputSourceRoot.for_host(self._temp_dir),),
+                                    )
+                                except OSError:
+                                    continue
+                    else:
+                        relative_path = source_path
+
+                    if relative_path is None or not relative_path.name or ".." in relative_path.parts:
+                        continue
+                    container_paths.append((container_root / relative_path).as_posix())
+
+                if not container_paths:
+                    return
+
+                quoted_paths = " ".join(shlex.quote(path) for path in dict.fromkeys(container_paths))
+                quoted_root = shlex.quote(container_root.as_posix())
+                chown_cmd = (
+                    f"root_path=$(realpath -e -- {quoted_root}) || exit 0\n"
+                    f"for source_path in {quoted_paths}; do\n"
+                    '  resolved_path=$(realpath -e -- "$source_path") || continue\n'
+                    '  case "$resolved_path" in "$root_path"/*) ;; *) continue ;; esac\n'
+                    '  [ -f "$resolved_path" ] || continue\n'
+                    f'  chown {host_uid}:{host_gid} -- "$resolved_path" 2>/dev/null || true\n'
+                    "  parent_path=${resolved_path%/*}\n"
+                    '  while [ "$parent_path" != "$root_path" ]; do\n'
+                    '    case "$parent_path" in "$root_path"/*) ;; *) break ;; esac\n'
+                    f'    chown {host_uid}:{host_gid} -- "$parent_path" 2>/dev/null || true\n'
+                    "    parent_path=${parent_path%/*}\n"
+                    "  done\n"
+                    "done"
+                )
+                await self._run_command_unchecked(chown_cmd, timeout=10)
             else:
                 # Fix all files in working directory
                 chown_cmd = f"chown -R {host_uid}:{host_gid} {shlex.quote(self._working_dir)} 2>/dev/null || true"
-                await self.run_command(chown_cmd, timeout=10)
+                await self._run_command_unchecked(chown_cmd, timeout=10)
 
         except Exception as exc:
             # Don't fail the operation if chown fails, just log warning
@@ -731,13 +802,11 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         output_dir: Path | str,
         dest_env: "CodeExecToolProvider | None" = None,
     ) -> SaveOutputFilesResult:
-        """Move files from the mounted temp directory to a destination.
+        """Copy files from the mounted temp directory to a destination.
 
-        Since files are volume-mounted, they're already on the host.
-
-        When dest_env is None (local filesystem), files are MOVED (not copied) -
-        originals are deleted from the execution environment.
-        Existing files in output_dir are silently overwritten.
+        Sources remain available in the container. Existing destination files
+        are atomically replaced, while duplicate destinations within one call
+        are rejected and reported in ``failed``.
 
         When dest_env is provided (cross-environment transfer), files are copied
         using the base class implementation via read/write primitives.
@@ -746,8 +815,8 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             paths: List of file paths in the execution environment (relative, absolute container,
                    or absolute host paths). Relative paths are resolved against the container
                    working directory. Absolute container paths starting with working_dir are
-                   mapped to the host. Absolute host paths within the temp directory are
-                   accepted as-is.
+                   mapped to the host. Absolute host paths are accepted when they canonically
+                   resolve beneath the temp directory (symlink-equivalent spellings included).
             output_dir: Directory path to save files to.
             dest_env: If provided, output_dir is interpreted as a path within dest_env
                       (cross-environment transfer). If None, output_dir is a local
@@ -766,52 +835,39 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         if dest_env is not None:
             return await super().save_output_files(paths, output_dir, dest_env)
 
-        # Fix ownership of files before moving them (solves permission issues with nested directories)
         await self._fix_file_ownership(paths)
 
-        # Local filesystem - use optimized move operation
-        output_dir_path = Path(output_dir)
-        output_dir_path.mkdir(parents=True, exist_ok=True)
+        return _save_host_output_files(
+            paths,
+            output_dir,
+            source_roots=self.output_source_roots(),
+            resolve_source=self._container_path_to_host,
+        )
 
-        result = SaveOutputFilesResult()
+    def output_source_roots(self) -> tuple[OutputSourceRoot, ...]:
+        """Return absolute execution roots accepted when resolving output paths."""
+        roots: tuple[OutputSourceRoot, ...] = (OutputSourceRoot(path=self._working_dir),)
+        if self._temp_dir is not None:
+            roots += (OutputSourceRoot.for_host(self._temp_dir),)
+        return roots
 
-        for source_path_str in paths:
-            try:
-                host_path = self._container_path_to_host(source_path_str)
+    async def resolve_output_source(self, source_path: str) -> str:
+        """Repair host access and require a regular file inside the mounted root."""
+        _safe_output_relative_path(source_path, source_roots=self.output_source_roots())
+        await self._fix_file_ownership([source_path])
 
-                if not host_path.exists():
-                    result.failed[source_path_str] = "File does not exist"
-                    logger.warning("Execution environment file does not exist: %s", source_path_str)
-                    continue
+        host_path = self._container_path_to_host(source_path)
+        if not host_path.exists():
+            raise FileNotFoundError(f"File not found: {source_path}")
+        if not host_path.is_file():
+            raise ValueError("Path is not a file")
+        return source_path
 
-                if not host_path.is_file():
-                    result.failed[source_path_str] = "Path is not a file"
-                    logger.warning("Execution environment path is not a file: %s", source_path_str)
-                    continue
-
-                file_size = host_path.stat().st_size
-                dest_path = output_dir_path / host_path.name
-
-                # Move file (overwrites if exists)
-                shutil.move(str(host_path), str(dest_path))
-
-                result.saved.append(
-                    SavedFile(
-                        source_path=source_path_str,
-                        output_path=dest_path,
-                        size=file_size,
-                    ),
-                )
-
-            except ValueError as exc:
-                # Path validation error from _container_path_to_host
-                result.failed[source_path_str] = str(exc)
-                logger.warning("Path validation error: %s", exc)
-            except Exception as exc:
-                result.failed[source_path_str] = str(exc)
-                logger.exception("Failed to move file: %s", source_path_str)
-
-        return result
+    async def output_destination_identity(self, destination: str, output_root: Path | str) -> str:
+        """Validate a cross-environment destination and return its host identity."""
+        host_destination = self._container_path_to_host(destination)
+        host_root = self._container_path_to_host(str(output_root))
+        return _host_output_destination_identity(host_destination, host_root)
 
     async def upload_files(
         self,

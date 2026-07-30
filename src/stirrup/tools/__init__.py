@@ -10,15 +10,16 @@ This module provides tools and tool providers for the Agent.
 - **ToolProvider**: A class that manages resources and returns Tool(s) via async context manager.
   Use for tools requiring lifecycle management (connections, temp directories, etc.).
 
-## DEFAULT_TOOLS
+## default_tools()
 
-DEFAULT_TOOLS provides a standard set of tool providers:
+default_tools() returns a standard set of tool providers:
 - LocalCodeExecToolProvider: Code execution in isolated temp directory
 - WebToolProvider: Web fetch and search (search requires BRAVE_API_KEY)
 
 Example usage:
-    from stirrup import Agent, DEFAULT_TOOLS
+    from stirrup import Agent
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
+    from stirrup.tools import default_tools
     from stirrup.tools.mcp import MCPToolProvider
 
     # Create a client for your LLM provider
@@ -31,7 +32,7 @@ Example usage:
     agent = Agent(
         client=client,
         name="assistant",
-        tools=[*DEFAULT_TOOLS, MCPToolProvider.from_config("mcp.json")],
+        tools=[*default_tools(), MCPToolProvider.from_config("mcp.json")],
     )
 
     # Custom tools only (no defaults)
@@ -60,16 +61,24 @@ from stirrup.tools.user_input import USER_INPUT_TOOL
 from stirrup.tools.view_image import ViewImageToolProvider
 from stirrup.tools.web import WebToolProvider
 
-# DEFAULT_TOOLS provides a standard set of tool providers for the Agent.
-# ToolProviders are automatically set up and torn down by Agent.session().
-DEFAULT_TOOLS: list[Tool[Any, Any] | ToolProvider] = [
-    LocalCodeExecToolProvider(),  # ToolProvider, returns code_exec tool
-    WebToolProvider(),  # ToolProvider, returns web_fetch + web_search (if API key)
-]
+
+def default_tools() -> list[Tool[Any, Any] | ToolProvider]:
+    """Return a fresh set of the standard tool providers for the Agent.
+
+    ToolProviders are automatically set up and torn down by Agent.session().
+
+    A new list of new instances each call: provider instances hold per-session state
+    (a temp directory, an HTTP client), so sharing one across concurrent sessions lets
+    the first teardown destroy the other's environment.
+    """
+    return [
+        LocalCodeExecToolProvider(),  # ToolProvider, returns code_exec tool
+        WebToolProvider(),  # ToolProvider, returns web_fetch + web_search (if API key)
+    ]
+
 
 __all__ = [
     "CALCULATOR_TOOL",
-    "DEFAULT_TOOLS",
     "SIMPLE_FINISH_TOOL",
     "USER_INPUT_TOOL",
     "CodeExecToolProvider",
@@ -77,4 +86,5 @@ __all__ = [
     "LocalCodeExecToolProvider",
     "ViewImageToolProvider",
     "WebToolProvider",
+    "default_tools",
 ]

@@ -9,10 +9,10 @@ Pass `resume=True` to `session()`:
 ```python
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
 client = ChatCompletionsClient(model="gpt-5")
-agent = Agent(client=client, name="researcher", tools=DEFAULT_TOOLS, max_turns=50)
+agent = Agent(client=client, name="researcher", tools=default_tools(), max_turns=50)
 
 async with agent.session(output_dir="./output", resume=True) as session:
     await session.run("Analyze all datasets in the data folder")

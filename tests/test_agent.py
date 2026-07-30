@@ -1,13 +1,17 @@
 """Tests for agent core functionality."""
 
+import json
+from collections.abc import Awaitable, Callable
 from io import BytesIO
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from PIL import Image
 from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
-from stirrup.core.agent import Agent
+from stirrup.core.agent import Agent, SubAgentParams
 from stirrup.core.cache import CacheState
 from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
@@ -25,6 +29,7 @@ from stirrup.core.models import (
     TurnWarningMessage,
     UserMessage,
 )
+from stirrup.tools import default_tools
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
@@ -70,6 +75,35 @@ class ContextWindowLLMClient(MockLLMClient):
     @property
     def context_window_tokens(self) -> int | None:
         return self._configured_context_window_tokens
+
+
+async def _finish_without_file_validation(params: FinishParams) -> ToolResult[None]:
+    return ToolResult(content=params.reason)
+
+
+UNVALIDATED_FINISH_TOOL = Tool[FinishParams, None](
+    name=DEFAULT_FINISH_TOOL_NAME,
+    description="Finish without validating declared paths.",
+    parameters=FinishParams,
+    executor=_finish_without_file_validation,
+)
+
+
+class RecordingParams(BaseModel):
+    label: str
+
+
+def recording_tool(name: str, executions: list[str], *, success: bool = True) -> Tool[RecordingParams, None]:
+    def record(params: RecordingParams) -> ToolResult:
+        executions.append(params.label)
+        return ToolResult(content=params.label, success=success)
+
+    return Tool[RecordingParams, None](
+        name=name,
+        description="Record an execution label",
+        parameters=RecordingParams,
+        executor=record,  # ty: ignore[invalid-argument-type]
+    )
 
 
 def _sample_png_block() -> ImageContentBlock:
@@ -259,6 +293,135 @@ async def test_output_token_limit_surfaces_without_agent_retry_or_recovery() -> 
 
     assert exc_info.value is error
     assert client.call_count == 1
+
+
+async def test_finish_runs_last_however_the_provider_ordered_the_calls(tmp_path: Path) -> None:
+    """The finish call ends the turn, so it executes after every ordinary call in that turn.
+
+    The finish tool validates that its declared file exists, the way SIMPLE_FINISH_TOOL does: the
+    provider put the finish first, so executing calls in array order would fail it on a file the
+    same turn goes on to write.
+    """
+    executions: list[str] = []
+
+    class PathParams(BaseModel):
+        name: str
+
+    def write_file(params: PathParams) -> ToolResult:
+        (tmp_path / params.name).write_text("report")
+        executions.append(params.name)
+        return ToolResult(content=f"Wrote {params.name}")
+
+    def finish(params: PathParams) -> ToolResult:
+        executions.append("finish")
+        if not (tmp_path / params.name).exists():
+            return ToolResult(content=f"File does not exist: {params.name}", success=False)
+        return ToolResult(content="Done")
+
+    def path_tool(name: str, executor: Callable[[PathParams], ToolResult]) -> Tool[PathParams, None]:
+        return Tool[PathParams, None](
+            name=name,
+            description=name,
+            parameters=PathParams,
+            executor=executor,  # ty: ignore[invalid-argument-type]
+        )
+
+    response = AssistantMessage(
+        content="Finish first, but the other work must still happen",
+        tool_calls=[
+            ToolCall(name="finish", arguments='{"name": "report.md"}', tool_call_id="call_finish"),
+            ToolCall(name="write_file", arguments='{"name": "report.md"}', tool_call_id="call_report"),
+            ToolCall(name="write_file", arguments='{"name": "notes.md"}', tool_call_id="call_notes"),
+        ],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[path_tool("write_file", write_file)],
+        finish_tool=path_tool("finish", finish),
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert executions == ["report.md", "notes.md", "finish"]
+    assert finish_params == PathParams(name="report.md")
+    # Every call is answered exactly once, so the history stays 1:1 with the assistant message.
+    assert [message.tool_call_id for message in tool_messages] == ["call_report", "call_notes", "call_finish"]
+    assert all(message.success for message in tool_messages)
+
+
+@pytest.mark.parametrize(
+    ("finish_arguments", "finish_succeeds", "expected_executions"),
+    [
+        pytest.param("{}", True, ["ordinary"], id="invalid-arguments"),
+        pytest.param('{"label": "finish"}', False, ["ordinary", "finish"], id="unsuccessful"),
+    ],
+)
+async def test_unsuccessful_finish_does_not_terminate_the_run(
+    finish_arguments: str,
+    finish_succeeds: bool,
+    expected_executions: list[str],
+) -> None:
+    executions: list[str] = []
+    record = recording_tool("record", executions)
+    finish = recording_tool("finish", executions, success=finish_succeeds)
+    response = AssistantMessage(
+        content="Attempt a finish that will not succeed",
+        tool_calls=[
+            ToolCall(name="finish", arguments=finish_arguments, tool_call_id="call_finish"),
+            ToolCall(name="record", arguments='{"label": "ordinary"}', tool_call_id="call_ordinary"),
+        ],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[record],
+        finish_tool=finish,
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert executions == expected_executions
+    assert finish_params is None
+    assert [message.tool_call_id for message in tool_messages] == ["call_ordinary", "call_finish"]
+    assert [message.success for message in tool_messages] == [True, False]
+
+
+@pytest.mark.parametrize("arguments", ["", "   "], ids=["empty", "whitespace"])
+async def test_finish_without_arguments_completes_the_run(arguments: str) -> None:
+    # Clients coerce a missing arguments field to "".
+    class DefaultedParams(BaseModel):
+        reason: str = "task complete"
+
+    def finish(params: DefaultedParams) -> ToolResult:
+        return ToolResult(content=params.reason)
+
+    response = AssistantMessage(
+        content="Done",
+        tool_calls=[ToolCall(name="finish", arguments=arguments, tool_call_id="call_finish")],
+        token_usage=TokenUsage(),
+    )
+    agent = Agent(
+        client=MockLLMClient([response]),
+        name="test-agent",
+        tools=[],
+        finish_tool=Tool[DefaultedParams, None](
+            name="finish",
+            description="Finish with defaulted parameters",
+            parameters=DefaultedParams,
+            executor=finish,  # ty: ignore[invalid-argument-type]
+        ),
+        run_sync_in_thread=False,
+    )
+
+    _, tool_messages, finish_params = await agent.step([UserMessage(content="Test task")], {})
+
+    assert finish_params == DefaultedParams(reason="task complete")
+    assert [message.success for message in tool_messages] == [True]
 
 
 async def test_agent_max_turns() -> None:
@@ -1023,9 +1186,11 @@ async def test_agent_continues_after_failed_finish_tool_from_multiple_finish_too
 async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
     """When multiple finish tools are called in one turn, all are rejected without executing.
 
-    The agent must not terminate; the model gets another chance to finish with a single call.
+    The ordinary calls in that turn still run, and the agent must not terminate; the model gets
+    another chance to finish with a single call.
     """
     executions: list[str] = []
+    record = recording_tool("record", executions)
 
     class FinishAParams(BaseModel):
         reason: str
@@ -1060,6 +1225,7 @@ async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
             tool_calls=[
                 ToolCall(name="finish_a", arguments='{"reason": "first"}', tool_call_id="call_1"),
                 ToolCall(name="finish_b", arguments='{"reason": "second"}', tool_call_id="call_2"),
+                ToolCall(name="record", arguments='{"label": "ordinary"}', tool_call_id="call_ordinary"),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1077,15 +1243,15 @@ async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
         client=client,
         name="test-agent",
         max_turns=5,
-        tools=[],
+        tools=[record],
         finish_tool=[finish_a, finish_b],
     )
 
     async with agent.session() as session:
         finish_params, history, _ = await session.run([UserMessage(content="Test task")])
 
-    # Neither finish tool was executed in turn 1 — agent recovered on turn 2.
-    assert executions == ["finish_a"]
+    # Neither finish tool was executed in turn 1, but the ordinary call still ran.
+    assert executions == ["ordinary", "finish_a"]
     assert client.call_count == 2
     assert finish_params is not None
     assert isinstance(finish_params, FinishAParams)
@@ -1409,3 +1575,375 @@ async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     assert finish_params.reason == "Completed"
     assert client.call_count == 5
     assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_directory() -> None:
+    """A shared sub-agent reports a usable relative path and never endorses a directory."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    subagent_client = MockLLMClient([])
+    subagent = Agent(
+        client=subagent_client,
+        name="shared-worker",
+        tools=[LocalCodeExecToolProvider()],
+        finish_tool=UNVALIDATED_FINISH_TOOL,
+        share_parent_exec_env=True,
+    )
+    subagent_tool = subagent.to_tool()
+    parent_provider = LocalCodeExecToolProvider()
+    parent = Agent(
+        client=MockLLMClient([]),
+        name="parent",
+        tools=[parent_provider, subagent_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with parent.session():
+        await parent_provider.write_file_bytes("report.txt", b"report")
+        assert parent_provider.temp_dir is not None
+        (parent_provider.temp_dir / "artifacts").mkdir()
+        absolute_report = str(parent_provider.temp_dir / "report.txt")
+        subagent_client.responses.append(
+            AssistantMessage(
+                content="Done",
+                tool_calls=[
+                    ToolCall(
+                        name=DEFAULT_FINISH_TOOL_NAME,
+                        arguments=json.dumps({"reason": "done", "paths": [absolute_report, "artifacts"]}),
+                        tool_call_id="call_finish",
+                    )
+                ],
+                token_usage=TokenUsage(input=100, answer=50),
+            )
+        )
+        execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
+        assert isinstance(execution, Awaitable)
+        result = await execution
+
+    assert isinstance(result.content, str)
+    assert "Files available in your environment: ['report.txt']" in result.content
+    assert absolute_report not in result.content.split("Files available in your environment:", 1)[1]
+    failed_outputs = result.content.split("Files that FAILED to transfer to your environment", 1)[1]
+    assert "'artifacts':" in failed_outputs
+
+
+@pytest.mark.docker
+async def test_shared_docker_subagent_repairs_and_validates_absolute_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared Docker outputs are repaired, normalized, and still constrained to regular files."""
+    pytest.importorskip("docker")
+
+    from stirrup.tools.code_backends.base import CommandResult
+    from stirrup.tools.code_backends.docker import DEFAULT_WORKING_DIR, DockerCodeExecToolProvider
+
+    mock_docker_client = MagicMock()
+    mock_container = MagicMock()
+    mock_container.short_id = "abc123"
+    mock_docker_client.containers.run.return_value = mock_container
+
+    declared_file = f"{DEFAULT_WORKING_DIR}/root-owned/report.txt"
+    declared_directory = f"{DEFAULT_WORKING_DIR}/artifacts"
+    traversal = f"{DEFAULT_WORKING_DIR}/nested/../escape.txt"
+    subagent = Agent(
+        client=MockLLMClient(
+            [
+                AssistantMessage(
+                    content="Done",
+                    tool_calls=[
+                        ToolCall(
+                            name=DEFAULT_FINISH_TOOL_NAME,
+                            arguments=json.dumps(
+                                {"reason": "done", "paths": [declared_file, declared_directory, traversal]}
+                            ),
+                            tool_call_id="call_finish",
+                        )
+                    ],
+                    token_usage=TokenUsage(input=100, answer=50),
+                )
+            ]
+        ),
+        name="shared-docker-worker",
+        tools=[DockerCodeExecToolProvider.from_image("python:3.12-slim")],
+        finish_tool=UNVALIDATED_FINISH_TOOL,
+        share_parent_exec_env=True,
+    )
+    subagent_tool = subagent.to_tool()
+    parent_provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
+    parent = Agent(
+        client=MockLLMClient([]),
+        name="docker-parent",
+        tools=[parent_provider, subagent_tool],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    with (
+        patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+        patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+    ):
+        mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+        async with parent.session():
+            assert parent_provider.temp_dir is not None
+            locked_parent = parent_provider.temp_dir / "root-owned"
+            locked_parent.mkdir()
+            (locked_parent / "report.txt").write_bytes(b"report")
+            locked_parent.chmod(0)
+            (parent_provider.temp_dir / "artifacts").mkdir()
+
+            async def repair_access(cmd: str, *, timeout: int | None = None) -> CommandResult:  # noqa: ARG001
+                locked_parent.chmod(0o700)
+                return CommandResult(exit_code=0, stdout="", stderr="")
+
+            monkeypatch.setattr(parent_provider, "_run_command_unchecked", repair_access)
+            execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
+            assert isinstance(execution, Awaitable)
+            result = await execution
+
+    assert isinstance(result.content, str)
+    available_outputs = result.content.split("Files available in your environment:", 1)[1]
+    assert "['root-owned/report.txt']" in available_outputs
+    assert declared_file not in available_outputs
+    failed_outputs = result.content.split("Files that FAILED to transfer to your environment", 1)[1]
+    assert f"'{declared_directory}':" in failed_outputs
+    assert f"'{traversal}': 'Output source path contains traversal" in result.content
+
+
+async def test_owned_subagent_without_parent_reports_declared_output_failure() -> None:
+    """A directly invoked owned sub-agent cannot silently drop declared outputs."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses = [
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["report.txt"]}',
+                    tool_call_id="call_finish",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+    subagent = Agent(
+        client=MockLLMClient(responses),
+        name="owned-worker",
+        tools=[LocalCodeExecToolProvider()],
+        finish_tool=UNVALIDATED_FINISH_TOOL,
+    )
+
+    execution = subagent.to_tool().executor(SubAgentParams(task="produce output", input_files=[]))
+    assert isinstance(execution, Awaitable)
+    result = await execution
+
+    assert "Files available in your environment" not in result.content
+    assert "Files that FAILED to transfer to your environment" in result.content
+    assert "No parent execution environment is available for transfer" in result.content
+
+
+async def test_root_agent_saves_declared_outputs_and_records_failures(tmp_path: Path) -> None:
+    """Output transfer runs at session exit: saved files land in output_dir and
+    failures are recorded on last_output_files_result, not silently dropped.
+
+    The failing path exists at finish time (so the finish tool accepts it) but
+    uses a traversal spelling that the transfer rejects — the seam where
+    failure surfacing actually matters.
+    """
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses = [
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["real.txt", "nested/../sneaky.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+            request_start_time=100.0,
+            request_end_time=100.4,
+        )
+    ]
+
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    output_dir = tmp_path / "outputs"
+    async with agent.session(output_dir=output_dir) as session:
+        await provider.write_file_bytes("real.txt", b"data")
+        await provider.write_file_bytes("sneaky.txt", b"sneaky")
+        await provider.write_file_bytes("nested/anchor.txt", b"")
+        finish_params, _, _ = await session.run([SystemMessage(content="sys"), UserMessage(content="task")])
+
+    assert finish_params is not None
+    assert (output_dir / "real.txt").read_bytes() == b"data"
+    assert not (output_dir / "sneaky.txt").exists()
+
+    result = session.last_output_files_result
+    assert result is not None
+    assert [saved.source_path for saved in result.saved] == ["real.txt"]
+    assert "traversal" in result.failed["nested/../sneaky.txt"]
+
+
+async def test_root_session_resets_stale_output_result(tmp_path: Path) -> None:
+    """A later root run with no declared outputs must not expose the previous
+    run's last_output_files_result."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses = [
+        AssistantMessage(
+            content="first",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["real.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
+            content="second",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": []}',
+                    tool_call_id="call_2",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+    output_dir = tmp_path / "outputs"
+
+    async with agent.session(output_dir=output_dir) as session:
+        await provider.write_file_bytes("real.txt", b"data")
+        await session.run([SystemMessage(content="sys"), UserMessage(content="task")])
+    completed_session = session
+    completed_result = session.last_output_files_result
+    assert completed_result is not None
+
+    async with agent.session(output_dir=output_dir) as session:
+        await session.run([SystemMessage(content="sys"), UserMessage(content="task")])
+    assert session.last_output_files_result is None
+    assert completed_session.last_output_files_result is completed_result
+
+
+async def test_failed_reused_session_does_not_export_previous_finish_paths(tmp_path: Path) -> None:
+    """Only finish parameters produced by the current session may drive output saving."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses: list[AssistantMessage | Exception] = [
+        AssistantMessage(
+            content="first",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["report.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        RuntimeError("second session failed before finish"),
+    ]
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+    output_dir = tmp_path / "outputs"
+
+    async with agent.session(output_dir=output_dir, cache_on_interrupt=False) as session:
+        await provider.write_file_bytes("report.txt", b"first")
+        await session.run([SystemMessage(content="sys"), UserMessage(content="first")])
+
+    with pytest.raises(RuntimeError, match="failed before finish"):
+        async with agent.session(output_dir=output_dir, cache_on_interrupt=False) as failed_session:
+            await provider.write_file_bytes("report.txt", b"second")
+            await failed_session.run([SystemMessage(content="sys"), UserMessage(content="second")])
+
+    assert (output_dir / "report.txt").read_bytes() == b"first"
+    assert failed_session.last_output_files_result is None
+
+
+async def test_failed_second_run_in_same_session_does_not_reuse_first_finish(tmp_path: Path) -> None:
+    """Each run must replace the session's pending finish state before doing work."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    responses: list[AssistantMessage | Exception] = [
+        AssistantMessage(
+            content="first",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": ["report.txt"]}',
+                    tool_call_id="call_1",
+                )
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        RuntimeError("second run failed before finish"),
+    ]
+    provider = LocalCodeExecToolProvider()
+    agent = Agent(
+        client=MockLLMClient(responses),
+        name="test-agent",
+        max_turns=3,
+        tools=[provider],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+    output_dir = tmp_path / "outputs"
+
+    with pytest.raises(RuntimeError, match="failed before finish"):
+        async with agent.session(output_dir=output_dir, cache_on_interrupt=False) as session:
+            await provider.write_file_bytes("report.txt", b"data")
+            await session.run([SystemMessage(content="sys"), UserMessage(content="first")])
+            await session.run([SystemMessage(content="sys"), UserMessage(content="second")])
+
+    assert not (output_dir / "report.txt").exists()
+    assert session.last_output_files_result is None
+
+
+def test_default_tools_returns_fresh_instances() -> None:
+    """Each call must build new providers so concurrent sessions never share one."""
+    first = default_tools()
+    second = default_tools()
+
+    assert [type(tool) for tool in first] == [type(tool) for tool in second]
+    assert all(a is not b for a, b in zip(first, second, strict=True))
+
+
+def test_agents_do_not_share_default_tool_instances() -> None:
+    """The default path must not hand two Agents the same providers.
+
+    Providers hold per-session state, so a shared instance lets one session's teardown
+    destroy another's execution environment.
+    """
+    first = Agent(client=MockLLMClient([]), name="first")
+    second = Agent(client=MockLLMClient([]), name="second")
+
+    assert [type(tool) for tool in first._tools] == [type(tool) for tool in second._tools]  # noqa: SLF001
+    assert all(a is not b for a, b in zip(first._tools, second._tools, strict=True))  # noqa: SLF001

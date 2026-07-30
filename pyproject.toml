@@ -14,7 +14,8 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -23,9 +24,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "anyio>=4.0.0",
+    "anyio>=4.1.0",
     "filetype>=1.0.0",
-    "httpx>=0.20.0",
+    "httpx>=0.25.0",
     "json-schema-to-pydantic>=0.2.0",
     "moviepy>=2.0.0",
     "openai>=1.0.0",
