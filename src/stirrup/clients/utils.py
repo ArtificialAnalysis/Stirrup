@@ -32,6 +32,10 @@ __all__ = [
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _OPENAI_HOST = "api.openai.com"
+# ``httpx.URL.host`` IDNA-decodes, so reading it raises UnicodeError on a host such as
+# ``xn--api.openai.com`` — an exception type neither client documents. ``raw_host`` never
+# decodes, lowercases just as ``host`` does, and is what httpcore dials.
+_OPENAI_RAW_HOST = _OPENAI_HOST.encode()
 
 
 def _resolve_openai_endpoint_and_api_key(
@@ -49,16 +53,19 @@ def _resolve_openai_endpoint_and_api_key(
         effective_base_url = os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
 
     endpoint = httpx.URL(effective_base_url)
-    if endpoint.scheme not in ("http", "https") or not endpoint.host:
+    if endpoint.scheme not in ("http", "https") or not endpoint.raw_host:
         raise OpenAIError("base_url must be an absolute HTTP(S) URL with a host")
-    if endpoint.userinfo:
-        raise OpenAIError("base_url must not include userinfo")
+    # None of these belong in an API base URL: the SDK splices a query in ahead of the
+    # request path rather than sending it, and all three are places a caller may have put
+    # a credential, so the message below must stay free of the URL that carried it.
+    if endpoint.userinfo or endpoint.query or endpoint.fragment:
+        raise OpenAIError("base_url must not include userinfo, a query or a fragment")
 
     if api_key:
         return endpoint, api_key
     # Cleartext would expose the SDK's key, and another port is another endpoint, so
     # neither may borrow OpenAI's credential however familiar the host looks.
-    if endpoint.scheme == "https" and endpoint.host == _OPENAI_HOST and endpoint.port is None:
+    if endpoint.scheme == "https" and endpoint.raw_host == _OPENAI_RAW_HOST and endpoint.port is None:
         return endpoint, None
     raise OpenAIError(
         f"{endpoint} requires an explicit api_key; only https://{_OPENAI_HOST} reads OPENAI_API_KEY, "

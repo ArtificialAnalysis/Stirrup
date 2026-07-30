@@ -311,11 +311,12 @@ class OpenResponsesClient(LLMClient):
 
         Raises:
             openai.OpenAIError: If the effective base URL is not an absolute HTTP(S) URL,
-                includes userinfo, or is any endpoint other than OpenAI's own HTTPS one
-                while ``api_key`` is omitted. The OpenAI SDK raises the same error type
-                when that endpoint is used and ``OPENAI_API_KEY`` is unset. A base URL
-                httpx cannot parse at all (a non-numeric port, say) still surfaces as
-                ``httpx.InvalidURL``, since httpx parses it before Stirrup inspects it.
+                includes userinfo, a query or a fragment, or is any endpoint other than
+                OpenAI's own HTTPS one while ``api_key`` is omitted. The OpenAI SDK raises
+                the same error type when that endpoint is used and ``OPENAI_API_KEY`` is
+                unset. A base URL httpx cannot parse at all (a non-numeric port, say) still
+                surfaces as ``httpx.InvalidURL``, since httpx parses it before Stirrup
+                inspects it.
         """
         self._model = model
         self._max_tokens = max_tokens
@@ -325,10 +326,13 @@ class OpenResponsesClient(LLMClient):
 
         endpoint, resolved_api_key = _resolve_openai_endpoint_and_api_key(base_url, api_key)
 
-        # The SDK appends /responses itself.
-        if endpoint.path.rstrip("/").endswith("/responses"):
-            path = endpoint.path.rstrip("/").removesuffix("/responses")
-            endpoint = endpoint.copy_with(path=path)
+        # The SDK appends /responses itself. Strip it from the encoded path, because
+        # ``endpoint.path`` is percent-decoded and writing it back would turn a %2F inside
+        # a segment into a real separator and re-route a path-routing gateway. ``raw_path``
+        # would also carry a query, but the resolver rejects a base URL that has one.
+        raw_path = endpoint.raw_path.rstrip(b"/")
+        if raw_path.endswith(b"/responses"):
+            endpoint = endpoint.copy_with(raw_path=raw_path.removesuffix(b"/responses"))
 
         self._client = AsyncOpenAI(
             api_key=resolved_api_key,

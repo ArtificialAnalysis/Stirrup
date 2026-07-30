@@ -93,11 +93,12 @@ class ChatCompletionsClient(LLMClient):
 
         Raises:
             openai.OpenAIError: If the effective base URL is not an absolute HTTP(S) URL,
-                includes userinfo, or is any endpoint other than OpenAI's own HTTPS one
-                while ``api_key`` is omitted. The OpenAI SDK raises the same error type
-                when that endpoint is used and ``OPENAI_API_KEY`` is unset. A base URL
-                httpx cannot parse at all (a non-numeric port, say) still surfaces as
-                ``httpx.InvalidURL``, since httpx parses it before Stirrup inspects it.
+                includes userinfo, a query or a fragment, or is any endpoint other than
+                OpenAI's own HTTPS one while ``api_key`` is omitted. The OpenAI SDK raises
+                the same error type when that endpoint is used and ``OPENAI_API_KEY`` is
+                unset. A base URL httpx cannot parse at all (a non-numeric port, say) still
+                surfaces as ``httpx.InvalidURL``, since httpx parses it before Stirrup
+                inspects it.
         """
         self._model = model
         self._max_tokens = max_tokens

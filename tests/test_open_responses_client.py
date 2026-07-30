@@ -291,8 +291,11 @@ class TestOpenResponsesClient:
             ("https://openrouter.ai/api/v1/responses", "https://openrouter.ai/api/v1/"),
             ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/"),
             ("https://openrouter.ai/api/responses/v1", "https://openrouter.ai/api/responses/v1/"),
+            # %2F is a literal inside a segment, so a path-routing gateway must keep
+            # receiving the route the caller configured.
+            ("https://gateway.example/tenant%2Fa/responses", "https://gateway.example/tenant%2Fa/"),
         ],
-        ids=["trailing-slash", "no-trailing-slash", "no-suffix", "suffix-mid-path"],
+        ids=["trailing-slash", "no-trailing-slash", "no-suffix", "suffix-mid-path", "encoded-path-segment"],
     )
     async def test_resolver_wiring_strips_only_a_trailing_responses_suffix(
         self,

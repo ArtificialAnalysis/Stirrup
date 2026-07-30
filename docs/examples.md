@@ -104,6 +104,7 @@ Define structured output with a custom finish tool:
 
 ```python
 import asyncio
+import os
 
 from pydantic import BaseModel, Field
 
@@ -122,6 +123,7 @@ async def main():
     # Create client for OpenRouter
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
         model="anthropic/claude-sonnet-4.5",
     )
 

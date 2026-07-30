@@ -7,9 +7,24 @@ from openai import OpenAIError
 from pytest import MonkeyPatch
 
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
+from stirrup.clients.open_responses_client import OpenResponsesClient
 
 _EXPLICIT_KEY_MESSAGE = "requires an explicit api_key"
 _SDK_MISSING_KEY_MESSAGE = "The api_key client option must be set"
+_ABSOLUTE_URL_MESSAGE = r"absolute HTTP\(S\) URL"
+_URL_EXTRAS_MESSAGE = "userinfo, a query or a fragment"
+
+type OpenAICompatibleClient = ChatCompletionsClient | OpenResponsesClient
+
+# Both clients route every endpoint and credential decision through the same resolver, so
+# every case below must hold for either one. No row's base URL ends in ``/responses``, the
+# one path where the two clients differ; that stripping is covered where it lives, in
+# tests/test_open_responses_client.py.
+_client_classes = pytest.mark.parametrize(
+    "client_class",
+    [ChatCompletionsClient, OpenResponsesClient],
+    ids=["chat-completions", "open-responses"],
+)
 
 
 def _set_openai_key(monkeypatch: MonkeyPatch) -> None:
@@ -27,7 +42,7 @@ def _apply_environment_overrides(monkeypatch: MonkeyPatch, overrides: Mapping[st
 
 
 async def _assert_client_configuration(
-    client: ChatCompletionsClient,
+    client: OpenAICompatibleClient,
     expected_base_url: str,
     expected_api_key: str,
 ) -> None:
@@ -77,8 +92,10 @@ async def _assert_client_configuration(
         "explicit-key-openai-host-on-other-port",
     ],
 )
+@_client_classes
 async def test_accepted_configurations(
     monkeypatch: MonkeyPatch,
+    client_class: type[OpenAICompatibleClient],
     base_url: str | None,
     environment_base_url: str | None,
     api_key: str | None,
@@ -88,17 +105,21 @@ async def test_accepted_configurations(
     _set_openai_key(monkeypatch)
     _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": environment_base_url})
 
-    client = ChatCompletionsClient(model="gpt-4o", base_url=base_url, api_key=api_key)
+    client = client_class(model="gpt-4o", base_url=base_url, api_key=api_key)
 
     await _assert_client_configuration(client, expected_base_url, expected_api_key)
 
 
-def test_default_endpoint_without_openai_key_raises_the_sdk_error(monkeypatch: MonkeyPatch) -> None:
+@_client_classes
+def test_default_endpoint_without_openai_key_raises_the_sdk_error(
+    monkeypatch: MonkeyPatch,
+    client_class: type[OpenAICompatibleClient],
+) -> None:
     """Stirrup sends no credential of its own, so the SDK reports the missing key itself."""
     _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": None, "OPENAI_API_KEY": None})
 
     with pytest.raises(OpenAIError, match=_SDK_MISSING_KEY_MESSAGE):
-        ChatCompletionsClient(model="gpt-4o")
+        client_class(model="gpt-4o")
 
 
 @pytest.mark.parametrize(
@@ -115,8 +136,13 @@ def test_default_endpoint_without_openai_key_raises_the_sdk_error(monkeypatch: M
         ("http://localhost:8000/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
         (None, None, {"OPENAI_BASE_URL": "https://litellm.mycorp.internal/v1"}, _EXPLICIT_KEY_MESSAGE),
         (None, None, {"OPENAI_BASE_URL": "https://openrouter.ai/api/v1"}, _EXPLICIT_KEY_MESSAGE),
-        ("https://user:password@api.openai.com/v1", "explicit-key", {}, "userinfo"),
-        ("ftp://api.openai.com/v1", "explicit-key", {}, r"absolute HTTP\(S\) URL"),
+        ("https://xn--api.openai.com/v1", None, {}, _EXPLICIT_KEY_MESSAGE),
+        ("https://user:password@api.openai.com/v1", "explicit-key", {}, _URL_EXTRAS_MESSAGE),
+        ("https://api.openai.com/v1?api-version=2024-10-21", "explicit-key", {}, _URL_EXTRAS_MESSAGE),
+        ("https://api.openai.com/v1#fragment", "explicit-key", {}, _URL_EXTRAS_MESSAGE),
+        ("ftp://api.openai.com/v1", "explicit-key", {}, _ABSOLUTE_URL_MESSAGE),
+        ("", "explicit-key", {}, _ABSOLUTE_URL_MESSAGE),
+        ("https:///v1", "explicit-key", {}, _ABSOLUTE_URL_MESSAGE),
     ],
     ids=[
         "custom-host",
@@ -130,12 +156,19 @@ def test_default_endpoint_without_openai_key_raises_the_sdk_error(monkeypatch: M
         "custom-http-host",
         "custom-environment-endpoint",
         "provider-environment-endpoint",
+        "punycode-openai-lookalike",
         "userinfo-in-base-url",
+        "query-in-base-url",
+        "fragment-in-base-url",
         "non-http-scheme",
+        "blank-base-url",
+        "hostless-base-url",
     ],
 )
+@_client_classes
 def test_rejected_configurations(
     monkeypatch: MonkeyPatch,
+    client_class: type[OpenAICompatibleClient],
     base_url: str | None,
     api_key: str | None,
     environment_overrides: Mapping[str, str | None],
@@ -146,4 +179,18 @@ def test_rejected_configurations(
     _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": None, **environment_overrides})
 
     with pytest.raises(OpenAIError, match=expected_message):
-        ChatCompletionsClient(model="gpt-4o", base_url=base_url, api_key=api_key)
+        client_class(model="gpt-4o", base_url=base_url, api_key=api_key)
+
+
+@_client_classes
+def test_rejection_never_echoes_a_credential_carried_in_the_base_url(
+    monkeypatch: MonkeyPatch,
+    client_class: type[OpenAICompatibleClient],
+) -> None:
+    """A caller who put their key in the URL is exactly who sees this error."""
+    _apply_environment_overrides(monkeypatch, {"OPENAI_BASE_URL": None})
+
+    with pytest.raises(OpenAIError) as rejection:
+        client_class(model="gpt-4o", base_url="https://gateway.example/v1?api_key=sk-live-SUPERSECRET")
+
+    assert "sk-live-SUPERSECRET" not in str(rejection.value)

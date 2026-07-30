@@ -4,6 +4,7 @@ This example demonstrates how to use skills in an agent.
 """
 
 import asyncio
+import os
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
@@ -15,6 +16,7 @@ async def main() -> None:
     """Run an agent with skills for data analysis."""
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ["OPENROUTER_API_KEY"],
         model="anthropic/claude-sonnet-4.5",
     )
 
