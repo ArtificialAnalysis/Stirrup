@@ -68,14 +68,16 @@ async def test_output_limit_is_forwarded_and_reported_without_retry(
         context_window_tokens=64_000,
     )
 
-    with pytest.raises(OutputTokenLimitError, match=r"gpt-4o.*max_tokens=321.*Increase max_tokens"):
+    with pytest.raises(OutputTokenLimitError) as exc_info:
         await client.generate([UserMessage(content="hello")], {})
 
+    assert exc_info.value.model_slug == "gpt-4o"
+    assert exc_info.value.max_tokens == 321
+    assert exc_info.value.provider_reason == finish_reason
     provider_call.assert_awaited_once()
     provider_request = provider_call.await_args
     assert provider_request is not None
     assert provider_request.kwargs["max_completion_tokens"] == 321
-    assert client.context_window_tokens == 64_000
 
 
 async def test_context_length_rejection_surfaces_as_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:

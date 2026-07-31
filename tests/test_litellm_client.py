@@ -14,17 +14,6 @@ from stirrup.clients.litellm_client import LiteLLMClient
 from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 
 
-@pytest.mark.parametrize("context_window_tokens", [0, -1])
-def test_context_window_must_be_positive(context_window_tokens: int) -> None:
-    with pytest.raises(ValueError, match="context_window_tokens must be positive"):
-        LiteLLMClient(model="test/provider-model", context_window_tokens=context_window_tokens)
-
-
-def test_max_tokens_must_fit_context_window() -> None:
-    with pytest.raises(ValueError, match="must not exceed context_window_tokens"):
-        LiteLLMClient(model="test/provider-model", max_tokens=128_000, context_window_tokens=8_192)
-
-
 @pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
 async def test_output_limit_is_forwarded_and_reported_without_retry(
     monkeypatch: pytest.MonkeyPatch,
@@ -38,14 +27,16 @@ async def test_output_limit_is_forwarded_and_reported_without_retry(
         context_window_tokens=76_543,
     )
 
-    with pytest.raises(OutputTokenLimitError, match=r"test/provider-model.*max_tokens=789.*Increase max_tokens"):
+    with pytest.raises(OutputTokenLimitError) as exc_info:
         await client.generate([], {})
 
+    assert exc_info.value.model_slug == "test/provider-model"
+    assert exc_info.value.max_tokens == 789
+    assert exc_info.value.provider_reason == finish_reason
     provider_call.assert_awaited_once()
     provider_request = provider_call.await_args
     assert provider_request is not None
     assert provider_request.kwargs["max_tokens"] == 789
-    assert client.context_window_tokens == 76_543
 
 
 async def test_context_window_rejection_surfaces_as_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:

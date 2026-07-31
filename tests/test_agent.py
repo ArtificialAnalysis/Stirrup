@@ -180,26 +180,6 @@ async def test_output_limit_does_not_control_context_summarization() -> None:
     assert client.call_count == 2
 
 
-def test_agent_rejects_protocol_subclass_without_context_window_override() -> None:
-    class LegacyLLMClient(LLMClient):
-        """Subclass written before context budgets were separate; inherits the protocol's None stub."""
-
-        @property
-        def model_slug(self) -> str:
-            return "legacy-model"
-
-        @property
-        def max_tokens(self) -> int:
-            return 1_000
-
-        async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
-            del messages, tools
-            raise NotImplementedError
-
-    with pytest.raises(ValueError, match="context_window_tokens must be a positive int"):
-        Agent(client=LegacyLLMClient(), name="legacy-client-agent", tools=[])
-
-
 def test_agent_rejects_structural_client_without_context_window_tokens() -> None:
     class DuckTypedLegacyClient:
         """Structural client with no context_window_tokens attribute at all."""

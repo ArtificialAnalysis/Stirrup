@@ -12,6 +12,7 @@ from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 
+from stirrup.clients.utils import validate_token_budgets
 from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
@@ -316,12 +317,7 @@ class OpenResponsesClient(LLMClient):
             ValueError: If ``context_window_tokens`` is not positive, or
                 ``max_tokens`` exceeds it.
         """
-        if context_window_tokens <= 0:
-            raise ValueError(f"context_window_tokens must be positive, got {context_window_tokens!r}")
-        if max_tokens > context_window_tokens:
-            raise ValueError(
-                f"max_tokens ({max_tokens}) must not exceed context_window_tokens ({context_window_tokens})"
-            )
+        validate_token_budgets(max_tokens, context_window_tokens)
 
         self._model = model
         self._max_tokens = max_tokens

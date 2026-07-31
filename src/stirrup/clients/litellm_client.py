@@ -22,7 +22,7 @@ except ImportError as e:
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import to_openai_messages, to_openai_tools
+from stirrup.clients.utils import to_openai_messages, to_openai_tools, validate_token_budgets
 from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
@@ -88,12 +88,7 @@ class LiteLLMClient(LLMClient):
                 model = model_slug
         if model is None:
             raise ValueError("model is required")
-        if context_window_tokens <= 0:
-            raise ValueError(f"context_window_tokens must be positive, got {context_window_tokens!r}")
-        if max_tokens > context_window_tokens:
-            raise ValueError(
-                f"max_tokens ({max_tokens}) must not exceed context_window_tokens ({context_window_tokens})"
-            )
+        validate_token_budgets(max_tokens, context_window_tokens)
 
         self._model = model
         self._max_tokens = max_tokens
