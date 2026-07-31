@@ -266,10 +266,6 @@ class MyCustomClient(LLMClient):
         return "my-model"
 
     @property
-    def max_tokens(self) -> int:
-        return 8_192
-
-    @property
     def context_window_tokens(self) -> int:
         return 128_000
 ```

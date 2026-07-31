@@ -20,13 +20,14 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 |--------|------|-------------|
 | `generate()` | `async method` | Generate next message with optional tool calls |
 | `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
-| `max_tokens` | `property` | Maximum provider response/output tokens |
 | `context_window_tokens` | `property` | Model context capacity the agent summarizes history against |
 
 `context_window_tokens` must return a positive int; `Agent` reads it once at
 construction and summarizes conversation history as usage approaches that
-capacity. There is no fallback to `max_tokens`: a client that does not expose it
-fails at `Agent` construction.
+capacity. There is no fallback: a client that does not expose it fails at
+`Agent` construction. An output cap (`max_tokens`) is a client-internal request
+parameter — the built-in clients take one, but the protocol does not require it
+and the framework never reads it.
 
 Custom clients that adapt provider stop reasons should raise
 `OutputTokenLimitError` when the provider exhausts the response budget. Reserve
@@ -64,10 +65,6 @@ class MyCustomClient:
     @property
     def model_slug(self) -> str:
         return self._model
-
-    @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
 
     @property
     def context_window_tokens(self) -> int:
@@ -139,10 +136,6 @@ class OpenAIClient:
         return f"openai/{self._model}"
 
     @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
-
-    @property
     def context_window_tokens(self) -> int:
         return self._context_window_tokens
 
@@ -201,10 +194,6 @@ class MockClient:
     @property
     def model_slug(self) -> str:
         return "mock/test-model"
-
-    @property
-    def max_tokens(self) -> int:
-        return 10_000
 
     @property
     def context_window_tokens(self) -> int:

@@ -1261,8 +1261,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         )
         return ContextOverflowError(
             f"Context overflow reached the {boundary} "
-            f"(max_tokens={self._client.max_tokens} of context_window_tokens={self._context_window_tokens} "
-            "is reserved for output)"
+            f"(context_window_tokens={self._context_window_tokens}, part of which the provider "
+            "reserves for the client's max_tokens output budget)"
         )
 
     async def step(

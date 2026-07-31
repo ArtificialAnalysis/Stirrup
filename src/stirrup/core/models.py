@@ -594,9 +594,6 @@ class LLMClient(Protocol):
     def model_slug(self) -> str: ...
 
     @property
-    def max_tokens(self) -> int: ...
-
-    @property
     def context_window_tokens(self) -> int: ...
 
 
