@@ -403,9 +403,21 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
         self._client: LLMClient = client
-        context_window_tokens = getattr(client, "context_window_tokens", None)
-        if type(context_window_tokens) is not int or context_window_tokens <= 0:
-            raise ValueError(f"client.context_window_tokens must be a positive int, got {context_window_tokens!r}")
+        try:
+            context_window_tokens = client.context_window_tokens
+        except AttributeError as e:
+            raise ValueError(
+                "client.context_window_tokens must be a positive int; reading it raised AttributeError"
+            ) from e
+        if (
+            isinstance(context_window_tokens, bool)
+            or not isinstance(context_window_tokens, int)
+            or context_window_tokens <= 0
+        ):
+            raise ValueError(
+                f"client.context_window_tokens must be a positive int, "
+                f"got {context_window_tokens!r} ({type(context_window_tokens).__name__})"
+            )
         self._context_window_tokens = context_window_tokens
 
         self._name = name
@@ -1243,12 +1255,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 return True
         return False
 
-    @staticmethod
-    def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
+    def _context_boundary_error(self, messages: list[ChatMessage]) -> ContextOverflowError:
         boundary = (
             "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
         )
-        return ContextOverflowError(f"Context overflow reached the {boundary}")
+        return ContextOverflowError(
+            f"Context overflow reached the {boundary} "
+            f"(max_tokens={self._client.max_tokens} of context_window_tokens={self._context_window_tokens} "
+            "is reserved for output)"
+        )
 
     async def step(
         self,

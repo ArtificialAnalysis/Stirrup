@@ -23,7 +23,7 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 | `max_tokens` | `property` | Maximum provider response/output tokens |
 | `context_window_tokens` | `property` | Model context capacity the agent summarizes history against |
 
-`context_window_tokens` must return a positive integer; `Agent` reads it once at
+`context_window_tokens` must return a positive int; `Agent` reads it once at
 construction and summarizes conversation history as usage approaches that
 capacity. There is no fallback to `max_tokens`: a client that does not expose it
 fails at `Agent` construction.

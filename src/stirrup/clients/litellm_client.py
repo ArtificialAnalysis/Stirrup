@@ -69,7 +69,9 @@ class LiteLLMClient(LLMClient):
                 should be summarized.
             model_slug: Deprecated. Use model instead.
             reasoning_effort: Reasoning effort level for extended thinking models (e.g., 'medium', 'high')
-            kwargs: Additional arguments to pass to LiteLLM completion calls
+            kwargs: Additional arguments to pass to LiteLLM completion calls.
+                Values here override computed request parameters (including the
+                token cap) and bypass constructor validation.
 
         Raises:
             ValueError: If no model is provided, ``context_window_tokens`` is not

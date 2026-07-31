@@ -89,6 +89,8 @@ class ChatCompletionsClient(LLMClient):
             max_retries: Number of retries for transient errors. Defaults to 2.
                 The OpenAI SDK handles retries internally with exponential backoff.
             kwargs: Additional arguments passed to chat.completions.create().
+                Values here override computed request parameters (including the
+                token cap) and bypass constructor validation.
 
         Raises:
             ValueError: If ``context_window_tokens`` is not positive, or

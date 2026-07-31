@@ -206,10 +206,11 @@ Stirrup supports multiple ways to connect to LLM providers.
 
 `max_tokens` and `context_window_tokens` are separate budgets: the first caps a single response,
 the second is the model context capacity the agent summarizes history against. Built-in clients
-require `context_window_tokens` at construction; the examples in this repository pair an explicit
-`max_tokens=8_192` response budget with an explicit context window. Exceeding a response
-budget raises `OutputTokenLimitError` and aborts the run rather than retrying, so raise
-`max_tokens` if your task needs long responses.
+require `context_window_tokens` at construction and reject `max_tokens` values that exceed it —
+note the default `max_tokens` is `64_000`, so small context windows need an explicit `max_tokens`
+too. The examples in this repository pair an explicit `max_tokens=8_192` response budget with an
+explicit context window. Exceeding a response budget raises `OutputTokenLimitError` and aborts
+the run rather than retrying, so increase `max_tokens` if your task needs long responses.
 
 ### ChatCompletionsClient
 
@@ -274,7 +275,7 @@ class MyCustomClient(LLMClient):
 ```
 
 `Agent` reads `context_window_tokens` at construction and raises a `ValueError`
-unless it is a positive integer.
+unless it is a positive int.
 
 → See [Custom Clients](extending/clients.md) for full documentation.
 
@@ -456,9 +457,10 @@ An output-limit stop is different: `OutputTokenLimitError` surfaces without
 summarization or retry with the same `max_tokens` limit.
 
 The built-in OpenAI-family clients detect overflow from OpenAI's `context_length_exceeded`
-error code. OpenAI-compatible endpoints (including OpenRouter) that report a different code
-surface a plain `BadRequestError` instead, so this recovery does not trigger for them —
-proactive summarization at `context_summarization_cutoff` remains the primary protection.
+error code. OpenAI-compatible endpoints that report a different code (such as OpenRouter,
+whose error codes depend on the upstream provider) surface a plain `BadRequestError` instead,
+so this recovery does not trigger for them — proactive summarization at
+`context_summarization_cutoff` remains the primary protection.
 
 When overflow happens, the agent removes the latest completed assistant turn. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
 
