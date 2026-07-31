@@ -72,8 +72,8 @@ class LiteLLMClient(LLMClient):
             kwargs: Additional arguments to pass to LiteLLM completion calls
 
         Raises:
-            ValueError: If no model is provided, ``context_window_tokens`` is not a
-                positive int, or ``max_tokens`` exceeds it.
+            ValueError: If no model is provided, ``context_window_tokens`` is not
+                positive, or ``max_tokens`` exceeds it.
         """
         if model_slug is not None:
             warnings.warn(
@@ -85,8 +85,8 @@ class LiteLLMClient(LLMClient):
                 model = model_slug
         if model is None:
             raise ValueError("model is required")
-        if type(context_window_tokens) is not int or context_window_tokens <= 0:
-            raise ValueError(f"context_window_tokens must be a positive int, got {context_window_tokens!r}")
+        if context_window_tokens <= 0:
+            raise ValueError(f"context_window_tokens must be positive, got {context_window_tokens!r}")
         if max_tokens > context_window_tokens:
             raise ValueError(
                 f"max_tokens ({max_tokens}) must not exceed context_window_tokens ({context_window_tokens})"

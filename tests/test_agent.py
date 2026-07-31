@@ -225,8 +225,9 @@ def test_agent_rejects_structural_client_without_context_window_tokens() -> None
         Agent(client=DuckTypedLegacyClient(), name="duck-client-agent", tools=[])  # ty: ignore[invalid-argument-type]
 
 
-def test_agent_rejects_nonpositive_context_window() -> None:
-    client = MockLLMClient([], max_tokens=1_000, context_window_tokens=0)
+@pytest.mark.parametrize("context_window_tokens", [0, True, 64_000.0])
+def test_agent_rejects_context_window_that_is_not_a_positive_int(context_window_tokens: int | float) -> None:
+    client = MockLLMClient([], max_tokens=1_000, context_window_tokens=context_window_tokens)  # ty: ignore[invalid-argument-type]
 
     with pytest.raises(ValueError, match="context_window_tokens must be a positive int"):
         Agent(client=client, name="invalid-context-agent", tools=[])
