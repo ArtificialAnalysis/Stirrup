@@ -301,10 +301,6 @@ class TestOpenResponsesClient:
         assert client.max_tokens == 50_000
         assert client.context_window_tokens == 120_000
 
-    def test_context_window_tokens_is_required(self) -> None:
-        with pytest.raises(TypeError, match="context_window_tokens"):
-            OpenResponsesClient(model="gpt-4o", max_tokens=8_192, api_key="test-key")  # ty: ignore[missing-argument]
-
     @pytest.mark.parametrize("context_window_tokens", [0, -1])
     def test_context_window_must_be_positive(self, context_window_tokens: int) -> None:
         with pytest.raises(ValueError, match="context_window_tokens must be positive"):

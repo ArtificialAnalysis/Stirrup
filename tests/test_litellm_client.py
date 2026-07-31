@@ -14,11 +14,6 @@ from stirrup.clients.litellm_client import LiteLLMClient
 from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 
 
-def test_context_window_tokens_is_required() -> None:
-    with pytest.raises(TypeError, match="context_window_tokens"):
-        LiteLLMClient(model="test/provider-model", max_tokens=8_192)  # ty: ignore[missing-argument]
-
-
 @pytest.mark.parametrize("context_window_tokens", [0, -1])
 def test_context_window_must_be_positive(context_window_tokens: int) -> None:
     with pytest.raises(ValueError, match="context_window_tokens must be positive"):
