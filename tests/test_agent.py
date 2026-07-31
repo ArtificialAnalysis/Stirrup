@@ -44,17 +44,12 @@ class MockLLMClient(LLMClient):
     ) -> None:
         self.responses = responses
         self.call_count = 0
-        self._max_tokens = max_tokens
         self._context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
         self.tools_seen: list[dict[str, Tool]] = []
 
     @property
     def model_slug(self) -> str:
         return "mock-model"
-
-    @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
 
     @property
     def context_window_tokens(self) -> int:

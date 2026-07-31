@@ -308,8 +308,9 @@ class OpenResponsesClient(LLMClient):
             instructions: Default system-level instructions. Can be overridden by
                 SystemMessage in the messages list.
             kwargs: Additional arguments passed to responses.create().
-                Values here override computed request parameters (including the
-                token cap) and bypass constructor validation.
+                Values here override the base request parameters (model, input,
+                and the token cap) and bypass constructor validation; tool,
+                reasoning, and instruction parameters are always set by the client.
 
         Raises:
             ValueError: If ``context_window_tokens`` is not positive, or
