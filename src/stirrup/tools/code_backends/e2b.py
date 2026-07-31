@@ -86,7 +86,7 @@ class E2BCodeExecToolProvider(CodeExecToolProvider):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         provider = E2BCodeExecToolProvider(timeout=600, template="my-template")
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
         agent = Agent(client=client, name="assistant", tools=[provider])
         async with agent.session() as session:
             await session.run("Run Python code")

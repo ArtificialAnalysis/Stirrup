@@ -22,6 +22,8 @@ DEFAULT_OPENROUTER_SLUG = "anthropic/claude-sonnet-4.5"
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
     model=DEFAULT_OPENROUTER_SLUG,
+    max_tokens=8_192,
+    context_window_tokens=50_000,
 )
 
 # Create agent with E2B execution + web tools + calculator

@@ -25,6 +25,8 @@ async def main() -> None:
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
         model="anthropic/claude-sonnet-4.5",
+        max_tokens=8_192,
+        context_window_tokens=64_000,
     )
 
     # Choose your backend:

@@ -322,7 +322,7 @@ class AgentLogger(AgentLoggerBase):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         # Agent creates logger internally by default
-        client = ChatCompletionsClient(model="gpt-4")
+        client = ChatCompletionsClient(model="gpt-4", max_tokens=8_192, context_window_tokens=64_000)
         agent = Agent(client=client, name="assistant")
 
         # Or pass a pre-configured logger

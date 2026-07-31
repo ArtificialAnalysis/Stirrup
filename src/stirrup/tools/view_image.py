@@ -13,7 +13,7 @@ class ViewImageToolProvider(ToolProvider):
     Examples:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
 
         # Explicit exec_env
         exec_env = LocalCodeExecToolProvider()

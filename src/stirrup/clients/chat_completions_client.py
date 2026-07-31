@@ -53,6 +53,7 @@ class ChatCompletionsClient(LLMClient):
         >>> # Custom OpenAI-compatible endpoint
         >>> client = ChatCompletionsClient(
         ...     model="llama-3.1-70b",
+        ...     context_window_tokens=128_000,
         ...     base_url="http://localhost:8000/v1",
         ...     api_key="your-api-key",
         ... )
@@ -63,7 +64,7 @@ class ChatCompletionsClient(LLMClient):
         model: str,
         max_tokens: int = 64_000,
         *,
-        context_window_tokens: int | None = None,
+        context_window_tokens: int,
         base_url: str | None = None,
         api_key: str | None = None,
         reasoning_effort: str | None = None,
@@ -77,7 +78,7 @@ class ChatCompletionsClient(LLMClient):
             model: Model identifier (e.g., 'gpt-5', 'gpt-4o', 'o1-preview').
             max_tokens: Maximum number of tokens the provider may generate. Defaults to 64,000.
             context_window_tokens: Context capacity used to decide when Agent history
-                should be summarized. Defaults to ``max_tokens`` when omitted.
+                should be summarized.
             base_url: API base URL. If None, uses OpenAI's standard URL.
                 Use for OpenAI-compatible providers (e.g., 'http://localhost:8000/v1').
             api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
@@ -92,13 +93,12 @@ class ChatCompletionsClient(LLMClient):
         Raises:
             ValueError: If ``context_window_tokens`` is not positive.
         """
-        resolved_context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
-        if resolved_context_window_tokens <= 0:
+        if context_window_tokens <= 0:
             raise ValueError("context_window_tokens must be positive")
 
         self._model = model
         self._max_tokens = max_tokens
-        self._context_window_tokens = resolved_context_window_tokens
+        self._context_window_tokens = context_window_tokens
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
 

@@ -54,7 +54,7 @@ class LiteLLMClient(LLMClient):
         model: str | None = None,
         max_tokens: int = 64_000,
         *,
-        context_window_tokens: int | None = None,
+        context_window_tokens: int,
         model_slug: str | None = None,
         api_key: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
@@ -66,7 +66,7 @@ class LiteLLMClient(LLMClient):
             model: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
             max_tokens: Maximum number of tokens the provider may generate
             context_window_tokens: Context capacity used to decide when Agent history
-                should be summarized. Defaults to ``max_tokens`` when omitted.
+                should be summarized.
             model_slug: Deprecated. Use model instead.
             reasoning_effort: Reasoning effort level for extended thinking models (e.g., 'medium', 'high')
             kwargs: Additional arguments to pass to LiteLLM completion calls
@@ -84,13 +84,12 @@ class LiteLLMClient(LLMClient):
                 model = model_slug
         if model is None:
             raise ValueError("model is required")
-        resolved_context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
-        if resolved_context_window_tokens <= 0:
+        if context_window_tokens <= 0:
             raise ValueError("context_window_tokens must be positive")
 
         self._model = model
         self._max_tokens = max_tokens
-        self._context_window_tokens = resolved_context_window_tokens
+        self._context_window_tokens = context_window_tokens
         self._reasoning_effort: ReasoningEffort | None = reasoning_effort
         self._api_key = api_key
         self._kwargs = kwargs or {}

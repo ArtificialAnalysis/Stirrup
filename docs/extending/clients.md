@@ -21,12 +21,12 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 | `generate()` | `async method` | Generate next message with optional tool calls |
 | `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
 | `max_tokens` | `property` | Maximum provider response/output tokens |
+| `context_window_tokens` | `property` | Model context capacity the agent summarizes history against |
 
-`context_window_tokens` is an optional client capability, not a member of the
-runtime-checkable `LLMClient` protocol. When it returns a value, that positive
-context capacity is used for Agent summarization calculations. If it is absent or
-`None`, `Agent` falls back to `max_tokens`, preserving compatibility with
-existing custom clients.
+`context_window_tokens` must return a positive integer; `Agent` reads it once at
+construction and summarizes conversation history as usage approaches that
+capacity. There is no fallback to `max_tokens`: a client that does not expose it
+fails at `Agent` construction.
 
 Custom clients that adapt provider stop reasons should raise
 `OutputTokenLimitError` when the provider exhausts the response budget. Reserve
@@ -52,7 +52,8 @@ class MyCustomClient:
         self,
         model: str,
         max_tokens: int = 8_192,
-        context_window_tokens: int | None = None,
+        *,
+        context_window_tokens: int,
         api_key: str | None = None,
     ):
         self._model = model
@@ -69,7 +70,7 @@ class MyCustomClient:
         return self._max_tokens
 
     @property
-    def context_window_tokens(self) -> int | None:
+    def context_window_tokens(self) -> int:
         return self._context_window_tokens
 
     async def generate(
@@ -125,7 +126,8 @@ class OpenAIClient:
         self,
         model: str = "gpt-4o",
         max_tokens: int = 8_192,
-        context_window_tokens: int = 128_000,
+        *,
+        context_window_tokens: int,
     ):
         self._model = model
         self._max_tokens = max_tokens

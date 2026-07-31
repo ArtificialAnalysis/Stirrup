@@ -8,7 +8,7 @@ Example usage:
     from stirrup.tools import default_tools
 
     # As part of default_tools() in Agent
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
     agent = Agent(
         client=client,
         name="assistant",
@@ -440,7 +440,7 @@ class WebToolProvider(ToolProvider):
     Usage as Tool in Agent (preferred):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
         agent = Agent(
             client=client,
             name="assistant",

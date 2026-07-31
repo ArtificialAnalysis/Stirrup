@@ -9,7 +9,7 @@ Example usage:
     from stirrup.tools import default_tools
 
     # With Agent (preferred)
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
     agent = Agent(
         client=client,
         name="assistant",
@@ -216,7 +216,7 @@ class MCPToolProvider(ToolProvider):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
         from stirrup.tools import default_tools
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
         agent = Agent(
             client=client,
             name="assistant",

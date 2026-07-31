@@ -70,6 +70,8 @@ async def main() -> None:
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
         model="anthropic/claude-sonnet-4.5",
+        max_tokens=8_192,
+        context_window_tokens=64_000,
     )
 
     # As no tools are provided, the agent will use the default tools, which consist of:
@@ -133,6 +135,8 @@ For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, us
 client = ChatCompletionsClient(
     base_url="https://api.deepseek.com",
     model="deepseek-chat",  # or "deepseek-reasoner" for R1
+    max_tokens=8_192,
+    context_window_tokens=64_000,
     api_key=os.environ["DEEPSEEK_API_KEY"],
 )
 
@@ -189,6 +193,8 @@ from stirrup.tools import CALCULATOR_TOOL, default_tools
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
     model="anthropic/claude-sonnet-4.5",
+    max_tokens=8_192,
+    context_window_tokens=64_000,
 )
 
 # Create agent with default tools + calculator tool
@@ -236,6 +242,8 @@ GREET_TOOL = Tool(
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
     model="anthropic/claude-sonnet-4.5",
+    max_tokens=8_192,
+    context_window_tokens=64_000,
 )
 
 # Add custom tool to default tools

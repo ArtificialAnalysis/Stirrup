@@ -7,7 +7,7 @@ Example usage:
     from stirrup.tools.mcp import MCPToolProvider
 
     # Create a client for your LLM provider
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
 
     # Simple usage with default tools
     agent = Agent(

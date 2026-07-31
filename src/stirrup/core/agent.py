@@ -272,7 +272,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         # Create client and agent
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
         agent = Agent(client=client, name="assistant")
 
         async with agent.session(output_dir="./output") as session:
@@ -365,6 +365,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         Args:
             client: LLM client for generating responses. Use ChatCompletionsClient for
                     OpenAI/OpenAI-compatible APIs, or LiteLLMClient for other providers.
+                    The client's context_window_tokens (a positive int) decides when
+                    conversation history is summarized; a ValueError is raised otherwise.
             name: Name of the agent (used for logging purposes)
             max_turns: Maximum number of turns before stopping
             system_prompt: System prompt to prepend to all runs (when using string prompts)
@@ -402,9 +404,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         self._client: LLMClient = client
         context_window_tokens = getattr(client, "context_window_tokens", None)
-        self._context_window_tokens = client.max_tokens if context_window_tokens is None else context_window_tokens
-        if self._context_window_tokens <= 0:
-            raise ValueError("context_window_tokens must be positive")
+        if type(context_window_tokens) is not int or context_window_tokens <= 0:
+            raise ValueError(f"client.context_window_tokens must be a positive int, got {context_window_tokens!r}")
+        self._context_window_tokens = context_window_tokens
 
         self._name = name
         self._max_turns = max_turns

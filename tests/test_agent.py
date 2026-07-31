@@ -34,12 +34,18 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
 class MockLLMClient(LLMClient):
-    """Mock LLM client for testing."""
+    """Mock LLM client for testing. context_window_tokens matches max_tokens unless given."""
 
-    def __init__(self, responses: list[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
+    def __init__(
+        self,
+        responses: list[AssistantMessage | Exception],
+        max_tokens: int = 100_000,
+        context_window_tokens: int | None = None,
+    ) -> None:
         self.responses = responses
         self.call_count = 0
         self._max_tokens = max_tokens
+        self._context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
         self.tools_seen: list[dict[str, Tool]] = []
 
     @property
@@ -50,6 +56,10 @@ class MockLLMClient(LLMClient):
     def max_tokens(self) -> int:
         return self._max_tokens
 
+    @property
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
+
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
         self.tools_seen.append(tools)
         response = self.responses[self.call_count]
@@ -57,24 +67,6 @@ class MockLLMClient(LLMClient):
         if isinstance(response, Exception):
             raise response
         return response
-
-
-class ContextWindowLLMClient(MockLLMClient):
-    """Mock client exposing the optional context-window capability."""
-
-    def __init__(
-        self,
-        responses: list[AssistantMessage | Exception],
-        *,
-        max_tokens: int,
-        context_window_tokens: int | None,
-    ) -> None:
-        super().__init__(responses, max_tokens=max_tokens)
-        self._configured_context_window_tokens = context_window_tokens
-
-    @property
-    def context_window_tokens(self) -> int | None:
-        return self._configured_context_window_tokens
 
 
 async def _finish_without_file_validation(params: FinishParams) -> ToolResult[None]:
@@ -177,11 +169,7 @@ async def test_output_limit_does_not_control_context_summarization() -> None:
             token_usage=TokenUsage(),
         ),
     ]
-    client = ContextWindowLLMClient(
-        responses,
-        max_tokens=100,
-        context_window_tokens=64_000,
-    )
+    client = MockLLMClient(responses, max_tokens=100, context_window_tokens=64_000)
     agent = Agent(
         client=client,
         name="separate-budget-agent",
@@ -197,12 +185,9 @@ async def test_output_limit_does_not_control_context_summarization() -> None:
     assert client.call_count == 2
 
 
-async def test_legacy_llmclient_subclass_falls_back_to_max_tokens() -> None:
+def test_agent_rejects_protocol_subclass_without_context_window_override() -> None:
     class LegacyLLMClient(LLMClient):
-        """Client written against the protocol before context budgets were separate."""
-
-        def __init__(self) -> None:
-            self.call_count = 0
+        """Subclass written before context budgets were separate; inherits the protocol's None stub."""
 
         @property
         def model_slug(self) -> str:
@@ -214,68 +199,36 @@ async def test_legacy_llmclient_subclass_falls_back_to_max_tokens() -> None:
 
         async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
             del messages, tools
-            self.call_count += 1
-            return AssistantMessage(
-                content="Done",
-                tool_calls=[
-                    ToolCall(
-                        name=DEFAULT_FINISH_TOOL_NAME,
-                        arguments='{"reason": "done", "paths": []}',
-                        tool_call_id="legacy-finish",
-                    )
-                ],
-                token_usage=TokenUsage(),
-            )
+            raise NotImplementedError
 
-    client = LegacyLLMClient()
-    assert isinstance(client, LLMClient)
-    assert not hasattr(client, "context_window_tokens")
-    agent = Agent(client=client, name="legacy-client-agent", tools=[])
-
-    async with agent.session(cache_on_interrupt=False) as session:
-        finish_params, _history, _metadata = await session.run("complete the task")
-
-    assert finish_params is not None
-    assert client.call_count == 1
+    with pytest.raises(ValueError, match="context_window_tokens must be a positive int"):
+        Agent(client=LegacyLLMClient(), name="legacy-client-agent", tools=[])
 
 
-async def test_none_context_capability_falls_back_to_max_tokens() -> None:
-    responses = [
-        AssistantMessage(content="Working", tool_calls=[], token_usage=TokenUsage(input=800)),
-        AssistantMessage(content="Summary", tool_calls=[], token_usage=TokenUsage()),
-        AssistantMessage(
-            content="Done",
-            tool_calls=[
-                ToolCall(
-                    name=DEFAULT_FINISH_TOOL_NAME,
-                    arguments='{"reason": "done", "paths": []}',
-                    tool_call_id="finish",
-                )
-            ],
-            token_usage=TokenUsage(),
-        ),
-    ]
-    client = ContextWindowLLMClient(responses, max_tokens=1_000, context_window_tokens=None)
-    agent = Agent(
-        client=client,
-        name="none-context-agent",
-        max_turns=2,
-        tools=[],
-        context_summarization_cutoff=0.7,
-    )
+def test_agent_rejects_structural_client_without_context_window_tokens() -> None:
+    class DuckTypedLegacyClient:
+        """Structural client with no context_window_tokens attribute at all."""
 
-    async with agent.session(cache_on_interrupt=False) as session:
-        finish_params, history, _metadata = await session.run("complete the task")
+        @property
+        def model_slug(self) -> str:
+            return "duck-model"
 
-    assert finish_params is not None
-    assert client.call_count == 3
-    assert any(isinstance(message, SummaryMessage) for message in history[-1])
+        @property
+        def max_tokens(self) -> int:
+            return 1_000
+
+        async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+            del messages, tools
+            raise NotImplementedError
+
+    with pytest.raises(ValueError, match="context_window_tokens must be a positive int"):
+        Agent(client=DuckTypedLegacyClient(), name="duck-client-agent", tools=[])  # ty: ignore[invalid-argument-type]
 
 
-def test_agent_rejects_nonpositive_resolved_context_window() -> None:
-    client = ContextWindowLLMClient([], max_tokens=1_000, context_window_tokens=0)
+def test_agent_rejects_nonpositive_context_window() -> None:
+    client = MockLLMClient([], max_tokens=1_000, context_window_tokens=0)
 
-    with pytest.raises(ValueError, match="context_window_tokens must be positive"):
+    with pytest.raises(ValueError, match="context_window_tokens must be a positive int"):
         Agent(client=client, name="invalid-context-agent", tools=[])
 
 

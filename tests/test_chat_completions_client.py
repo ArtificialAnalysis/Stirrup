@@ -28,10 +28,9 @@ def _client_with_provider_call(monkeypatch: pytest.MonkeyPatch, provider_call: A
     return ChatCompletionsClient(model="gpt-4o", api_key="test-key", context_window_tokens=64_000)
 
 
-def test_context_window_defaults_to_max_tokens() -> None:
-    client = ChatCompletionsClient(model="gpt-4o", api_key="test-key", max_tokens=8_192)
-
-    assert client.context_window_tokens == 8_192
+def test_context_window_tokens_is_required() -> None:
+    with pytest.raises(TypeError, match="context_window_tokens"):
+        ChatCompletionsClient(model="gpt-4o", api_key="test-key", max_tokens=8_192)  # ty: ignore[missing-argument]
 
 
 @pytest.mark.parametrize("context_window_tokens", [0, -1])

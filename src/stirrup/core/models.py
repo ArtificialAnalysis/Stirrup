@@ -596,6 +596,9 @@ class LLMClient(Protocol):
     @property
     def max_tokens(self) -> int: ...
 
+    @property
+    def context_window_tokens(self) -> int: ...
+
 
 class ToolCall(BaseModel):
     """Represents a tool invocation request from the LLM.

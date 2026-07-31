@@ -289,8 +289,7 @@ class TestOpenResponsesClient:
     """Tests for OpenResponsesClient class."""
 
     def test_client_properties(self) -> None:
-        """Test client property accessors and context-window fallback."""
-        default_context_client = OpenResponsesClient(model="gpt-4o", max_tokens=8_192, api_key="test-key")
+        """Test client property accessors."""
         client = OpenResponsesClient(
             model="gpt-4o",
             max_tokens=50_000,
@@ -298,10 +297,13 @@ class TestOpenResponsesClient:
             api_key="test-key",
         )
 
-        assert default_context_client.context_window_tokens == 8_192
         assert client.model_slug == "gpt-4o"
         assert client.max_tokens == 50_000
         assert client.context_window_tokens == 120_000
+
+    def test_context_window_tokens_is_required(self) -> None:
+        with pytest.raises(TypeError, match="context_window_tokens"):
+            OpenResponsesClient(model="gpt-4o", max_tokens=8_192, api_key="test-key")  # ty: ignore[missing-argument]
 
     @pytest.mark.parametrize("context_window_tokens", [0, -1])
     def test_context_window_must_be_positive(self, context_window_tokens: int) -> None:
@@ -317,6 +319,7 @@ class TestOpenResponsesClient:
         """Test basic generation with mocked response."""
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
         )
 
@@ -354,6 +357,7 @@ class TestOpenResponsesClient:
 
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
         )
 
@@ -395,6 +399,7 @@ class TestOpenResponsesClient:
         """Test that reasoning tokens are properly extracted."""
         client = OpenResponsesClient(
             model="o1-preview",
+            context_window_tokens=64_000,
             api_key="test-key",
             reasoning_effort="medium",
         )
@@ -461,7 +466,7 @@ class TestOpenResponsesClient:
 
     @pytest.mark.asyncio
     async def test_context_length_rejection_surfaces_as_context_overflow(self) -> None:
-        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        client = OpenResponsesClient(model="gpt-4o", context_window_tokens=64_000, api_key="test-key")
         response = httpx.Response(
             400,
             json={"error": {"message": "boom", "type": "invalid_request_error", "code": "context_length_exceeded"}},
@@ -476,7 +481,7 @@ class TestOpenResponsesClient:
 
     @pytest.mark.asyncio
     async def test_non_output_limit_incomplete_raises_stirrup_error(self) -> None:
-        client = OpenResponsesClient(model="gpt-4o", api_key="test-key")
+        client = OpenResponsesClient(model="gpt-4o", context_window_tokens=64_000, api_key="test-key")
         mock_response = MagicMock(
             status="incomplete",
             incomplete_details=SimpleNamespace(reason="content_filter"),
@@ -493,6 +498,7 @@ class TestOpenResponsesClient:
         """Test that SystemMessage is passed as instructions parameter."""
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
         )
 
@@ -532,6 +538,7 @@ class TestOpenResponsesClient:
         """Test that default instructions are used when no SystemMessage provided."""
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
             instructions="Default instructions",
         )

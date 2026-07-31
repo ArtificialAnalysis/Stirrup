@@ -26,6 +26,8 @@ async def main() -> None:
     # For reasoning models, you can set reasoning_effort
     client = OpenResponsesClient(
         model="gpt-5.2",
+        max_tokens=8_192,
+        context_window_tokens=64_000,
         reasoning_effort="medium",
     )
 

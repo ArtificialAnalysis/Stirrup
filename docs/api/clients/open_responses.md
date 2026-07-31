@@ -26,7 +26,7 @@ For models that support extended thinking (like o1/o3), you can configure the re
 |-----------|------|---------|-------------|
 | `model` | `str` | required | Model identifier (e.g., `"gpt-4o"`, `"o1"`) |
 | `max_tokens` | `int` | `64_000` | Maximum output tokens |
-| `context_window_tokens` | `int \| None` | `None` | Context capacity for summarization; defaults to `max_tokens` |
+| `context_window_tokens` | `int` | required | Context capacity for summarization |
 | `base_url` | `str \| None` | `None` | Custom API base URL |
 | `api_key` | `str \| None` | `None` | API key (falls back to `OPENAI_API_KEY` env var) |
 | `reasoning_effort` | `str \| None` | `None` | Reasoning effort for o1/o3 models: `"low"`, `"medium"`, `"high"` |
