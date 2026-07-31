@@ -455,6 +455,11 @@ By default, Stirrup retries context overflow errors by shortening the conversati
 An output-limit stop is different: `OutputTokenLimitError` surfaces without
 summarization or retry with the same `max_tokens` limit.
 
+The built-in OpenAI-family clients detect overflow from OpenAI's `context_length_exceeded`
+error code. OpenAI-compatible endpoints (including OpenRouter) that report a different code
+surface a plain `BadRequestError` instead, so this recovery does not trigger for them —
+proactive summarization at `context_summarization_cutoff` remains the primary protection.
+
 When overflow happens, the agent removes the latest completed assistant turn. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
 
 This also applies when eager summarization overflows. Any removed turn is also removed from final metadata and does not count against `max_turns`.

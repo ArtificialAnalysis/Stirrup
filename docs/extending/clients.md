@@ -206,6 +206,10 @@ class MockClient:
     def max_tokens(self) -> int:
         return 10_000
 
+    @property
+    def context_window_tokens(self) -> int:
+        return 100_000
+
     async def generate(self, messages, tools) -> AssistantMessage:
         response = self._responses[self._call_count]
         self._call_count += 1
