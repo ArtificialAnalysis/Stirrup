@@ -131,6 +131,7 @@ class TestLocalCodeExecToolProvider:
             (r"^echo", "echo allowed & printf bypassed"),
             (r"^echo", "echo allowed >output.txt"),
             (r"^echo", "echo allowed;printf bypassed"),
+            (r"^echo", "echo '|' --format='%h;%s';printf bypassed"),
             (r"^echo", "echo allowed 2>&1"),
             (r"^echo", "echo allowed\nprintf bypassed"),
             (r"^printf", "printf 'a\nb'\nls"),
@@ -246,6 +247,8 @@ class TestLocalCodeExecToolProvider:
             ("find . -exec echo {} ';'", ".\n"),
             # A quote opened mid-argument still quotes the operator after it.
             ("echo --format='%h;%s'", "--format=%h;%s\n"),
+            # Different quoted forms can coexist without becoming shell syntax.
+            ("echo '|' --format='%h;%s'", "| --format=%h;%s\n"),
             # Without a shell there is no expansion: variables and globs are
             # passed through as literal argument bytes, so home-directory
             # spellings cannot leave the temp directory.

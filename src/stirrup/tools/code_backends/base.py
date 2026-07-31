@@ -177,38 +177,30 @@ def _reserve_output_destination(
     reserved[identity] = claimant
 
 
-def _operator_tokens(cmd: str, *, posix: bool) -> list[str]:
-    """Return the tokens of cmd that are made only of operator characters.
+def _contains_unquoted_shell_operator(cmd: str) -> bool:
+    """Return whether cmd contains shell punctuation outside quotes or escapes.
 
-    Uses shlex punctuation mode, which splits runs of operator characters into
-    their own tokens unless they are quoted or escaped. This catches operators
-    attached to a word (``>out.txt``, ``foo;rm``). Newline counts as an
-    operator, not whitespace. Raises ValueError on unbalanced quotes.
+    ``shlex.split`` validates and parses the command, but its result no longer
+    records which characters were quoted. This scan keeps only that missing
+    source-level fact; it does not try to parse or execute shell syntax.
     """
-    lex = shlex.shlex(cmd, posix=posix, punctuation_chars=_SHELL_PUNCTUATION)
-    lex.commenters = ""  # '#' is an ordinary character to shlex.split, so it must be here too
-    lex.whitespace = " \t\r"
-    lex.whitespace_split = True
-    return [token for token in lex if token and all(c in _SHELL_PUNCTUATION for c in token)]
+    quote: str | None = None
+    escaped = False
 
+    for char in cmd:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif char == quote:
+                quote = None
+        elif quote is None and char in _SHELL_PUNCTUATION:
+            return True
 
-def _unquoted_operator_tokens(cmd: str) -> list[str]:
-    """Return any unquoted shell operator tokens in cmd.
-
-    Neither shlex mode alone can tell a bare operator from a quoted literal:
-    POSIX mode removes the quotes before we classify a token, so ``'|'`` and
-    ``-exec ls {} ';'`` look like operators, while non-POSIX mode keeps the
-    quotes but only honours them at the start of a token, so it misreads
-    ``--format='%h;%s'`` and ``a\\;b``. Neither mode can miss a real operator —
-    every character POSIX treats as unquoted is unquoted in non-POSIX mode too
-    — so a command is only rejected when both modes report one.
-
-    Raises ValueError on unbalanced quotes.
-    """
-    posix_operators = _operator_tokens(cmd, posix=True)
-    if not posix_operators or not _operator_tokens(cmd, posix=False):
-        return []
-    return posix_operators
+    return False
 
 
 class CodeExecutionParams(BaseModel):
@@ -507,12 +499,11 @@ class CodeExecToolProvider(ToolProvider, ABC):
             return None, None
         try:
             argv = shlex.split(cmd)
-            operator_tokens = _unquoted_operator_tokens(cmd)
         except ValueError:
             return None, self._rejection(cmd, "shell_syntax")
         if not argv:
             return None, self._rejection(cmd, "empty_command")
-        if operator_tokens:
+        if _contains_unquoted_shell_operator(cmd):
             return None, self._rejection(cmd, "shell_syntax")
         if "=" in argv[0]:
             return None, self._rejection(cmd, "shell_assignment")
