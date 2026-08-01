@@ -79,6 +79,11 @@ actual emission order. `blocks` is the only stored content; the channel-era
   neither string nor list fails validation instead of being dropped; agent
   summarization raises if the summarizer returns no text instead of replacing
   history with an empty summary.
+- Before that raise, the summarizer now retries a text-less response twice: once
+  with an explicit text-only warning appended, then with tools withheld from the
+  request (definitions rendered as text) so a tool-call-only answer is
+  structurally impossible — small tool-happy models otherwise fail every
+  summarization.
 - v0.1 cache keys are tried as a fallback for losslessly projectable initial
   assistant messages, then migrated to the v0.2 key on the next save. Uniform
   legacy content encodings are exhaustive; mixed scalar/list encodings are

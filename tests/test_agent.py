@@ -1488,6 +1488,91 @@ async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
 
 
+def _tool_call_only_response() -> AssistantMessage:
+    return AssistantMessage(
+        blocks=[ToolCall(name="some_tool", arguments="{}", tool_call_id="call_no_text")],
+        token_usage=TokenUsage(input=200, answer=50),
+    )
+
+
+async def test_summarizer_tool_call_only_escalates_to_toolless_retry() -> None:
+    """A summarizer that answers with only tool calls is retried, finally without tools."""
+    responses = [
+        AssistantMessage(
+            blocks=[TextBlock(text="Working on it")],
+            token_usage=TokenUsage(input=250, answer=100),
+        ),
+        _tool_call_only_response(),
+        _tool_call_only_response(),
+        AssistantMessage(
+            blocks=[TextBlock(text="Summary at last.")],
+            token_usage=TokenUsage(input=200, answer=50),
+        ),
+        AssistantMessage(
+            blocks=[
+                TextBlock(text="Done"),
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Completed", "paths": []}',
+                    tool_call_id="call_finish",
+                ),
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses, max_tokens=1000)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run(
+            [SystemMessage(content="System prompt"), UserMessage(content="Do the task")]
+        )
+
+    assert finish_params is not None
+    assert finish_params.reason == "Completed"
+    # Calls: turn 1, three summarizer attempts, finish turn.
+    assert client.call_count == 5
+    # The first two summarizer attempts keep the active tools; the last withholds them.
+    assert client.tools_seen[1] == client.tools_seen[0]
+    assert client.tools_seen[2] == client.tools_seen[0]
+    assert client.tools_seen[3] == {}
+    assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+async def test_summarizer_tool_call_only_exhausts_retries_and_raises() -> None:
+    responses = [
+        AssistantMessage(
+            blocks=[TextBlock(text="Working on it")],
+            token_usage=TokenUsage(input=250, answer=100),
+        ),
+        _tool_call_only_response(),
+        _tool_call_only_response(),
+        _tool_call_only_response(),
+    ]
+
+    client = MockLLMClient(responses, max_tokens=1000)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    with pytest.raises(RuntimeError, match="no text blocks"):
+        async with agent.session() as session:
+            await session.run([SystemMessage(content="System prompt"), UserMessage(content="Do the task")])
+
+
 async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_directory() -> None:
     """A shared sub-agent reports a usable relative path and never endorses a directory."""
     from stirrup.tools.code_backends.local import LocalCodeExecToolProvider

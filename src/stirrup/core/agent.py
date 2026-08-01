@@ -43,7 +43,7 @@ from stirrup.core.models import (
     joined_text,
     tool_call_blocks,
 )
-from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
+from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE, MESSAGE_SUMMARIZER_TEXT_ONLY
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
 from stirrup.tools import DEFAULT_TOOLS
 from stirrup.tools.code_backends.base import (
@@ -1320,17 +1320,34 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), current_messages)
                 )
 
-                summary_prompt = [*current_messages, UserMessage(content=MESSAGE_SUMMARIZER)]
-
-                # Give the summarizer the active tools so it can interpret prior tool calls/results.
-                summary = await self._client.generate(summary_prompt, self._active_tools)
+                # Give the summarizer the active tools so it can interpret prior tool
+                # calls/results. Some models answer with only a tool call despite the
+                # prompt telling them not to, so escalate: repeat with an explicit
+                # text-only warning, then withhold the tools entirely (rendered as
+                # text) so a tool call is structurally impossible.
+                text_only_prompt = f"{MESSAGE_SUMMARIZER}\n\n{MESSAGE_SUMMARIZER_TEXT_ONLY}"
+                tool_docs = "\n".join(f"- {tool.name}: {tool.description}" for tool in self._active_tools.values())
+                no_tools_prompt = (
+                    f"{text_only_prompt}\n\nTools are disabled for this response. "
+                    f"For reference, the tools available earlier in the conversation were:\n{tool_docs}"
+                )
+                attempts: list[tuple[str, dict[str, Tool]]] = [
+                    (MESSAGE_SUMMARIZER, self._active_tools),
+                    (text_only_prompt, self._active_tools),
+                    (no_tools_prompt, {}),
+                ]
+                summary_content: str | None = None
+                for prompt, tools in attempts:
+                    summary = await self._client.generate([*current_messages, UserMessage(content=prompt)], tools)
+                    summary_content = joined_text(summary.blocks)
+                    if summary_content is not None:
+                        break
+                    logger.warning("Summarizer response contained no text blocks; retrying summarization")
 
                 removed = current_messages[len(task_context) :]
-                summary_content = joined_text(summary.blocks)
                 if summary_content is None:
-                    # The summarizer holds the active tools, so it can answer with only a
-                    # tool call; replacing history with an empty summary would silently
-                    # erase all context past task_context.
+                    # Replacing history with an empty summary would silently erase all
+                    # context past task_context, so give up loudly instead.
                     raise RuntimeError("Summarizer response contained no text blocks; cannot summarize context")
                 summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_content)
                 # Chain lineage across summarization rounds: a removed prior summary
