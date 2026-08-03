@@ -95,8 +95,12 @@ characters are just text: `echo 'a;b'`, `grep 'foo$' file`, and
   `$(...)`/backtick substitution. This includes operators attached to a word,
   like `>out.txt`.
 - Leading assignments (`MODE=test command`) are rejected.
-- Anything that can't be parsed — unterminated quotes, Bash-only `$'...'` —
-  is rejected.
+- Anything that can't be parsed — an unterminated quote, for instance — is
+  rejected.
+- Bash-only `$'...'` is not ANSI-C quoting here. The `$` stays a literal
+  character and the escapes inside are not processed, so `echo $'a\tb'` prints
+  `$a\tb`. Spellings that rely on `\'` are rejected, but only because the
+  quote ends up unbalanced.
 
 **Caveats.** Allowlisting `bash`, `sh`, or `env` hands over control of
 whatever they run. If a task needs environment setup, allowlist a script
