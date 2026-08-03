@@ -19,7 +19,7 @@ agent = Agent(
     name="my_agent",                                      # (required) Agent name for logging
     max_turns=30,                                         # (default: 30) Max iterations before stopping
     system_prompt="You are an agent specializing in ...", # (default: None) Instructions prepended to runs
-    tools=None,                                           # (default: DEFAULT_TOOLS) Available tools
+    tools=None,                                           # (default: default_tools()) Available tools
     finish_tool=None,                                     # (default: SIMPLE_FINISH_TOOL) Completion signal(s)
     context_summarization_cutoff=0.7,                     # (default: 0.7) Context % before summarization
     run_sync_in_thread=True,                              # (default: True) Run sync tools in thread
@@ -38,7 +38,7 @@ agent = Agent(
     | `name` | `str` | required | Agent name for logging |
     | `max_turns` | `int` | `30` | Maximum turns before stopping |
     | `system_prompt` | `str \| None` | `None` | System prompt prepended to runs |
-    | `tools` | `list[Tool \| ToolProvider] \| None` | `DEFAULT_TOOLS` | Available tools |
+    | `tools` | `list[Tool \| ToolProvider] \| None` | `default_tools()` | Available tools |
     | `finish_tool` | `Tool \| list[Tool]` | `SIMPLE_FINISH_TOOL` | Tool(s) to signal completion |
     | `context_summarization_cutoff` | `float` | `0.7` | Context % before summarization |
     | `run_sync_in_thread` | `bool` | `True` | Run sync tools in separate thread |
@@ -223,6 +223,14 @@ The agent receives a list of available skills in its system prompt and can read 
 
 Stirrup supports multiple ways to connect to LLM providers.
 
+`max_tokens` and `context_window_tokens` are separate budgets: the first caps a single response,
+the second is the model context capacity the agent summarizes history against. Built-in clients
+require `context_window_tokens` at construction and reject `max_tokens` values that exceed it —
+note the default `max_tokens` is `64_000`, so small context windows need an explicit `max_tokens`
+too. The examples in this repository pair an explicit `max_tokens=8_192` response budget with an
+explicit context window. Exceeding a response budget raises `OutputTokenLimitError` and aborts
+the run rather than retrying, so increase `max_tokens` if your task needs long responses.
+
 ### ChatCompletionsClient
 
 Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
@@ -233,8 +241,9 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | `str` | required | Model identifier (e.g., `"gpt-5"`, `"deepseek-chat"`) |
-| `max_tokens` | `int` | `64_000` | Context window size |
+| `model` | `str` | required | Model identifier (e.g., `"gpt-5.6-luna"`, `"deepseek-v4-flash"`) |
+| `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
+| `context_window_tokens` | `int` | required | Context capacity for summarization |
 | `base_url` | `str \| None` | `None` | Custom API URL (for Deepseek, vLLM, etc.) |
 | `api_key` | `str \| None` | `None` | API key (defaults to `OPENROUTER_API_KEY` env var) |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
@@ -250,9 +259,10 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-sonnet-4-5"`) |
-| `max_tokens` | `int` | required | Context window size |
-| `reasoning_effort` | `str \| None` | `None` | For reasoning models (o1/o3) |
+| `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-opus-5"`) |
+| `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
+| `context_window_tokens` | `int` | required | Context capacity for summarization |
+| `reasoning_effort` | `str \| None` | `None` | For reasoning models (e.g. GPT-5.6) |
 | `kwargs` | `dict \| None` | `None` | Additional provider-specific arguments |
 
 !!! note "LiteLLM Installation"
@@ -275,22 +285,25 @@ class MyCustomClient(LLMClient):
         return "my-model"
 
     @property
-    def max_tokens(self) -> int:
+    def context_window_tokens(self) -> int:
         return 128_000
 ```
+
+`Agent` reads `context_window_tokens` at construction and raises a `ValueError`
+when the returned value is not a positive int.
 
 → See [Custom Clients](extending/clients.md) for full documentation.
 
 ## Tools
 
-### DEFAULT_TOOLS
+### default_tools()
 
-When you create an Agent without specifying tools, it uses `DEFAULT_TOOLS`:
+When you create an Agent without specifying tools, it uses `default_tools()`:
 
 ```python
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
-# DEFAULT_TOOLS contains:
+# default_tools() returns a fresh list containing:
 # - LocalCodeExecToolProvider() → provides "code_exec" tool
 # - WebToolProvider() → provides "web_fetch" and "web_search" tools
 ```
@@ -299,6 +312,13 @@ from stirrup.tools import DEFAULT_TOOLS
 |--------------|----------------|-------------|
 | `LocalCodeExecToolProvider` | `code_exec` | Execute shell commands in an isolated temp directory |
 | `WebToolProvider` | `web_fetch`, `web_search` | Fetch web pages and search (search requires `BRAVE_API_KEY`) |
+
+Each call returns fresh provider instances. Provider instances hold per-session state (a temp
+directory, an HTTP client), so concurrent sessions must not share them.
+
+**Breaking change:** the `DEFAULT_TOOLS` list was removed because every caller shared the same two
+provider instances. Migrate `tools=DEFAULT_TOOLS` to `tools=default_tools()`, and
+`tools=[*DEFAULT_TOOLS, extra_tool]` to `tools=[*default_tools(), extra_tool]`.
 
 #### Extending vs Replacing
 
@@ -448,6 +468,14 @@ print(f"Total tokens: {aggregated['token_usage'].total}")
 ### Context Overflow Recovery
 
 By default, Stirrup retries context overflow errors by shortening the conversation and trying again.
+An output-limit stop is different: `OutputTokenLimitError` surfaces without
+summarization or retry with the same `max_tokens` limit.
+
+The built-in OpenAI-family clients detect overflow from OpenAI's `context_length_exceeded`
+error code. OpenAI-compatible endpoints that report a different code (such as OpenRouter,
+whose error codes depend on the upstream provider) surface a plain `BadRequestError` instead,
+so this recovery does not trigger for them — proactive summarization at
+`context_summarization_cutoff` remains the primary protection.
 
 When overflow happens, the agent removes the latest completed assistant turn. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
 
@@ -462,6 +490,15 @@ agent = Agent(
     recover_from_context_overflow=False,
 )
 ```
+
+Recovery only covers `ContextOverflowError`. Two other client failures deliberately abort the run:
+
+- Summarization is itself a model call, so `summarize_messages` can raise `OutputTokenLimitError`
+  out of `session.run()` even though you never call it directly. Retrying it with the same
+  `max_tokens` cannot succeed, so it is not recovered.
+- `OpenResponsesClient` raises `IncompleteResponseError` for incomplete responses that are not
+  output-limit stops, such as `incomplete_details.reason == "content_filter"`. Before token
+  budgets were split these unwound a turn and retried; only context overflow does that now.
 
 ## Logging
 

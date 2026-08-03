@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 try:
     from litellm import acompletion
-    from litellm.exceptions import APIConnectionError, RateLimitError, Timeout
+    from litellm.exceptions import APIConnectionError, ContextWindowExceededError, RateLimitError, Timeout
 except ImportError as e:
     raise ImportError(
         "Requires installation of the litellm extra. "
@@ -22,8 +22,8 @@ except ImportError as e:
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.clients.utils import to_openai_messages, to_openai_tools
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.clients.utils import to_openai_messages, to_openai_tools, validate_token_budgets
+from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantBlock,
     AssistantMessage,
@@ -78,6 +78,7 @@ class LiteLLMClient(LLMClient):
         model: str | None = None,
         max_tokens: int = 64_000,
         *,
+        context_window_tokens: int,
         model_slug: str | None = None,
         api_key: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
@@ -86,11 +87,20 @@ class LiteLLMClient(LLMClient):
         """Initialize LiteLLM client with model configuration and capabilities.
 
         Args:
-            model: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
-            max_tokens: Maximum context window size in tokens
+            model: Model identifier for LiteLLM (e.g., 'anthropic/claude-opus-5')
+            max_tokens: Maximum number of tokens the provider may generate
+            context_window_tokens: Context capacity used to decide when Agent history
+                should be summarized.
             model_slug: Deprecated. Use model instead.
             reasoning_effort: Reasoning effort level for extended thinking models (e.g., 'medium', 'high')
-            kwargs: Additional arguments to pass to LiteLLM completion calls
+            kwargs: Additional arguments to pass to LiteLLM completion calls.
+                Keys that collide with the arguments this client sets (including
+                ``max_tokens``) raise TypeError at request time; other keys pass
+                through unvalidated.
+
+        Raises:
+            ValueError: If no model is provided, ``context_window_tokens`` is not
+                positive, or ``max_tokens`` exceeds it.
         """
         if model_slug is not None:
             warnings.warn(
@@ -102,16 +112,24 @@ class LiteLLMClient(LLMClient):
                 model = model_slug
         if model is None:
             raise ValueError("model is required")
+        validate_token_budgets(max_tokens, context_window_tokens)
+
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._reasoning_effort: ReasoningEffort | None = reasoning_effort
         self._api_key = api_key
         self._kwargs = kwargs or {}
 
     @property
     def max_tokens(self) -> int:
-        """Maximum context window size in tokens."""
+        """Maximum number of tokens the provider may generate."""
         return self._max_tokens
+
+    @property
+    def context_window_tokens(self) -> int:
+        """Context capacity used by agents for history summarization."""
+        return self._context_window_tokens
 
     @property
     def model_slug(self) -> str:
@@ -126,23 +144,28 @@ class LiteLLMClient(LLMClient):
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
         """Generate assistant response with optional tool calls. Retries up to 3 times on timeout/connection errors."""
         request_start_time = perf_counter()
-        r = await acompletion(
-            model=self.model_slug,
-            messages=to_openai_messages(messages, allow_tool_call_signatures=True),
-            tools=to_openai_tools(tools) if tools else None,
-            tool_choice="auto" if tools else None,
-            max_tokens=self._max_tokens,
-            reasoning_effort=self._reasoning_effort,
-            api_key=self._api_key,
-            **self._kwargs,
-        )
+        try:
+            r = await acompletion(
+                model=self.model_slug,
+                messages=to_openai_messages(messages, allow_tool_call_signatures=True),
+                tools=to_openai_tools(tools) if tools else None,
+                tool_choice="auto" if tools else None,
+                max_tokens=self._max_tokens,
+                reasoning_effort=self._reasoning_effort,
+                api_key=self._api_key,
+                **self._kwargs,
+            )
+        except ContextWindowExceededError as e:
+            raise ContextOverflowError(str(e)) from e
         request_end_time = perf_counter()
 
         choice = r["choices"][0]
 
-        if choice.finish_reason in ["max_tokens", "length"]:
-            raise ContextOverflowError(
-                f"Maximal context window tokens reached for model {self.model_slug}, resulting in finish reason: {choice.finish_reason}. Reduce agent.max_tokens and try again."
+        if choice.finish_reason in ("max_tokens", "length"):
+            raise OutputTokenLimitError(
+                model_slug=self.model_slug,
+                max_tokens=self._max_tokens,
+                provider_reason=choice.finish_reason,
             )
 
         msg = choice["message"]

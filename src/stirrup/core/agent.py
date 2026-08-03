@@ -45,7 +45,7 @@ from stirrup.core.models import (
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE, MESSAGE_SUMMARIZER_TEXT_ONLY
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 from stirrup.tools.code_backends.base import (
     CodeExecToolProvider,
     SavedFile,
@@ -115,6 +115,15 @@ def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessa
     return TurnWarningMessage(
         content=f"You have {number_of_turns_remaining} turns remaining to complete the task. Please continue. Remember you will need a separate turn to call a finish tool.",
     )
+
+
+def _tool_arguments_json(tool_call: ToolCall) -> str:
+    """Return the call's arguments as JSON, treating an empty string as no arguments.
+
+    Clients coerce a missing arguments field to "", so every site that validates a call
+    must normalize it the same way.
+    """
+    return tool_call.arguments if tool_call.arguments.strip() else "{}"
 
 
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
@@ -265,7 +274,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         # Create client and agent
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(client=client, name="assistant")
 
         async with agent.session(output_dir="./output") as session:
@@ -358,13 +367,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         Args:
             client: LLM client for generating responses. Use ChatCompletionsClient for
                     OpenAI/OpenAI-compatible APIs, or LiteLLMClient for other providers.
+                    The client's context_window_tokens (a positive int) decides when
+                    conversation history is summarized; a ValueError is raised otherwise.
             name: Name of the agent (used for logging purposes)
             max_turns: Maximum number of turns before stopping
             system_prompt: System prompt to prepend to all runs (when using string prompts)
             tools: List of Tools and/or ToolProviders available to the agent.
-                   If None, uses DEFAULT_TOOLS. ToolProviders are automatically
+                   If None, uses default_tools(). ToolProviders are automatically
                    set up and torn down by Agent.session().
-                   Use [*DEFAULT_TOOLS, extra_tool] to extend defaults.
+                   Use [*default_tools(), extra_tool] to extend defaults.
             finish_tool: Tool or list of Tools used to signal task completion.
                          Defaults to SIMPLE_FINISH_TOOL. If a list is provided,
                          a successful call to any listed tool ends the run.
@@ -394,10 +405,22 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
         self._client: LLMClient = client
+        context_window_tokens = client.context_window_tokens
+        if (
+            isinstance(context_window_tokens, bool)
+            or not isinstance(context_window_tokens, int)
+            or context_window_tokens <= 0
+        ):
+            raise ValueError(
+                f"client.context_window_tokens must be a positive int, "
+                f"got {context_window_tokens!r} ({type(context_window_tokens).__name__})"
+            )
+        self._context_window_tokens = context_window_tokens
+
         self._name = name
         self._max_turns = max_turns
         self._system_prompt = system_prompt
-        self._tools = tools if tools is not None else DEFAULT_TOOLS
+        self._tools = tools if tools is not None else default_tools()
         self._finish_tools: dict[str, Tool[Any, Any]] = _normalize_finish_tools(finish_tool)
         self._context_summarization_cutoff = context_summarization_cutoff
         self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
@@ -606,8 +629,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 )
                 break
 
-        # Check for missing default tools (across entire agent tree)
-        for default_tool in DEFAULT_TOOLS:
+        # Check for missing default tools (across entire agent tree).
+        # These throwaway instances are only inspected for their types; constructing
+        # them costs nothing and keeps this check in step with default_tools().
+        for default_tool in default_tools():
             default_type = type(default_tool)
 
             # Special case: For code exec providers, check if ANY CodeExecToolProvider is present
@@ -1145,9 +1170,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         if tool:
             try:
-                # Normalize empty arguments to valid empty JSON object
-                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
-                params = tool.parameters.model_validate_json(args)
+                params = tool.parameters.model_validate_json(_tool_arguments_json(tool_call))
 
                 # Set parent depth for sub-agent tools to read
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)
@@ -1232,12 +1255,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 return True
         return False
 
-    @staticmethod
-    def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
+    def _context_boundary_error(self, messages: list[ChatMessage]) -> ContextOverflowError:
         boundary = (
             "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
         )
-        return ContextOverflowError(f"Context overflow reached the {boundary}")
+        return ContextOverflowError(
+            f"Context overflow reached the {boundary} "
+            f"(configured context_window_tokens={self._context_window_tokens}; providers that count "
+            "the response budget inside the context window leave less room for input)"
+        )
 
     async def step(
         self,
@@ -1255,6 +1281,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             max_turns: Maximum turns for logging
 
         Returns the assistant message, tool execution results, and finish tool call (if present).
+        There is one tool result per requested call, ordered as the calls were executed: every
+        ordinary call first, then any finish call.
 
         """
         assistant_message = await self._client.generate(messages, self._active_tools)
@@ -1273,10 +1301,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             finish_call_names = [tc.name for tc in tool_calls if tc.name in self._finish_tools]
             reject_all_finish_calls = len(finish_call_names) > 1
 
-            tool_messages = []
-            for tool_call in tool_calls:
+            # Every ordinary call runs before any finish call, so a successful finish is always the
+            # last thing that happens in the turn and no side effect can follow the run ending.
+            # `sorted` is stable, so calls keep their relative order within each group. The returned
+            # messages are in this execution order; providers match them to calls by tool_call_id.
+            for tool_call in sorted(tool_calls, key=lambda tc: tc.name in self._finish_tools):
                 if reject_all_finish_calls and tool_call.name in self._finish_tools:
-                    now = perf_counter()
                     tool_message = ToolMessage(
                         content=(
                             f"Cannot call finish tool '{tool_call.name}': multiple finish tools "
@@ -1286,23 +1316,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         ),
                         tool_call_id=tool_call.tool_call_id,
                         name=tool_call.name,
-                        args_was_valid=True,
                         success=False,
-                        tool_start_time=now,
-                        tool_end_time=now,
                     )
-                    tool_messages.append(tool_message)
-                    self._logger.tool_result(tool_message)
-                    continue
+                else:
+                    tool_message = await self.run_tool(tool_call, run_metadata)
+                    if tool_message.success and tool_message.name in self._finish_tools:
+                        finish_tool = self._finish_tools[tool_message.name]
+                        finish_params = finish_tool.parameters.model_validate_json(_tool_arguments_json(tool_call))
 
-                tool_message = await self.run_tool(tool_call, run_metadata)
                 tool_messages.append(tool_message)
-
-                if tool_message.success and tool_message.name in self._finish_tools:
-                    finish_tool = self._finish_tools[tool_message.name]
-                    finish_params = finish_tool.parameters.model_validate_json(tool_call.arguments)
-
-                # Log tool result immediately
                 self._logger.tool_result(tool_message)
 
         return assistant_message, tool_messages, finish_params
@@ -1555,7 +1577,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if finish_params:
                 break
 
-            pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
+            pct_context_used = assistant_message.token_usage.total / self._context_window_tokens
             if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)

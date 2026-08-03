@@ -612,18 +612,22 @@ class _SubclassedAssistantMessage(AssistantMessage):
 
 
 class _ScriptedClient(LLMClient):
-    def __init__(self, responses: Sequence[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
+    def __init__(
+        self,
+        responses: Sequence[AssistantMessage | Exception],
+        context_window_tokens: int = 100_000,
+    ) -> None:
         self.responses = list(responses)
         self.call_count = 0
-        self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
 
     @property
     def model_slug(self) -> str:
         return "mock-model"
 
     @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
 
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
         response = self.responses[self.call_count]
@@ -698,7 +702,7 @@ async def test_chained_summarization_carries_replaced_ids_transitively() -> None
         _finish_message(),
     ]
     agent = Agent(
-        client=_ScriptedClient(responses, max_tokens=1000),
+        client=_ScriptedClient(responses, context_window_tokens=1000),
         name="test-agent",
         max_turns=10,
         turns_remaining_warning_threshold=2,

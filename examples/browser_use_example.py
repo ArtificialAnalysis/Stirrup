@@ -15,7 +15,7 @@ import asyncio
 
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 from stirrup.tools.browser_use import BrowserUseToolProvider
 
 
@@ -23,7 +23,9 @@ async def main() -> None:
     """Run browser automation example."""
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
-        model="anthropic/claude-sonnet-4.5",
+        model="anthropic/claude-opus-5",
+        max_tokens=8_192,
+        context_window_tokens=1_000_000,
     )
 
     browser_provider = BrowserUseToolProvider(
@@ -33,7 +35,7 @@ async def main() -> None:
     agent = Agent(
         client=client,
         name="browser_agent",
-        tools=[*DEFAULT_TOOLS, browser_provider],
+        tools=[*default_tools(), browser_provider],
         system_prompt=(
             "You are a web automation assistant. Use the browser tools to complete tasks. "
             "Always start by taking a snapshot to see the current page state and element indices. "

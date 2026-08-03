@@ -27,7 +27,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import LocalCodeExecToolProvider
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="local_coder",
@@ -64,13 +64,17 @@ provider = LocalCodeExecToolProvider(
 )
 ```
 
-The allowlist works the same way in every backend (`LocalCodeExecToolProvider`,
-`DockerCodeExecToolProvider`, and `E2BCodeExecToolProvider`).
+The allowlist is configured and matched the same way in every backend
+(`LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`, and
+`E2BCodeExecToolProvider`).
 
-When an allowlist is set, commands do not go through a shell. Stirrup parses
-each command into an argument list, checks it against your patterns, and
-executes it directly. What was vetted is exactly what runs — there is no shell
-that could reinterpret the command afterwards.
+When an allowlist is set, Stirrup parses each command into an argument list and
+checks that list against your patterns, so what was vetted is exactly what runs.
+`LocalCodeExecToolProvider` and `DockerCodeExecToolProvider` execute the argument
+list directly, with no shell involved. `E2BCodeExecToolProvider` is the
+exception: the E2B API accepts only a command string, so the vetted arguments are
+quoted back into one and run by the sandbox shell, with every argument quoted so
+there is nothing left for it to expand.
 
 **Pattern matching.** Patterns are regexes matched against the parsed command,
 starting from the first character. Quoting is normalized before matching, so
@@ -79,8 +83,8 @@ also allows `lsblk`. To pin the command word exactly, use a pattern like
 `git(\s.*)?\Z`.
 
 **What works.** A single command with plain or quoted arguments. Quoted shell
-characters are just text: `echo 'a;b'` and `grep 'foo$' file` do what they
-look like.
+characters are just text: `echo 'a;b'`, `grep 'foo$' file`, and
+`find . -exec ls {} ';'` do what they look like.
 
 **What is different without a shell:**
 
@@ -91,8 +95,12 @@ look like.
   `$(...)`/backtick substitution. This includes operators attached to a word,
   like `>out.txt`.
 - Leading assignments (`MODE=test command`) are rejected.
-- Anything that can't be parsed — unterminated quotes, Bash-only `$'...'` —
-  is rejected.
+- Anything that can't be parsed — an unterminated quote, for instance — is
+  rejected.
+- Bash-only `$'...'` is not ANSI-C quoting here. The `$` stays a literal
+  character and the escapes inside are not processed, so `echo $'a\tb'` prints
+  `$a\tb`. Spellings that rely on `\'` are rejected, but only because the
+  quote ends up unbalanced.
 
 **Caveats.** Allowlisting `bash`, `sh`, or `env` hands over control of
 whatever they run. If a task needs environment setup, allowlist a script
@@ -121,7 +129,7 @@ provider = DockerCodeExecToolProvider.from_image(
     env_vars=["OPENAI_API_KEY"],  # Forward these env vars
 )
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="docker_coder",
@@ -164,7 +172,7 @@ from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
 
 provider = E2BCodeExecToolProvider()
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="e2b_coder",
@@ -227,7 +235,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import LocalCodeExecToolProvider, ViewImageToolProvider
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="image_viewer",

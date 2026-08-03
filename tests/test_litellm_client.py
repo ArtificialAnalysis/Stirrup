@@ -1,10 +1,17 @@
-"""Tests for LiteLLM client parsing."""
+"""Tests for LiteLLM client parsing and token-budget behavior."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytest.importorskip("litellm")
+
+from litellm.exceptions import ContextWindowExceededError
+
+from stirrup.clients import litellm_client as litellm_module
 from stirrup.clients.litellm_client import LiteLLMClient, _parse_thinking_blocks
+from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ReasoningBlock,
@@ -83,7 +90,9 @@ async def test_idless_litellm_tool_call_gets_internal_id(monkeypatch: pytest.Mon
     completion = AsyncMock(return_value={"choices": [choice], "usage": usage})
     monkeypatch.setattr("stirrup.clients.litellm_client.acompletion", completion)
 
-    result = await LiteLLMClient(model="test").generate([UserMessage(content="prompt")], {})
+    result = await LiteLLMClient(model="test", context_window_tokens=76_543).generate(
+        [UserMessage(content="prompt")], {}
+    )
 
     [tool_call] = result.blocks
     assert isinstance(tool_call, ToolCall)
@@ -102,7 +111,47 @@ async def test_litellm_passes_back_tool_call_signatures(monkeypatch: pytest.Monk
         blocks=[ToolCall(tool_call_id="call_1", name="lookup", arguments="{}", signature="google-signature")]
     )
 
-    await LiteLLMClient(model="test").generate([history], {})
+    await LiteLLMClient(model="test", context_window_tokens=76_543).generate([history], {})
 
     [wire_call] = completion.call_args.kwargs["messages"][0]["tool_calls"]
     assert wire_call["provider_specific_fields"] == {"thought_signature": "google-signature"}
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+async def test_output_limit_is_forwarded_and_reported_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+) -> None:
+    provider_call = AsyncMock(return_value={"choices": [SimpleNamespace(finish_reason=finish_reason)]})
+    monkeypatch.setattr(litellm_module, "acompletion", provider_call)
+    client = LiteLLMClient(
+        model="test/provider-model",
+        max_tokens=789,
+        context_window_tokens=76_543,
+    )
+
+    with pytest.raises(OutputTokenLimitError) as exc_info:
+        await client.generate([], {})
+
+    assert exc_info.value.model_slug == "test/provider-model"
+    assert exc_info.value.max_tokens == 789
+    assert exc_info.value.provider_reason == finish_reason
+    provider_call.assert_awaited_once()
+    provider_request = provider_call.await_args
+    assert provider_request is not None
+    assert provider_request.kwargs["max_tokens"] == 789
+
+
+async def test_context_window_rejection_surfaces_as_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider_call = AsyncMock(
+        side_effect=ContextWindowExceededError(
+            message="boom",
+            model="test/provider-model",
+            llm_provider="test",
+        )
+    )
+    monkeypatch.setattr(litellm_module, "acompletion", provider_call)
+    client = LiteLLMClient(model="test/provider-model", max_tokens=8_192, context_window_tokens=76_543)
+
+    with pytest.raises(ContextOverflowError):
+        await client.generate([], {})

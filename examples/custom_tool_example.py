@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from stirrup import Agent, Tool, ToolResult, ToolUseCountMetadata
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
 
 # --8<-- [start:tool]
@@ -40,14 +40,16 @@ GREET_TOOL = Tool(
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
-    model="anthropic/claude-sonnet-4.5",
+    model="anthropic/claude-opus-5",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
 )
 
 # Add custom tool to default tools
 agent = Agent(
     client=client,
     name="greeting_agent",
-    tools=[*DEFAULT_TOOLS, GREET_TOOL],
+    tools=[*default_tools(), GREET_TOOL],
 )
 # --8<-- [end:tool]
 

@@ -1,11 +1,15 @@
-"""Tests for ChatCompletionsClient response parsing."""
+"""Tests for ChatCompletionsClient response parsing and token-budget behavior."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
+from stirrup import ContextOverflowError, OutputTokenLimitError
+from stirrup.clients import chat_completions_client as chat_completions_module
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import AssistantMessage, ReasoningBlock, TextBlock, ToolCall, UserMessage
 
 
@@ -45,9 +49,24 @@ def _mock_tool_call(call_id: str | None, name: str, arguments: str) -> MagicMock
 
 
 def _client_with_response(response: MagicMock) -> ChatCompletionsClient:
-    client = ChatCompletionsClient(model="gpt-4o", api_key="test-key")
+    client = ChatCompletionsClient(model="gpt-4o", api_key="test-key", context_window_tokens=64_000)
     client._client.chat.completions.create = AsyncMock(return_value=response)  # type: ignore[method-assign]  # noqa: SLF001
     return client
+
+
+def _bad_request_error(code: str) -> BadRequestError:
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "boom", "type": "invalid_request_error", "code": code}},
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+    )
+    return BadRequestError("boom", response=response, body=response.json()["error"])
+
+
+def _client_with_provider_call(monkeypatch: pytest.MonkeyPatch, provider_call: AsyncMock) -> ChatCompletionsClient:
+    provider_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=provider_call)))
+    monkeypatch.setattr(chat_completions_module, "AsyncOpenAI", lambda **_kwargs: provider_client)
+    return ChatCompletionsClient(model="gpt-4o", api_key="test-key", context_window_tokens=64_000)
 
 
 class TestChatCompletionsParsing:
@@ -109,9 +128,77 @@ class TestChatCompletionsParsing:
 
         create_mock.assert_not_awaited()
 
-    async def test_length_finish_reason_raises_context_overflow(self) -> None:
+    async def test_length_finish_reason_raises_output_token_limit(self) -> None:
         response = _mock_response(content="truncat", finish_reason="length")
         client = _client_with_response(response)
 
-        with pytest.raises(ContextOverflowError):
+        with pytest.raises(OutputTokenLimitError):
             await client.generate(messages=[UserMessage(content="Hi")], tools={})
+
+
+@pytest.mark.parametrize("context_window_tokens", [0, -1])
+def test_context_window_must_be_positive(context_window_tokens: int) -> None:
+    with pytest.raises(ValueError, match="context_window_tokens must be positive"):
+        ChatCompletionsClient(
+            model="gpt-4o",
+            api_key="test-key",
+            context_window_tokens=context_window_tokens,
+        )
+
+
+def test_max_tokens_must_fit_context_window() -> None:
+    with pytest.raises(ValueError, match="must not exceed context_window_tokens"):
+        ChatCompletionsClient(
+            model="gpt-4o",
+            api_key="test-key",
+            max_tokens=128_000,
+            context_window_tokens=8_192,
+        )
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+async def test_output_limit_is_forwarded_and_reported_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+) -> None:
+    provider_call = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason=finish_reason)],
+            usage=None,
+        )
+    )
+    provider_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=provider_call)))
+    monkeypatch.setattr(chat_completions_module, "AsyncOpenAI", lambda **_kwargs: provider_client)
+    client = ChatCompletionsClient(
+        model="gpt-4o",
+        api_key="test-key",
+        max_tokens=321,
+        context_window_tokens=64_000,
+    )
+
+    with pytest.raises(OutputTokenLimitError) as exc_info:
+        await client.generate([UserMessage(content="hello")], {})
+
+    assert exc_info.value.model_slug == "gpt-4o"
+    assert exc_info.value.max_tokens == 321
+    assert exc_info.value.provider_reason == finish_reason
+    provider_call.assert_awaited_once()
+    provider_request = provider_call.await_args
+    assert provider_request is not None
+    assert provider_request.kwargs["max_completion_tokens"] == 321
+
+
+async def test_context_length_rejection_surfaces_as_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client_with_provider_call(
+        monkeypatch, AsyncMock(side_effect=_bad_request_error("context_length_exceeded"))
+    )
+
+    with pytest.raises(ContextOverflowError):
+        await client.generate([UserMessage(content="hello")], {})
+
+
+async def test_unrelated_bad_request_is_not_mapped_to_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client_with_provider_call(monkeypatch, AsyncMock(side_effect=_bad_request_error("invalid_value")))
+
+    with pytest.raises(BadRequestError):
+        await client.generate([UserMessage(content="hello")], {})

@@ -6,13 +6,14 @@ multiple MCP servers and exposes each MCP tool as a separate Tool object.
 Example usage:
     ```python
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
+    from stirrup.tools import default_tools
 
     # With Agent (preferred)
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
     agent = Agent(
         client=client,
         name="assistant",
-        tools=[*DEFAULT_TOOLS, MCPToolProvider.from_config("mcp.json")],
+        tools=[*default_tools(), MCPToolProvider.from_config("mcp.json")],
     )
     async with agent.session() as session:
         await session.run("Use MCP tools")
@@ -213,12 +214,13 @@ class MCPToolProvider(ToolProvider):
 
     Usage with Agent (preferred):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
+        from stirrup.tools import default_tools
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(
             client=client,
             name="assistant",
-            tools=[*DEFAULT_TOOLS, MCPToolProvider.from_config("mcp.json")],
+            tools=[*default_tools(), MCPToolProvider.from_config("mcp.json")],
         )
 
         async with agent.session(output_dir="./output") as session:

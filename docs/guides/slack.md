@@ -67,7 +67,7 @@ export OPENROUTER_API_KEY=sk-or-...
 python -m stirrup.integrations.slack
 ```
 
-This starts a bot using `google/gemini-3-flash-preview` via OpenRouter as the default model.
+This starts a bot using `google/gemini-3.6-flash` via OpenRouter as the default model.
 
 ## 3. Custom Agents
 
@@ -81,8 +81,10 @@ from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.integrations.slack import SlackBot, SlackBotConfig, SlackAgentConfig
 
 client = ChatCompletionsClient(
-    model="google/gemini-3-flash-preview",
+    model="google/gemini-3.6-flash",
     base_url="https://openrouter.ai/api/v1",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
 )
 
 config = SlackBotConfig(
@@ -157,8 +159,8 @@ data_agent = SlackAgentConfig(
 | `@Stirrup create a python script that prints hello world` | Runs the default agent |
 | `@Stirrup agent:data summarise this` + attach a CSV | Runs the "data" named agent with the file as input |
 | `@Stirrup agent:browser go to example.com and summarise it` | Runs the browser agent |
-| `@Stirrup model:anthropic/claude-sonnet-4.5 write a poem` | Default agent with model override |
-| `@Stirrup agent:data model:openai/gpt-4o analyze trends` + files | Named agent + model override + files |
+| `@Stirrup model:anthropic/claude-opus-5 write a poem` | Default agent with model override |
+| `@Stirrup agent:data model:openai/gpt-5.6-luna analyze trends` + files | Named agent + model override + files |
 
 - **Responses appear in a thread** under your message
 - **Output files** (charts, CSVs, etc.) are uploaded back to the thread

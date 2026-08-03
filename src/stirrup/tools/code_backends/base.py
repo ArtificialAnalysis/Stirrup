@@ -43,7 +43,8 @@ _COMMAND_NOT_ALLOWED_ADVICE: dict[RejectionReason, str] = {
     "shell_syntax": (
         "Allowlisted commands run without a shell. Shell syntax such as ;, &&, |, "
         "redirects, $(...), backticks, or multiple lines is not supported. Run one "
-        "command with literal arguments."
+        "command with literal arguments, and quote any argument that is itself an "
+        "operator character (e.g. -exec ... ';')."
     ),
     "shell_assignment": (
         "Assignment prefixes such as NAME=value are not supported. Run the command without the leading assignment."
@@ -176,19 +177,30 @@ def _reserve_output_destination(
     reserved[identity] = claimant
 
 
-def _unquoted_operator_tokens(cmd: str) -> list[str]:
-    """Return any unquoted shell operator tokens in cmd.
+def _contains_unquoted_shell_operator(cmd: str) -> bool:
+    """Return whether cmd contains shell punctuation outside quotes or escapes.
 
-    Uses shlex punctuation mode, which splits runs of operator characters into
-    their own tokens unless they are quoted or escaped. This catches operators
-    attached to a word (``>out.txt``, ``foo;rm``) while leaving quoted literals
-    (``'a;b'``, ``--format='%h;%s'``) alone. Newline counts as an operator, not
-    whitespace. Raises ValueError on unbalanced quotes.
+    ``shlex.split`` validates and parses the command, but its result no longer
+    records which characters were quoted. This scan keeps only that missing
+    source-level fact; it does not try to parse or execute shell syntax.
     """
-    lex = shlex.shlex(cmd, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
-    lex.whitespace = " \t\r"
-    lex.whitespace_split = True
-    return [token for token in lex if token and all(c in _SHELL_PUNCTUATION for c in token)]
+    quote: str | None = None
+    escaped = False
+
+    for char in cmd:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif char == quote:
+                quote = None
+        elif quote is None and char in _SHELL_PUNCTUATION:
+            return True
+
+    return False
 
 
 class CodeExecutionParams(BaseModel):
@@ -427,7 +439,7 @@ class CodeExecToolProvider(ToolProvider, ABC):
     Usage with Agent:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(
             client=client,
             name="assistant",
@@ -487,12 +499,11 @@ class CodeExecToolProvider(ToolProvider, ABC):
             return None, None
         try:
             argv = shlex.split(cmd)
-            operator_tokens = _unquoted_operator_tokens(cmd)
         except ValueError:
             return None, self._rejection(cmd, "shell_syntax")
         if not argv:
             return None, self._rejection(cmd, "empty_command")
-        if operator_tokens:
+        if _contains_unquoted_shell_operator(cmd):
             return None, self._rejection(cmd, "shell_syntax")
         if "=" in argv[0]:
             return None, self._rejection(cmd, "shell_assignment")

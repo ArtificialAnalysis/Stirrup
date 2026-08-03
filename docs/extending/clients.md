@@ -19,8 +19,21 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 | Member | Type | Description |
 |--------|------|-------------|
 | `generate()` | `async method` | Generate next message with optional tool calls |
-| `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
-| `max_tokens` | `property` | Maximum context window size |
+| `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-5.6-luna"`) |
+| `context_window_tokens` | `property` | Model context capacity the agent summarizes history against |
+
+`context_window_tokens` must return a positive int; `Agent` reads it once at
+construction and summarizes conversation history as usage approaches that
+capacity. There is no fallback: a client that does not expose it fails at
+`Agent` construction. An output cap (`max_tokens`) is a client-internal request
+parameter — the built-in clients take one, but the protocol does not require it
+and the framework never reads it.
+
+Custom clients that adapt provider stop reasons should raise
+`OutputTokenLimitError` when the provider exhausts the response budget. Reserve
+`ContextOverflowError` for request input that does not fit the model context.
+The agent may summarize and retry the latter; it surfaces an output-limit failure
+without summarization or retry with the unchanged limit.
 
 ## Basic Implementation
 
@@ -39,11 +52,14 @@ class MyCustomClient:
     def __init__(
         self,
         model: str,
-        max_tokens: int = 64_000,
+        max_tokens: int = 8_192,
+        *,
+        context_window_tokens: int,
         api_key: str | None = None,
     ):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._api_key = api_key
 
     @property
@@ -51,8 +67,8 @@ class MyCustomClient:
         return self._model
 
     @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
 
     async def generate(
         self,
@@ -79,7 +95,8 @@ from stirrup import Agent
 
 client = MyCustomClient(
     model="my-model-id",
-    max_tokens=100_000,
+    max_tokens=8_192,
+    context_window_tokens=100_000,
     api_key="...",
 )
 
@@ -102,9 +119,16 @@ from stirrup import AssistantMessage, ChatMessage, TextBlock, Tool, ToolCall, To
 class OpenAIClient:
     """Direct OpenAI API client."""
 
-    def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000):
+    def __init__(
+        self,
+        model: str = "gpt-5.6-luna",
+        max_tokens: int = 8_192,
+        *,
+        context_window_tokens: int,
+    ):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._client = openai.AsyncOpenAI()
 
     @property
@@ -112,8 +136,8 @@ class OpenAIClient:
         return f"openai/{self._model}"
 
     @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
 
     def _convert_message(self, msg: ChatMessage) -> dict:
         """Convert a message to OpenAI format."""
@@ -139,7 +163,12 @@ class OpenAIClient:
             for t in tools.values()
         ] or None
 
-        response = await self._client.chat.completions.create(model=self._model, messages=api_messages, tools=api_tools)
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=api_messages,
+            tools=api_tools,
+            max_completion_tokens=self._max_tokens,
+        )
         message = response.choices[0].message
 
         blocks = []
@@ -197,8 +226,8 @@ class MockClient:
         return "mock/test-model"
 
     @property
-    def max_tokens(self) -> int:
-        return 10_000
+    def context_window_tokens(self) -> int:
+        return 100_000
 
     async def generate(self, messages, tools) -> AssistantMessage:
         response = self._responses[self._call_count]

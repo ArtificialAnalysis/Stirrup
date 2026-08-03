@@ -121,7 +121,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
 # Provider is set up when session starts, cleaned up when it ends
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="my_agent",
@@ -146,7 +146,7 @@ Stirrup includes several ToolProviders:
 | `LocalCodeExecToolProvider` | `code_exec` | Local temp directory execution |
 | `DockerCodeExecToolProvider` | `code_exec` | Docker container execution |
 | `E2BCodeExecToolProvider` | `code_exec` | E2B cloud sandbox |
-| `WebToolProvider` | `web_fetch`, `web_search` | Web tools with shared client |
+| `WebToolProvider` | `web_fetch`, `web_search` | Web tools with isolated fetch transport and state, plus safe cleanup |
 | `ViewImageToolProvider` | `view_image` | View images from exec env |
 | `MCPToolProvider` | varies | MCP server tools |
 
@@ -159,7 +159,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import CALCULATOR_TOOL, WebToolProvider
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="mixed_agent",

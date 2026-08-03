@@ -11,18 +11,11 @@ from collections.abc import Sequence
 from time import perf_counter
 from typing import Any, assert_never
 
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    AsyncOpenAI,
-    InternalServerError,
-    RateLimitError,
-)
+from openai import APIStatusError, AsyncOpenAI
 from openai.types.responses import Response
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.clients.utils import validate_token_budgets
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantBlock,
     AssistantMessage,
@@ -451,15 +444,20 @@ class OpenResponsesClient(LLMClient):
     Supports custom base_url for OpenAI-compatible providers that implement
     the Responses API.
 
-    Includes automatic retries for transient failures and token usage tracking.
+    Delegates retries for transient failures to the OpenAI SDK and tracks token usage.
 
     Example:
         >>> # Standard OpenAI usage
-        >>> client = OpenResponsesClient(model="gpt-4o", max_tokens=128_000)
+        >>> client = OpenResponsesClient(
+        ...     model="gpt-5.6-luna",
+        ...     max_tokens=8_192,
+        ...     context_window_tokens=1_000_000,
+        ... )
         >>>
         >>> # Custom OpenAI-compatible endpoint
         >>> client = OpenResponsesClient(
-        ...     model="gpt-4o",
+        ...     model="gpt-5.6-luna",
+        ...     context_window_tokens=1_000_000,
         ...     base_url="http://localhost:8000/v1",
         ...     api_key="your-api-key",
         ... )
@@ -470,6 +468,7 @@ class OpenResponsesClient(LLMClient):
         model: str,
         max_tokens: int = 64_000,
         *,
+        context_window_tokens: int,
         base_url: str | None = None,
         api_key: str | None = None,
         reasoning_effort: str | None = None,
@@ -482,14 +481,16 @@ class OpenResponsesClient(LLMClient):
         """Initialize OpenAI SDK client with model configuration for Responses API.
 
         Args:
-            model: Model identifier (e.g., 'gpt-4o', 'o1-preview').
+            model: Model identifier (e.g., 'gpt-5.6-luna', 'gpt-5.6-sol').
             max_tokens: Maximum output tokens. Defaults to 64,000.
+            context_window_tokens: Context capacity used to decide when Agent history
+                should be summarized.
             base_url: API base URL. If None, uses OpenAI's standard URL.
                 Use for OpenAI-compatible providers.
             api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
                 environment variable.
             reasoning_effort: Reasoning effort level for extended thinking models
-                (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
+                (e.g., 'low', 'medium', 'high'). Only used with reasoning models.
             encrypted_reasoning: Run stateless (``store=false``) and request
                 ``include: ["reasoning.encrypted_content"]`` so reasoning items are
                 captured as EncryptedReasoningBlock and re-emitted verbatim in
@@ -497,6 +498,7 @@ class OpenResponsesClient(LLMClient):
                 the provider holds no conversation state.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
             max_retries: Number of retries for transient errors. Defaults to 2.
+                The OpenAI SDK handles retries internally.
             instructions: Default system-level instructions. Can be overridden by
                 SystemMessage in the messages list.
             kwargs: Additional arguments passed to responses.create(). Structural
@@ -504,9 +506,16 @@ class OpenResponsesClient(LLMClient):
                 ``tool_choice`` and ``reasoning`` remain available for provider-native
                 configuration, but cannot be combined with the corresponding dedicated
                 ``generate(tools=...)`` or ``reasoning_effort`` configuration.
+
+        Raises:
+            ValueError: If ``context_window_tokens`` is not positive, ``max_tokens``
+                exceeds it, or ``kwargs`` contains a request key owned by this client.
         """
+        validate_token_budgets(max_tokens, context_window_tokens)
+
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._reasoning_effort = reasoning_effort
         self._encrypted_reasoning = encrypted_reasoning
         self._default_instructions = instructions
@@ -539,24 +548,17 @@ class OpenResponsesClient(LLMClient):
         return self._max_tokens
 
     @property
+    def context_window_tokens(self) -> int:
+        """Context capacity used by agents for history summarization."""
+        return self._context_window_tokens
+
+    @property
     def model_slug(self) -> str:
         """Model identifier."""
         return self._model
 
-    @retry(
-        retry=retry_if_exception_type(
-            (
-                APIConnectionError,
-                APITimeoutError,
-                RateLimitError,
-                InternalServerError,
-            )
-        ),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-    )
     async def _create_response(self, request_kwargs: dict[str, Any]) -> Response:
-        """Create one logical request with the client's standard transient retries."""
+        """Create one logical request; the SDK applies the configured retries."""
         return await self._client.responses.create(**request_kwargs)
 
     async def generate(
@@ -565,9 +567,6 @@ class OpenResponsesClient(LLMClient):
         tools: dict[str, Tool],
     ) -> AssistantMessage:
         """Generate assistant response with optional tool calls using Responses API.
-
-        Retries up to 3 times on transient errors (connection, timeout, rate limit,
-        internal server errors) with exponential backoff.
 
         Args:
             messages: List of conversation messages.
@@ -578,7 +577,11 @@ class OpenResponsesClient(LLMClient):
             and token usage statistics.
 
         Raises:
-            ContextOverflowError: If the response is incomplete due to token limits.
+            ContextOverflowError: If the provider rejects the request because the input
+                exceeds the model's context capacity.
+            OutputTokenLimitError: If the provider exhausts ``max_tokens``.
+            IncompleteResponseError: If the response is incomplete for another provider
+                reason, such as a content filter.
         """
         conditional_keys: set[str] = set()
         if tools:
@@ -620,7 +623,7 @@ class OpenResponsesClient(LLMClient):
             request_kwargs["tools"] = _to_open_responses_tools(tools)
             request_kwargs["tool_choice"] = "auto"
 
-        # Add reasoning effort if configured (for o1/o3 models)
+        # Add reasoning effort if configured (for reasoning models)
         if self._reasoning_effort:
             request_kwargs["reasoning"] = {"effort": self._reasoning_effort}
 
@@ -639,6 +642,13 @@ class OpenResponsesClient(LLMClient):
         try:
             response = await self._create_response(request_kwargs)
         except APIStatusError as error:
+            # BadRequestError subclasses APIStatusError, so both provider signals are matched
+            # in this one handler; a separate `except BadRequestError` would be dead code for
+            # whichever signal the other clause re-raises. Only OpenAI's own context code is
+            # recognised. Compatible endpoints that report a different code surface as a bad
+            # request instead of being recovered; widening this trades that for false positives.
+            if error.code == "context_length_exceeded":
+                raise ContextOverflowError(str(error)) from error
             if previous_response_id is None or not _is_missing_previous_response(error):
                 raise
             try:
@@ -663,16 +673,27 @@ class OpenResponsesClient(LLMClient):
                 request_kwargs["instructions"] = final_replay_instructions
             else:
                 request_kwargs.pop("instructions", None)
-            response = await self._create_response(request_kwargs)
+            # The replay sends the whole local history where the original sent a short
+            # pointer, so it is the likeliest point to exceed the window. Map that to the
+            # recoverable error too, rather than ending the run with a raw bad request.
+            try:
+                response = await self._create_response(request_kwargs)
+            except APIStatusError as replay_overflow:
+                if replay_overflow.code != "context_length_exceeded":
+                    raise
+                raise ContextOverflowError(str(replay_overflow)) from replay_overflow
         request_end_time = perf_counter()
 
-        # Check for incomplete response (context overflow)
         if response.status == "incomplete":
-            stop_reason = getattr(response, "incomplete_details", None)
-            raise ContextOverflowError(
-                f"Response incomplete for model {self.model_slug}: {stop_reason}. "
-                "Reduce max_tokens or message length and try again."
-            )
+            incomplete_details = getattr(response, "incomplete_details", None)
+            incomplete_reason = getattr(incomplete_details, "reason", None) or "unknown"
+            if incomplete_reason == "max_output_tokens":
+                raise OutputTokenLimitError(
+                    model_slug=self.model_slug,
+                    max_tokens=self._max_tokens,
+                    provider_reason=incomplete_reason,
+                )
+            raise IncompleteResponseError(f"Response incomplete for model {self.model_slug}: {incomplete_reason}")
         if response.status != "completed":
             raise RuntimeError(
                 f"OpenAI Responses returned unsupported status {response.status!r}: "

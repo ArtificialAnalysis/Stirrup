@@ -236,13 +236,13 @@ print(f"Total cost: ${aggregated['api_tool'].cost_usd:.2f}")
 ```python
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
-from stirrup.tools import DEFAULT_TOOLS
+from stirrup.tools import default_tools
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="my_agent",
-    tools=[*DEFAULT_TOOLS, GREET_TOOL, MY_OTHER_TOOL],
+    tools=[*default_tools(), GREET_TOOL, MY_OTHER_TOOL],
 )
 ```
 
@@ -253,7 +253,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import CALCULATOR_TOOL
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="custom_agent",
