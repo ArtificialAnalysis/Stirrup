@@ -69,9 +69,9 @@ async def main() -> None:
     # Automatically uses OPENROUTER_API_KEY environment variable
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
-        model="anthropic/claude-sonnet-4.5",
+        model="anthropic/claude-opus-5",
         max_tokens=8_192,
-        context_window_tokens=64_000,
+        context_window_tokens=1_000_000,
     )
 
     # As no tools are provided, the agent will use the default tools, which consist of:
@@ -134,9 +134,9 @@ For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, us
 # Create client using Deepseek's OpenAI-compatible endpoint
 client = ChatCompletionsClient(
     base_url="https://api.deepseek.com",
-    model="deepseek-chat",  # or "deepseek-reasoner" for R1
+    model="deepseek-v4-flash",  # or "deepseek-v4-pro" for the larger model
     max_tokens=8_192,
-    context_window_tokens=64_000,
+    context_window_tokens=1_000_000,
     api_key=os.environ["DEEPSEEK_API_KEY"],
 )
 
@@ -150,9 +150,9 @@ agent = Agent(client=client, name="deepseek_agent")
 # Create LiteLLM client for Anthropic Claude
 # See https://docs.litellm.ai/docs/providers for all supported providers
 client = LiteLLMClient(
-    model_slug="anthropic/claude-sonnet-4-5",
+    model_slug="anthropic/claude-opus-5",
     max_tokens=8_192,
-    context_window_tokens=200_000,
+    context_window_tokens=1_000_000,
 )
 
 # Pass client to Agent - model info comes from client.model_slug
@@ -192,9 +192,9 @@ from stirrup.tools import CALCULATOR_TOOL, default_tools
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
-    model="anthropic/claude-sonnet-4.5",
+    model="anthropic/claude-opus-5",
     max_tokens=8_192,
-    context_window_tokens=64_000,
+    context_window_tokens=1_000_000,
 )
 
 # Create agent with default tools + calculator tool
@@ -241,9 +241,9 @@ GREET_TOOL = Tool(
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
-    model="anthropic/claude-sonnet-4.5",
+    model="anthropic/claude-opus-5",
     max_tokens=8_192,
-    context_window_tokens=64_000,
+    context_window_tokens=1_000_000,
 )
 
 # Add custom tool to default tools

@@ -7,7 +7,7 @@ Example usage:
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
     from stirrup.tools import USER_INPUT_TOOL, default_tools
 
-    client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
+    client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
     agent = Agent(
         client=client,
         name="assistant",

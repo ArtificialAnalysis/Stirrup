@@ -24,7 +24,7 @@ For models that support extended thinking (like o1/o3), you can configure the re
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | `str` | required | Model identifier (e.g., `"gpt-4o"`, `"o1"`) |
+| `model` | `str` | required | Model identifier (e.g., `"gpt-5.6-luna"`, `"gpt-5.6-luna-pro"`) |
 | `max_tokens` | `int` | `64_000` | Maximum output tokens |
 | `context_window_tokens` | `int` | required | Context capacity for summarization |
 | `base_url` | `str \| None` | `None` | Custom API base URL |

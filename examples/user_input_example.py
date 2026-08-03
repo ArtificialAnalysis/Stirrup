@@ -10,9 +10,9 @@ async def main() -> None:
 
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
-        model="anthropic/claude-sonnet-4.5",
+        model="anthropic/claude-opus-5",
         max_tokens=8_192,
-        context_window_tokens=64_000,
+        context_window_tokens=1_000_000,
     )
 
     agent = Agent(client=client, name="agent", tools=[*default_tools(), USER_INPUT_TOOL], max_turns=15)

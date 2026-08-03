@@ -14,10 +14,10 @@ from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.integrations.slack import SlackAgentConfig, SlackBot, SlackBotConfig
 
 client = ChatCompletionsClient(
-    model="google/gemini-3-flash-preview",
+    model="google/gemini-3.6-flash",
     base_url="https://openrouter.ai/api/v1",
     max_tokens=8_192,
-    context_window_tokens=64_000,
+    context_window_tokens=1_000_000,
 )
 
 config = SlackBotConfig(

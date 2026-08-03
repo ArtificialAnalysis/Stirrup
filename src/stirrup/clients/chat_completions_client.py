@@ -45,9 +45,9 @@ class ChatCompletionsClient(LLMClient):
     Example:
         >>> # Standard OpenAI usage
         >>> client = ChatCompletionsClient(
-        ...     model="gpt-4o",
+        ...     model="gpt-5.6-luna",
         ...     max_tokens=8_192,
-        ...     context_window_tokens=128_000,
+        ...     context_window_tokens=1_000_000,
         ... )
         >>>
         >>> # Custom OpenAI-compatible endpoint

@@ -15,10 +15,10 @@ Custom setup:
     from stirrup.integrations.slack import SlackBot, SlackBotConfig, SlackAgentConfig
 
     client = ChatCompletionsClient(
-        model="google/gemini-3-flash-preview",
+        model="google/gemini-3.6-flash",
         base_url="https://openrouter.ai/api/v1",
         max_tokens=8_192,
-        context_window_tokens=64_000,
+        context_window_tokens=1_000_000,
     )
     config = SlackBotConfig(
         slack_bot_token=os.environ["SLACK_BOT_TOKEN"],

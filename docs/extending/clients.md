@@ -121,7 +121,7 @@ class OpenAIClient:
 
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: str = "gpt-5.6-luna",
         max_tokens: int = 8_192,
         *,
         context_window_tokens: int,

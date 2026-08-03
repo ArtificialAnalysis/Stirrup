@@ -222,7 +222,7 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | `str` | required | Model identifier (e.g., `"gpt-5"`, `"deepseek-chat"`) |
+| `model` | `str` | required | Model identifier (e.g., `"gpt-5.6-luna"`, `"deepseek-v4-flash"`) |
 | `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
 | `context_window_tokens` | `int` | required | Context capacity for summarization |
 | `base_url` | `str \| None` | `None` | Custom API URL (for Deepseek, vLLM, etc.) |
@@ -240,7 +240,7 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-sonnet-4-5"`) |
+| `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-opus-5"`) |
 | `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
 | `context_window_tokens` | `int` | required | Context capacity for summarization |
 | `reasoning_effort` | `str \| None` | `None` | For reasoning models (o1/o3) |

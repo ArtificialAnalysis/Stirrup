@@ -27,7 +27,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import LocalCodeExecToolProvider
 
-client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="local_coder",
@@ -121,7 +121,7 @@ provider = DockerCodeExecToolProvider.from_image(
     env_vars=["OPENAI_API_KEY"],  # Forward these env vars
 )
 
-client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="docker_coder",
@@ -164,7 +164,7 @@ from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
 
 provider = E2BCodeExecToolProvider()
 
-client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="e2b_coder",
@@ -227,7 +227,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import LocalCodeExecToolProvider, ViewImageToolProvider
 
-client = ChatCompletionsClient(model="gpt-5", max_tokens=8_192, context_window_tokens=64_000)
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="image_viewer",

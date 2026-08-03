@@ -262,15 +262,15 @@ class OpenResponsesClient(LLMClient):
     Example:
         >>> # Standard OpenAI usage
         >>> client = OpenResponsesClient(
-        ...     model="gpt-4o",
+        ...     model="gpt-5.6-luna",
         ...     max_tokens=8_192,
-        ...     context_window_tokens=128_000,
+        ...     context_window_tokens=1_000_000,
         ... )
         >>>
         >>> # Custom OpenAI-compatible endpoint
         >>> client = OpenResponsesClient(
-        ...     model="gpt-4o",
-        ...     context_window_tokens=128_000,
+        ...     model="gpt-5.6-luna",
+        ...     context_window_tokens=1_000_000,
         ...     base_url="http://localhost:8000/v1",
         ...     api_key="your-api-key",
         ... )

@@ -16,7 +16,7 @@ Setup:
 Usage in Slack:
     @stirrup create a python script that prints hello world
     @stirrup agent:data summarize this dataset (+ attach a CSV)
-    @stirrup model:anthropic/claude-sonnet-4.5 write a poem
+    @stirrup model:anthropic/claude-opus-5 write a poem
 """
 
 import asyncio
@@ -27,10 +27,10 @@ from stirrup.integrations.slack import SlackAgentConfig, SlackBot, SlackBotConfi
 
 # Default: OpenRouter with Gemini 3 Flash
 client = ChatCompletionsClient(
-    model="google/gemini-3-flash-preview",
+    model="google/gemini-3.6-flash",
     base_url="https://openrouter.ai/api/v1",
     max_tokens=8_192,
-    context_window_tokens=64_000,
+    context_window_tokens=1_000_000,
 )
 
 # Default agent — used when no agent: prefix is specified

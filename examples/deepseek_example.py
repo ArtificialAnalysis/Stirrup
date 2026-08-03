@@ -20,9 +20,9 @@ async def main() -> None:
     # Create client using Deepseek's OpenAI-compatible endpoint
     client = ChatCompletionsClient(
         base_url="https://api.deepseek.com",
-        model="deepseek-chat",  # or "deepseek-reasoner" for R1
+        model="deepseek-v4-flash",  # or "deepseek-v4-pro" for the larger model
         max_tokens=8_192,
-        context_window_tokens=64_000,
+        context_window_tokens=1_000_000,
         api_key=os.environ["DEEPSEEK_API_KEY"],
     )
 
