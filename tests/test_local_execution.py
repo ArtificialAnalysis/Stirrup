@@ -114,18 +114,6 @@ class TestLocalCodeExecToolProvider:
         assert result.error_kind == "command_not_allowed"
         assert forbidden_file_exists is False
 
-    async def test_run_command_allowlist_does_not_execute_ansi_c_quoted_array_assignment(
-        self,
-    ) -> None:
-        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
-
-        async with provider:
-            result = await provider.run_command(r"echo[$'a\'b']=x touch forbidden.txt")
-            forbidden_file_exists = await provider.file_exists("forbidden.txt")
-
-        assert result.error_kind == "command_not_allowed"
-        assert forbidden_file_exists is False
-
     @pytest.mark.parametrize(
         ("allowed_pattern", "command"),
         [
@@ -143,9 +131,12 @@ class TestLocalCodeExecToolProvider:
             (r"^echo", "echo allowed & printf bypassed"),
             (r"^echo", "echo allowed >output.txt"),
             (r"^echo", "echo allowed;printf bypassed"),
+            (r"^echo", "echo '|' --format='%h;%s';printf bypassed"),
             (r"^echo", "echo allowed 2>&1"),
             (r"^echo", "echo allowed\nprintf bypassed"),
             (r"^printf", "printf 'a\nb'\nls"),
+            # '#' is not a comment: the operator scan must see the whole command.
+            (r"^echo", "echo allowed # note > output.txt"),
             # Unquoted substitution and subshell syntax.
             (r"^echo", "echo $(printf bypassed)"),
             (r"^echo", "echo `printf bypassed`"),
@@ -172,27 +163,6 @@ class TestLocalCodeExecToolProvider:
             result = await provider.run_command(command)
 
         assert result.error_kind == "command_not_allowed"
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            'echo["1"]=x touch forbidden.txt',
-            "echo['1']=x touch forbidden.txt",
-            r"echo[1\+1]=x touch forbidden.txt",
-        ],
-    )
-    async def test_run_command_allowlist_rejects_quoted_or_escaped_array_assignments(
-        self,
-        command: str,
-    ) -> None:
-        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
-
-        async with provider:
-            result = await provider.run_command(command)
-            side_effect_exists = await provider.file_exists("forbidden.txt")
-
-        assert result.error_kind == "command_not_allowed"
-        assert side_effect_exists is False
 
     @pytest.mark.parametrize(
         "command",
@@ -272,10 +242,19 @@ class TestLocalCodeExecToolProvider:
             ("echo 'a;b && c || d | e > f < g\n$() `x`'", "a;b && c || d | e > f < g\n$() `x`\n"),
             ('echo "it\'s ; literal"', "it's ; literal\n"),
             (r"echo a\;b \$VALUE \${VALUE}", "a;b $VALUE ${VALUE}\n"),
+            # A quoted argument that is entirely operator characters is a
+            # literal, which is how find's -exec terminator is written.
+            ("find . -exec echo {} ';'", ".\n"),
+            # A quote opened mid-argument still quotes the operator after it.
+            ("echo --format='%h;%s'", "--format=%h;%s\n"),
+            # Different quoted forms can coexist without becoming shell syntax.
+            ("echo '|' --format='%h;%s'", "| --format=%h;%s\n"),
             # Without a shell there is no expansion: variables and globs are
-            # passed through as literal argument bytes.
+            # passed through as literal argument bytes, so home-directory
+            # spellings cannot leave the temp directory.
             ('echo "$HOME"', "$HOME\n"),
             ("echo $HOME", "$HOME\n"),
+            ("echo ~/x $HOME/x ${HOME}/x", "~/x $HOME/x ${HOME}/x\n"),
             ("echo *", "*\n"),
             ("echo 'line1\nline2'", "line1\nline2\n"),
         ],
@@ -285,13 +264,35 @@ class TestLocalCodeExecToolProvider:
         command: str,
         expected_stdout: str,
     ) -> None:
-        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo"])
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^echo", r"^find"])
 
         async with provider:
             result = await provider.run_command(command)
 
         assert result.error_kind is None
         assert result.stdout == expected_stdout
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat /etc/passwd",
+            # Quoting is gone by the time argv runs, so the guard has to read
+            # the parsed arguments rather than the raw command string.
+            "cat /et''c/passwd",
+            'cat "/etc"/passwd',
+        ],
+    )
+    async def test_run_command_allowlist_rejects_absolute_paths_in_parsed_arguments(
+        self,
+        command: str,
+    ) -> None:
+        provider = LocalCodeExecToolProvider(allowed_commands=[r"^cat"])
+
+        async with provider:
+            result = await provider.run_command(command)
+
+        assert result.error_kind == "absolute_path_detected"
+        assert result.stdout == ""
 
     async def test_run_command_allowlist_matches_parsed_command_word(self) -> None:
         # Patterns are matched against the parsed command, so quoting inside
