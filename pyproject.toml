@@ -1,6 +1,6 @@
 [project]
 name = "stirrup"
-version = "0.1.12"
+version = "0.2.0"
 description = "The lightweight foundation for building agents"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -65,7 +65,7 @@ dev = [
     "pytest>=9.0.0",
     "rich>=13.0.0",
     "ruff>=0.14.4",
-    "ty>=0.0.1a32",
+    "ty>=0.0.56",
 ]
 
 [tool.pytest.ini_options]

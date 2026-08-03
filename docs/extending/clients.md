@@ -109,11 +109,11 @@ agent = Agent(
 
 ## OpenAI API Example
 
-Stirrup message types use OpenAI-compatible field names (`role`, `content`, `tool_call_id`), so conversion is straightforward. The main difference is the `tool_calls` structure—OpenAI nests them under `function`.
+Stirrup's user, system, and tool message types use OpenAI-compatible field names (`role`, `content`, `tool_call_id`), so conversion is straightforward; assistant messages are block-based, and the `joined_text` / `tool_call_blocks` helpers project them into channel shape. The main difference is the `tool_calls` structure—OpenAI nests them under `function`.
 
 ```python
 import openai
-from stirrup import AssistantMessage, ChatMessage, Tool, ToolCall, ToolMessage, TokenUsage
+from stirrup import AssistantMessage, ChatMessage, TextBlock, Tool, ToolCall, ToolMessage, TokenUsage, joined_text, tool_call_blocks
 
 
 class OpenAIClient:
@@ -143,11 +143,11 @@ class OpenAIClient:
         """Convert a message to OpenAI format."""
         # SystemMessage, UserMessage, ToolMessage have compatible structure
         if isinstance(msg, AssistantMessage):
-            result = {"role": "assistant", "content": str(msg.content)}
-            if msg.tool_calls:
+            result = {"role": "assistant", "content": joined_text(msg.blocks) or ""}
+            if tool_calls := tool_call_blocks(msg.blocks):
                 result["tool_calls"] = [
                     {"id": tc.tool_call_id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
-                    for tc in msg.tool_calls
+                    for tc in tool_calls
                 ]
             return result
         elif isinstance(msg, ToolMessage):
@@ -171,15 +171,45 @@ class OpenAIClient:
         )
         message = response.choices[0].message
 
+        blocks = []
+        if message.content:
+            blocks.append(TextBlock(text=message.content))
+        blocks.extend(
+            ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id)
+            for tc in (message.tool_calls or [])
+        )
+
         return AssistantMessage(
-            content=message.content or "",
-            tool_calls=[ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id) for tc in (message.tool_calls or [])],
+            blocks=blocks,
             token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
         )
 ```
 
 You can optionally populate `request_start_time` and `request_end_time` on `AssistantMessage`
 to track generation speed. The derived `e2e_otps` property computes output tokens per second.
+
+Construct `AssistantMessage` from blocks and replay from `msg.blocks` when converting
+history back to your API format. This preserves ordered provider output, including
+interleaved thinking, text, and tool calls. Channel-shaped v0.1 data is supported only
+when reading persisted histories.
+
+## Integration contract
+
+Stirrup guarantees the following to client and integration authors:
+
+- **Stable identity.** `AssistantMessage.id` is assigned once at construction and survives
+  `model_dump`/`model_validate` round trips.
+- **Same object in history.** The exact object returned by `generate` is appended to
+  history and passed back on subsequent `generate` calls — the framework never copies or
+  rebuilds history messages outside summarization and context-overflow unwinding.
+- **Subclasses are preserved.** `generate` may return an `AssistantMessage` subclass; use
+  this as a typed in-memory carrier for integration state (mark extra fields
+  `exclude=True` to keep them out of serialized histories).
+- **`metadata` is opaque.** The framework never reads, writes, drops, or transmits message
+  metadata. Namespace your keys (e.g. `"myco/..."`); the un-namespaced space belongs to users.
+- **Summaries carry lineage.** When history is summarized, the `SummaryMessage` records the
+  ids of the assistant messages it replaced (`replaced_ids`, chained transitively across
+  summarization rounds), so dumped histories reconstruct which turns a summary stands for.
 
 ## Testing with Mock Client
 
@@ -207,7 +237,7 @@ class MockClient:
 
 # Use in tests
 mock = MockClient([
-    AssistantMessage(content="Hello!", tool_calls=[], token_usage=TokenUsage()),
+    AssistantMessage(blocks=[TextBlock(text="Hello!")], token_usage=TokenUsage()),
 ])
 
 agent = Agent(client=mock, name="test")

@@ -1,7 +1,7 @@
 """Tests for agent core functionality."""
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Sequence
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,15 +12,22 @@ from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent, SubAgentParams
-from stirrup.core.cache import CacheState
+from stirrup.core.cache import (
+    CacheState,
+    deserialize_messages,
+)
 from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
     ImageContentBlock,
     LLMClient,
+    ReasoningBlock,
+    SignedReasoningBlock,
+    SubAgentMetadata,
     SummaryMessage,
     SystemMessage,
+    TextBlock,
     TokenUsage,
     Tool,
     ToolCall,
@@ -28,6 +35,7 @@ from stirrup.core.models import (
     ToolResult,
     TurnWarningMessage,
     UserMessage,
+    joined_text,
 )
 from stirrup.tools import default_tools
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
@@ -38,11 +46,11 @@ class MockLLMClient(LLMClient):
 
     def __init__(
         self,
-        responses: list[AssistantMessage | Exception],
+        responses: Sequence[AssistantMessage | Exception],
         max_tokens: int = 100_000,
         context_window_tokens: int | None = None,
     ) -> None:
-        self.responses = responses
+        self.responses = list(responses)
         self.call_count = 0
         self._context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
         self.tools_seen: list[dict[str, Tool]] = []
@@ -89,7 +97,7 @@ def recording_tool(name: str, executions: list[str], *, success: bool = True) ->
         name=name,
         description="Record an execution label",
         parameters=RecordingParams,
-        executor=record,  # ty: ignore[invalid-argument-type]
+        executor=record,
     )
 
 
@@ -105,13 +113,13 @@ async def test_agent_basic_finish() -> None:
     # Create mock responses
     responses = [
         AssistantMessage(
-            content="I'll finish now",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="I'll finish now"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task completed successfully", "paths": []}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
             request_start_time=100.0,
@@ -151,15 +159,15 @@ async def test_agent_basic_finish() -> None:
 
 async def test_output_limit_does_not_control_context_summarization() -> None:
     responses = [
-        AssistantMessage(content="Working", tool_calls=[], token_usage=TokenUsage(input=700, answer=100)),
+        AssistantMessage(blocks=[TextBlock(text="Working")], token_usage=TokenUsage(input=700, answer=100)),
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": []}',
                     tool_call_id="finish",
-                )
+                ),
             ],
             token_usage=TokenUsage(),
         ),
@@ -191,7 +199,7 @@ def test_agent_rejects_context_window_that_is_not_a_positive_int(context_window_
 async def test_output_token_limit_surfaces_without_agent_retry_or_recovery() -> None:
     error = OutputTokenLimitError(model_slug="mock-model", max_tokens=100, provider_reason="length")
     client = MockLLMClient(
-        [error, AssistantMessage(content="unused", tool_calls=[], token_usage=TokenUsage())],
+        [error, AssistantMessage(blocks=[TextBlock(text="unused")], token_usage=TokenUsage())],
         max_tokens=100,
     )
     agent = Agent(client=client, name="output-limit-agent", tools=[])
@@ -232,12 +240,12 @@ async def test_finish_runs_last_however_the_provider_ordered_the_calls(tmp_path:
             name=name,
             description=name,
             parameters=PathParams,
-            executor=executor,  # ty: ignore[invalid-argument-type]
+            executor=executor,
         )
 
     response = AssistantMessage(
-        content="Finish first, but the other work must still happen",
-        tool_calls=[
+        blocks=[
+            TextBlock(text="Finish first, but the other work must still happen"),
             ToolCall(name="finish", arguments='{"name": "report.md"}', tool_call_id="call_finish"),
             ToolCall(name="write_file", arguments='{"name": "report.md"}', tool_call_id="call_report"),
             ToolCall(name="write_file", arguments='{"name": "notes.md"}', tool_call_id="call_notes"),
@@ -277,8 +285,8 @@ async def test_unsuccessful_finish_does_not_terminate_the_run(
     record = recording_tool("record", executions)
     finish = recording_tool("finish", executions, success=finish_succeeds)
     response = AssistantMessage(
-        content="Attempt a finish that will not succeed",
-        tool_calls=[
+        blocks=[
+            TextBlock(text="Attempt a finish that will not succeed"),
             ToolCall(name="finish", arguments=finish_arguments, tool_call_id="call_finish"),
             ToolCall(name="record", arguments='{"label": "ordinary"}', tool_call_id="call_ordinary"),
         ],
@@ -310,8 +318,10 @@ async def test_finish_without_arguments_completes_the_run(arguments: str) -> Non
         return ToolResult(content=params.reason)
 
     response = AssistantMessage(
-        content="Done",
-        tool_calls=[ToolCall(name="finish", arguments=arguments, tool_call_id="call_finish")],
+        blocks=[
+            TextBlock(text="Done"),
+            ToolCall(name="finish", arguments=arguments, tool_call_id="call_finish"),
+        ],
         token_usage=TokenUsage(),
     )
     agent = Agent(
@@ -322,7 +332,7 @@ async def test_finish_without_arguments_completes_the_run(arguments: str) -> Non
             name="finish",
             description="Finish with defaulted parameters",
             parameters=DefaultedParams,
-            executor=finish,  # ty: ignore[invalid-argument-type]
+            executor=finish,
         ),
         run_sync_in_thread=False,
     )
@@ -338,8 +348,9 @@ async def test_agent_max_turns() -> None:
     # Create mock responses (never calls finish)
     responses = [
         AssistantMessage(
-            content=f"Turn {i}",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text=f"Turn {i}"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         )
         for i in range(5)
@@ -375,24 +386,26 @@ async def test_agent_max_turns() -> None:
 async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
     responses = [
         AssistantMessage(
-            content="First step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="First step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Second step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Second step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
         AssistantMessage(
-            content="Recovered",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Recovered"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Recovered", "paths": []}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -413,7 +426,9 @@ async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
     assert finish_params is not None
     assert finish_params.reason == "Recovered"
     assert client.call_count == 4
-    assistant_contents = [msg.content for group in history for msg in group if isinstance(msg, AssistantMessage)]
+    assistant_contents = [
+        joined_text(msg.blocks) for group in history for msg in group if isinstance(msg, AssistantMessage)
+    ]
     assert "First step" in assistant_contents
     assert "Second step" not in assistant_contents
 
@@ -432,29 +447,32 @@ async def test_context_overflow_removes_unwound_turn_metadata() -> None:
         name="marker",
         description="Return marker metadata",
         parameters=MarkerParams,
-        executor=marker_executor,  # ty: ignore[invalid-argument-type]
+        executor=marker_executor,
     )
 
     responses = [
         AssistantMessage(
-            content="First step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="First step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Second step",
-            tool_calls=[ToolCall(name="marker", arguments='{"value": "dropped"}', tool_call_id="call_marker")],
+            blocks=[
+                TextBlock(text="Second step"),
+                ToolCall(name="marker", arguments='{"value": "dropped"}', tool_call_id="call_marker"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
         AssistantMessage(
-            content="Recovered",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Recovered"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Recovered", "paths": []}',
                     tool_call_id="call_finish",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -480,29 +498,32 @@ async def test_context_overflow_removes_unwound_turn_metadata() -> None:
 async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
     responses = [
         AssistantMessage(
-            content="First step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="First step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Second step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Second step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
         AssistantMessage(
-            content="Recovered second step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Recovered second step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Finished after recovery", "paths": []}',
                     tool_call_id="call_finish",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -521,7 +542,9 @@ async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
     async with agent.session() as session:
         finish_params, history, _ = await session.run([UserMessage(content="Test task")])
 
-    assistant_contents = [msg.content for group in history for msg in group if isinstance(msg, AssistantMessage)]
+    assistant_contents = [
+        joined_text(msg.blocks) for group in history for msg in group if isinstance(msg, AssistantMessage)
+    ]
 
     assert finish_params is not None
     assert finish_params.reason == "Finished after recovery"
@@ -543,10 +566,152 @@ async def test_cache_state_preserves_run_metadata_by_turn() -> None:
     assert restored.run_metadata_by_turn == {"assistant-id": {"marker": [{"value": "kept"}]}}
 
 
+async def test_v01_cache_state_preserves_aggregate_run_metadata() -> None:
+    restored = CacheState.from_dict(
+        {
+            "msgs": [{"role": "user", "kind": "user", "content": "task"}],
+            "full_msg_history": [],
+            "turn": 2,
+            "run_metadata": {"search": [{"queries": 1}]},
+            "task_hash": "legacy-task",
+        }
+    )
+
+    assert restored.run_metadata_by_turn == {"__legacy__": {"search": [{"queries": 1}]}}
+
+
+def _v01_idless_tool_history() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "assistant-1",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"name": "first", "arguments": "{}", "tool_call_id": None},
+                {"name": "second", "arguments": "{}", "tool_call_id": None},
+            ],
+        },
+        {"role": "tool", "content": "one", "name": "first", "tool_call_id": None},
+        {"role": "tool", "content": "two", "name": "second", "tool_call_id": None},
+    ]
+
+
+def test_v01_idless_tool_history_is_correlated() -> None:
+    messages = deserialize_messages(_v01_idless_tool_history())
+
+    assistant = messages[0]
+    assert isinstance(assistant, AssistantMessage)
+    calls = [block for block in assistant.blocks if isinstance(block, ToolCall)]
+    results = [message for message in messages if isinstance(message, ToolMessage)]
+    assert [call.tool_call_id for call in calls] == [result.tool_call_id for result in results]
+    assert all(not call.has_provider_tool_call_id for call in calls)
+
+
+def test_transitional_blocks_with_empty_tool_calls_correlate_idless_result() -> None:
+    history: list[dict[str, object]] = [
+        {
+            "id": "assistant-1",
+            "role": "assistant",
+            "blocks": [
+                {
+                    "kind": "tool_call",
+                    "name": "lookup",
+                    "arguments": "{}",
+                    "tool_call_id": None,
+                }
+            ],
+            "tool_calls": [],
+        },
+        {"role": "tool", "content": "done", "name": "lookup", "tool_call_id": None},
+    ]
+
+    assistant, result = deserialize_messages(history)
+
+    assert isinstance(assistant, AssistantMessage)
+    assert isinstance(result, ToolMessage)
+    [call] = [block for block in assistant.blocks if isinstance(block, ToolCall)]
+    assert call.tool_call_id == result.tool_call_id
+    assert not call.has_provider_tool_call_id
+
+
+def test_v01_idless_tool_history_upgrade_is_shared_by_subagent_metadata() -> None:
+    metadata = SubAgentMetadata.model_validate({"message_history": [_v01_idless_tool_history()], "run_metadata": {}})
+
+    assistant = metadata.message_history[0][0]
+    assert isinstance(assistant, AssistantMessage)
+    [call, second_call] = [block for block in assistant.blocks if isinstance(block, ToolCall)]
+    first_result, second_result = metadata.message_history[0][1:]
+    assert isinstance(first_result, ToolMessage)
+    assert isinstance(second_result, ToolMessage)
+    assert (call.tool_call_id, second_call.tool_call_id) == (
+        first_result.tool_call_id,
+        second_result.tool_call_id,
+    )
+
+
+def test_v01_history_adds_assistant_id() -> None:
+    history: list[dict[str, object]] = [
+        {"role": "user", "kind": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"name": "lookup", "arguments": "{}", "tool_call_id": None}],
+            "token_usage": {"input": 2, "output": 1, "reasoning": 0},
+        },
+        {"role": "tool", "content": "done", "name": "lookup", "tool_call_id": None},
+    ]
+
+    with pytest.warns(DeprecationWarning, match="'output' field is deprecated"):
+        messages = deserialize_messages(history)
+
+    assert type(messages[0]) is UserMessage
+    assistant = messages[1]
+    result = messages[2]
+    assert isinstance(assistant, AssistantMessage)
+    assert isinstance(result, ToolMessage)
+    [call] = [block for block in assistant.blocks if isinstance(block, ToolCall)]
+    assert assistant.id
+    assert call.tool_call_id == result.tool_call_id
+
+
+def test_untagged_user_cache_raises_informative_error() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Cannot load a cached user message without the required 'kind' discriminator",
+    ):
+        CacheState.from_dict(
+            {
+                "msgs": [{"role": "user", "content": "task"}],
+                "full_msg_history": [],
+                "task_hash": "legacy-task",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        [{"role": "tool", "content": "orphan", "tool_call_id": None}],
+        [
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"name": "expected", "arguments": "{}", "tool_call_id": None}],
+            },
+            {"role": "tool", "content": "result", "name": "different", "tool_call_id": None},
+        ],
+    ],
+)
+def test_v01_uncorrelatable_tool_result_raises(history: list[dict[str, object]]) -> None:
+    with pytest.raises(ValueError, match="Cannot correlate"):
+        deserialize_messages(history)
+
+
 async def test_cache_state_preserves_special_user_message_types() -> None:
     state = CacheState(
         msgs=[
-            SummaryMessage(content="Summary"),
+            SummaryMessage(content="Summary", replaced_ids=["turn-1", "turn-2"]),
             TurnWarningMessage(content="One turn left"),
             UserMessage(content="Regular user message"),
         ],
@@ -558,8 +723,47 @@ async def test_cache_state_preserves_special_user_message_types() -> None:
     restored = CacheState.from_dict(state.to_dict())
 
     assert isinstance(restored.msgs[0], SummaryMessage)
+    assert restored.msgs[0].replaced_ids == ["turn-1", "turn-2"]
     assert isinstance(restored.msgs[1], TurnWarningMessage)
     assert type(restored.msgs[2]) is UserMessage
+
+
+async def test_cache_round_trips_block_based_assistant_message() -> None:
+    """A blocks-native assistant turn — every reasoning kind, opaque, media, and a
+    signed tool call — survives cache serialize/deserialize bit-for-bit."""
+    from stirrup.core.cache import deserialize_message, serialize_message
+    from stirrup.core.models import (
+        EncryptedReasoningBlock,
+        OpaqueBlock,
+        ReasoningRefBlock,
+        RedactedReasoningBlock,
+        TextBlock,
+    )
+
+    message = AssistantMessage(
+        id="turn-1",
+        blocks=[
+            SignedReasoningBlock(signature="sig-1", content="signed thinking"),
+            RedactedReasoningBlock(data="redacted-token"),
+            ReasoningRefBlock(id="rs_1", content="private", summary=["summary"]),
+            EncryptedReasoningBlock(
+                id="rs_2",
+                encrypted_content="zdr-payload",
+                content="private",
+                summary=["summary"],
+            ),
+            ReasoningBlock(content="in-band thinking"),
+            TextBlock(text="the answer"),
+            OpaqueBlock(data='{"type": "provider_marker"}'),
+            _sample_png_block(),
+            ToolCall(signature="tc-sig", name="search", arguments='{"q": 1}', tool_call_id="call-1"),
+        ],
+        token_usage=TokenUsage(input=10, answer=5),
+    )
+
+    restored = deserialize_message(serialize_message(message))
+
+    assert restored == message
 
 
 async def test_context_overflow_at_original_prompt_raises() -> None:
@@ -580,8 +784,9 @@ async def test_context_overflow_at_original_prompt_raises() -> None:
 async def test_context_overflow_does_not_unwind_first_turn_after_initial_prompt() -> None:
     responses = [
         AssistantMessage(
-            content="First step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="First step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
@@ -626,8 +831,9 @@ async def test_context_overflow_does_not_unwind_existing_summary() -> None:
                     SummaryMessage(content="Summary already accepted by the model"),
                     UserMessage(content="Got it, thanks!"),
                     AssistantMessage(
-                        content="Post-summary work",
-                        tool_calls=[],
+                        blocks=[
+                            TextBlock(text="Post-summary work"),
+                        ],
                         token_usage=TokenUsage(input=100, answer=50),
                     ),
                 ]
@@ -639,8 +845,9 @@ async def test_context_overflow_does_not_unwind_existing_summary() -> None:
 async def test_context_overflow_recovery_can_be_disabled() -> None:
     responses = [
         AssistantMessage(
-            content="Working",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Working"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
@@ -674,32 +881,32 @@ async def test_agent_tool_execution() -> None:
         name="echo",
         description="Echo a message",
         parameters=EchoParams,
-        executor=echo_executor,  # ty: ignore[invalid-argument-type]
+        executor=echo_executor,
     )
 
     # Create mock responses
     responses = [
         # First turn: call echo tool
         AssistantMessage(
-            content="I'll echo your message",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="I'll echo your message"),
                 ToolCall(
                     name="echo",
                     arguments='{"message": "Hello"}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second turn: finish
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Echoed successfully", "paths": []}',
                     tool_call_id="call_2",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -758,7 +965,7 @@ async def test_run_tool_preserves_image_content() -> None:
         name="image_tool",
         description="Return an image",
         parameters=EmptyParams,
-        executor=image_executor,  # ty: ignore[invalid-argument-type]
+        executor=image_executor,
     )
 
     client = MockLLMClient([])
@@ -770,12 +977,14 @@ async def test_run_tool_preserves_image_content() -> None:
         finish_tool=SIMPLE_FINISH_TOOL,
     )
 
+    tool_call = ToolCall.from_provider(provider_id=None, name="image_tool", arguments="{}")
     async with agent.session() as session:
         tool_message = await session.run_tool(
-            ToolCall(name="image_tool", arguments="{}", tool_call_id="call_1"),
+            tool_call,
             run_metadata={},
         )
 
+    assert tool_message.tool_call_id == tool_call.tool_call_id
     assert isinstance(tool_message.content, list)
     assert len(tool_message.content) == 1
     assert isinstance(tool_message.content[0], ImageContentBlock)
@@ -788,25 +997,25 @@ async def test_agent_invalid_tool_call() -> None:
     responses = [
         # Call non-existent tool
         AssistantMessage(
-            content="I'll call a tool",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="I'll call a tool"),
                 ToolCall(
                     name="nonexistent_tool",
                     arguments='{"param": "value"}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         # Then finish
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Handled error", "paths": []}',
                     tool_call_id="call_2",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -876,25 +1085,25 @@ async def test_agent_finish_tool_validation() -> None:
     responses = [
         # First: invalid finish (status != "complete")
         AssistantMessage(
-            content="Trying to finish",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Trying to finish"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Not ready", "status": "pending"}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: valid finish (status == "complete")
         AssistantMessage(
-            content="Now finishing",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Now finishing"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task done", "status": "complete"}',
                     tool_call_id="call_2",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -939,24 +1148,24 @@ async def test_agent_accepts_multiple_finish_tools() -> None:
         name="submit_files",
         description="Finish the task and submit created files",
         parameters=SubmitFilesParams,
-        executor=submit_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=submit_files_executor,
     )
     finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
         name="finish_without_files",
         description="Finish the task without submitting files",
         parameters=FinishWithoutFilesParams,
-        executor=finish_without_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_without_files_executor,
     )
 
     responses = [
         AssistantMessage(
-            content="No files to submit",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="No files to submit"),
                 ToolCall(
                     name="finish_without_files",
                     arguments='{"reason": "Task completed without files"}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         )
@@ -997,13 +1206,13 @@ async def test_finish_tool_property_requires_single_finish_tool() -> None:
         name="submit_files",
         description="Finish the task and submit created files",
         parameters=SubmitFilesParams,
-        executor=lambda params: ToolResult(content=params.reason),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.reason),
     )
     finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
         name="finish_without_files",
         description="Finish the task without submitting files",
         parameters=FinishWithoutFilesParams,
-        executor=lambda params: ToolResult(content=params.reason),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.reason),
     )
 
     agent = Agent(
@@ -1037,35 +1246,35 @@ async def test_agent_continues_after_failed_finish_tool_from_multiple_finish_too
         name="submit_files",
         description="Finish the task and submit created files",
         parameters=SubmitFilesParams,
-        executor=submit_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=submit_files_executor,
     )
     finish_without_files_tool = Tool[FinishWithoutFilesParams, None](
         name="finish_without_files",
         description="Finish the task without submitting files",
         parameters=FinishWithoutFilesParams,
-        executor=finish_without_files_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_without_files_executor,
     )
 
     responses = [
         AssistantMessage(
-            content="Trying to submit without files",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Trying to submit without files"),
                 ToolCall(
                     name="submit_files",
                     arguments='{"reason": "No files yet", "paths": []}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Finishing without files",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Finishing without files"),
                 ToolCall(
                     name="finish_without_files",
                     arguments='{"reason": "No files needed"}',
                     tool_call_id="call_2",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1119,19 +1328,19 @@ async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
         name="finish_a",
         description="Finish variant A",
         parameters=FinishAParams,
-        executor=finish_a_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_a_executor,
     )
     finish_b = Tool[FinishBParams, None](
         name="finish_b",
         description="Finish variant B",
         parameters=FinishBParams,
-        executor=finish_b_executor,  # ty: ignore[invalid-argument-type]
+        executor=finish_b_executor,
     )
 
     responses = [
         AssistantMessage(
-            content="Calling both finish tools at once",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Calling both finish tools at once"),
                 ToolCall(name="finish_a", arguments='{"reason": "first"}', tool_call_id="call_1"),
                 ToolCall(name="finish_b", arguments='{"reason": "second"}', tool_call_id="call_2"),
                 ToolCall(name="record", arguments='{"label": "ordinary"}', tool_call_id="call_ordinary"),
@@ -1139,8 +1348,8 @@ async def test_multiple_finish_tool_calls_in_one_turn_all_rejected() -> None:
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Retrying with a single finish call",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Retrying with a single finish call"),
                 ToolCall(name="finish_a", arguments='{"reason": "settled"}', tool_call_id="call_3"),
             ],
             token_usage=TokenUsage(input=100, answer=50),
@@ -1181,13 +1390,13 @@ async def test_tools_finish_tool_name_collision_raises_at_init() -> None:
         name="finish_a",
         description="Not actually a finish tool",
         parameters=DummyParams,
-        executor=lambda params: ToolResult(content=params.x),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.x),
     )
     finish_a = Tool[DummyParams, None](
         name="finish_a",
         description="Real finish tool",
         parameters=DummyParams,
-        executor=lambda params: ToolResult(content=params.x, success=True),  # ty: ignore[invalid-argument-type]
+        executor=lambda params: ToolResult(content=params.x, success=True),
     )
 
     with pytest.raises(ValueError, match="collides with a finish tool"):
@@ -1207,25 +1416,25 @@ async def test_finish_tool_validates_file_paths() -> None:
     responses = [
         # First: finish with non-existent file path
         AssistantMessage(
-            content="Finishing with fake file",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Finishing with fake file"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Done", "paths": ["nonexistent.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: finish with empty paths (should succeed)
         AssistantMessage(
-            content="Finishing properly",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Finishing properly"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Actually done", "paths": []}',
                     tool_call_id="call_2",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1257,19 +1466,20 @@ async def test_no_successive_assistant_messages() -> None:
     responses = [
         # First: assistant message without tool calls
         AssistantMessage(
-            content="Let me think about this",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Let me think about this"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: finish after continue
         AssistantMessage(
-            content="Now I'll finish",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Now I'll finish"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task completed", "paths": []}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1304,19 +1514,20 @@ async def test_allow_successive_assistant_messages() -> None:
     responses = [
         # First: assistant message without tool calls
         AssistantMessage(
-            content="Let me think about this",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Let me think about this"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         # Second: another assistant message without continue prompt
         AssistantMessage(
-            content="Now I'll finish",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Now I'll finish"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Task completed", "paths": []}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1362,37 +1573,37 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
     responses = [
         # Turn 1: high token usage triggers first summarization
         AssistantMessage(
-            content="Working on it",
-            tool_calls=[],
+            blocks=[TextBlock(text="Working on it")],
             token_usage=TokenUsage(input=250, answer=100),  # total=350 >= 300
         ),
         # First summarization generate call
         AssistantMessage(
-            content="First summary of progress.",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="First summary of progress."),
+            ],
             token_usage=TokenUsage(input=200, answer=50),
         ),
         # Turn 2: high token usage triggers second summarization
         AssistantMessage(
-            content="Continuing work",
-            tool_calls=[],
+            blocks=[TextBlock(text="Continuing work")],
             token_usage=TokenUsage(input=250, answer=100),  # total=350 >= 300
         ),
         # Second summarization generate call
         AssistantMessage(
-            content="Second summary of progress.",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Second summary of progress."),
+            ],
             token_usage=TokenUsage(input=200, answer=50),
         ),
         # Turn 3: finish
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Completed", "paths": []}',
                     tool_call_id="call_finish",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1437,29 +1648,32 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
 async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     responses = [
         AssistantMessage(
-            content="First step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="First step"),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Second step",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Second step"),
+            ],
             token_usage=TokenUsage(input=250, answer=100),
         ),
         ContextOverflowError("summary context overflow"),
         AssistantMessage(
-            content="Recovered summary.",
-            tool_calls=[],
+            blocks=[
+                TextBlock(text="Recovered summary."),
+            ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "Completed", "paths": []}',
                     tool_call_id="call_finish",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1484,6 +1698,91 @@ async def test_summarization_context_overflow_unwinds_and_retries() -> None:
     assert finish_params.reason == "Completed"
     assert client.call_count == 5
     assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+def _tool_call_only_response() -> AssistantMessage:
+    return AssistantMessage(
+        blocks=[ToolCall(name="some_tool", arguments="{}", tool_call_id="call_no_text")],
+        token_usage=TokenUsage(input=200, answer=50),
+    )
+
+
+async def test_summarizer_tool_call_only_escalates_to_toolless_retry() -> None:
+    """A summarizer that answers with only tool calls is retried, finally without tools."""
+    responses = [
+        AssistantMessage(
+            blocks=[TextBlock(text="Working on it")],
+            token_usage=TokenUsage(input=250, answer=100),
+        ),
+        _tool_call_only_response(),
+        _tool_call_only_response(),
+        AssistantMessage(
+            blocks=[TextBlock(text="Summary at last.")],
+            token_usage=TokenUsage(input=200, answer=50),
+        ),
+        AssistantMessage(
+            blocks=[
+                TextBlock(text="Done"),
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Completed", "paths": []}',
+                    tool_call_id="call_finish",
+                ),
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+
+    client = MockLLMClient(responses, max_tokens=1000)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run(
+            [SystemMessage(content="System prompt"), UserMessage(content="Do the task")]
+        )
+
+    assert finish_params is not None
+    assert finish_params.reason == "Completed"
+    # Calls: turn 1, three summarizer attempts, finish turn.
+    assert client.call_count == 5
+    # The first two summarizer attempts keep the active tools; the last withholds them.
+    assert client.tools_seen[1] == client.tools_seen[0]
+    assert client.tools_seen[2] == client.tools_seen[0]
+    assert client.tools_seen[3] == {}
+    assert any(isinstance(msg, SummaryMessage) for msg in history[-1])
+
+
+async def test_summarizer_tool_call_only_exhausts_retries_and_raises() -> None:
+    responses = [
+        AssistantMessage(
+            blocks=[TextBlock(text="Working on it")],
+            token_usage=TokenUsage(input=250, answer=100),
+        ),
+        _tool_call_only_response(),
+        _tool_call_only_response(),
+        _tool_call_only_response(),
+    ]
+
+    client = MockLLMClient(responses, max_tokens=1000)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=5,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+        context_summarization_cutoff=0.3,
+    )
+
+    with pytest.raises(RuntimeError, match="no text blocks"):
+        async with agent.session() as session:
+            await session.run([SystemMessage(content="System prompt"), UserMessage(content="Do the task")])
 
 
 async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_directory() -> None:
@@ -1514,19 +1813,19 @@ async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_dire
         absolute_report = str(parent_provider.temp_dir / "report.txt")
         subagent_client.responses.append(
             AssistantMessage(
-                content="Done",
-                tool_calls=[
+                blocks=[
+                    TextBlock(text="Done"),
                     ToolCall(
                         name=DEFAULT_FINISH_TOOL_NAME,
                         arguments=json.dumps({"reason": "done", "paths": [absolute_report, "artifacts"]}),
                         tool_call_id="call_finish",
-                    )
+                    ),
                 ],
                 token_usage=TokenUsage(input=100, answer=50),
             )
         )
         execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
-        assert isinstance(execution, Awaitable)
+        assert not isinstance(execution, ToolResult)
         result = await execution
 
     assert isinstance(result.content, str)
@@ -1559,15 +1858,15 @@ async def test_shared_docker_subagent_repairs_and_validates_absolute_outputs(
         client=MockLLMClient(
             [
                 AssistantMessage(
-                    content="Done",
-                    tool_calls=[
+                    blocks=[
+                        TextBlock(text="Done"),
                         ToolCall(
                             name=DEFAULT_FINISH_TOOL_NAME,
                             arguments=json.dumps(
                                 {"reason": "done", "paths": [declared_file, declared_directory, traversal]}
                             ),
                             tool_call_id="call_finish",
-                        )
+                        ),
                     ],
                     token_usage=TokenUsage(input=100, answer=50),
                 )
@@ -1607,7 +1906,7 @@ async def test_shared_docker_subagent_repairs_and_validates_absolute_outputs(
 
             monkeypatch.setattr(parent_provider, "_run_command_unchecked", repair_access)
             execution = subagent_tool.executor(SubAgentParams(task="produce outputs", input_files=[]))
-            assert isinstance(execution, Awaitable)
+            assert not isinstance(execution, ToolResult)
             result = await execution
 
     assert isinstance(result.content, str)
@@ -1625,13 +1924,13 @@ async def test_owned_subagent_without_parent_reports_declared_output_failure() -
 
     responses = [
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["report.txt"]}',
                     tool_call_id="call_finish",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1644,7 +1943,7 @@ async def test_owned_subagent_without_parent_reports_declared_output_failure() -
     )
 
     execution = subagent.to_tool().executor(SubAgentParams(task="produce output", input_files=[]))
-    assert isinstance(execution, Awaitable)
+    assert not isinstance(execution, ToolResult)
     result = await execution
 
     assert "Files available in your environment" not in result.content
@@ -1664,13 +1963,13 @@ async def test_root_agent_saves_declared_outputs_and_records_failures(tmp_path: 
 
     responses = [
         AssistantMessage(
-            content="Done",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="Done"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["real.txt", "nested/../sneaky.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
             request_start_time=100.0,
@@ -1711,24 +2010,24 @@ async def test_root_session_resets_stale_output_result(tmp_path: Path) -> None:
 
     responses = [
         AssistantMessage(
-            content="first",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="first"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["real.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
         AssistantMessage(
-            content="second",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="second"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": []}',
                     tool_call_id="call_2",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1763,13 +2062,13 @@ async def test_failed_reused_session_does_not_export_previous_finish_paths(tmp_p
 
     responses: list[AssistantMessage | Exception] = [
         AssistantMessage(
-            content="first",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="first"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["report.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),
@@ -1804,13 +2103,13 @@ async def test_failed_second_run_in_same_session_does_not_reuse_first_finish(tmp
 
     responses: list[AssistantMessage | Exception] = [
         AssistantMessage(
-            content="first",
-            tool_calls=[
+            blocks=[
+                TextBlock(text="first"),
                 ToolCall(
                     name=DEFAULT_FINISH_TOOL_NAME,
                     arguments='{"reason": "done", "paths": ["report.txt"]}',
                     tool_call_id="call_1",
-                )
+                ),
             ],
             token_usage=TokenUsage(input=100, answer=50),
         ),

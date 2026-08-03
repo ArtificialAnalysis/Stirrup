@@ -73,7 +73,7 @@ except ImportError as e:
 try:
     from mcp.client.websocket import websocket_client
 except ImportError:
-    websocket_client = None  # type: ignore[assignment, misc]
+    websocket_client = None  # ty: ignore[invalid-assignment]
 
 
 __all__ = [

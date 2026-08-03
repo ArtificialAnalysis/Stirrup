@@ -75,30 +75,49 @@ A list of message groups representing the conversation history. Each group conta
 
 - `SystemMessage`: System prompts
 - `UserMessage`: User inputs and file contents
-- `AssistantMessage`: LLM responses with tool calls
+- `AssistantMessage`: LLM responses — an ordered sequence of blocks (reasoning, text, tool calls, media)
 - `ToolMessage`: Results from tool executions
+
+An assistant turn is stored as `blocks`, preserving the model's actual emission order
+(modern models interleave thinking → text → thinking → tool call). Each block is
+discriminated on `kind`: `text`, `reasoning` (in-band), `signed_reasoning`,
+`redacted_reasoning`, `reasoning_ref` (provider-side reference), `encrypted_reasoning`
+(opaque payload for stateless / zero-data-retention passback), `opaque`
+(provider-native block carried uninterpreted), `tool_call`, and the media block kinds.
+
+Alongside its blocks, an `AssistantMessage` may carry `provider_response_id` —
+provider-attached continuation state (e.g. an OpenAI Responses `resp_...` id). The
+Responses client uses it in its default stateful mode to continue conversations via
+`previous_response_id` instead of replaying full history. Provider response IDs are
+provider/project scoped and may expire; on a definitive not-found response the client
+replays full local history once when every block is losslessly representable, otherwise
+it raises because reference-only reasoning cannot be reconstructed.
 
 ```python
 history = [
     SystemMessage(role='system', content="You are an AI agent..."),
     UserMessage(role='user', content="What is the population of Australia..."),
     AssistantMessage(
-        role='assistant',
-        content="I'll search for Australia's population data...",
-        tool_calls=[ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...')],
+        blocks=[
+            TextBlock(text="I'll search for Australia's population data..."),
+            ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...'),
+        ],
         token_usage=TokenUsage(input=1523, answer=156, reasoning=0)
     ),
     ToolMessage(role='tool', content="<results>...ABS data...</results>", name='web_search', ...),
     # ... additional turns ...
-    AssistantMessage(
-        role='assistant',
-        content="All files are ready. Let me finish the task.",
-        tool_calls=[ToolCall(name='finish', arguments='{"reason": "...", "paths": [...]}', ...)],
-        token_usage=TokenUsage(input=25102, answer=285, reasoning=0)
-    ),
-    ToolMessage(role='tool', content="Successfully completed...", name='finish', ...),
 ]
 ```
+
+The channel-era `content` and `tool_calls` attributes remain temporarily available as
+deprecated views of `blocks`; reading them emits a `DeprecationWarning`. `content` is a
+bare string only for an empty response or a single text block and otherwise exposes the
+block list directly. The deprecated `reasoning` attribute raises with guidance to use
+`reasoning_blocks`. New messages must be constructed from `blocks`; channel-shaped v0.1
+data is accepted only as a legacy deserialization format and is synthesized in reasoning
+→ text → tool-call order. Construct a replacement message instead of assigning channels.
+Convenience accessors `joined_text`, `final_text`, `tool_call_blocks`, and
+`reasoning_blocks` operate on any block list.
 
 #### `metadata`
 

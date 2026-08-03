@@ -24,6 +24,7 @@ from stirrup.core.models import (
     SummaryMessage,
     TurnWarningMessage,
     VideoContentBlock,
+    _upgrade_legacy_message_sequence,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,10 @@ DEFAULT_CACHE_DIR = Path("~/.cache/stirrup/").expanduser()
 
 # TypeAdapter for deserializing ChatMessage discriminated union
 ChatMessageAdapter: TypeAdapter[ChatMessage] = TypeAdapter(ChatMessage)
+
+
+def _short_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
 
 
 def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
@@ -54,8 +59,7 @@ def compute_task_hash(init_msgs: str | list[ChatMessage]) -> str:
             ensure_ascii=True,
         )
 
-    hash_bytes = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    return hash_bytes[:12]
+    return _short_hash(content)
 
 
 def _serialize_content_block(block: Any) -> dict | str:  # noqa: ANN401
@@ -147,7 +151,7 @@ def serialize_message(msg: ChatMessage) -> dict:
     return data
 
 
-def deserialize_message(data: dict) -> ChatMessage:
+def deserialize_message(data: dict[str, Any]) -> ChatMessage:
     """Deserialize a ChatMessage from JSON format.
 
     Handles base64-encoded binary content blocks.
@@ -158,6 +162,8 @@ def deserialize_message(data: dict) -> ChatMessage:
     Returns:
         Restored ChatMessage object.
     """
+    data = dict(data)
+
     # Handle content field which may contain base64-encoded binary blocks
     content = data.get("content")
     if isinstance(content, list):
@@ -230,7 +236,7 @@ def _serialize_run_metadata_by_turn(
     return {turn_id: _serialize_run_metadata(turn_metadata) for turn_id, turn_metadata in run_metadata_by_turn.items()}
 
 
-def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
+def deserialize_messages(data: list[dict[str, Any]]) -> list[ChatMessage]:
     """Deserialize a list of ChatMessages from JSON format.
 
     Args:
@@ -239,7 +245,15 @@ def deserialize_messages(data: list[dict]) -> list[ChatMessage]:
     Returns:
         List of restored ChatMessage objects.
     """
-    return [deserialize_message(msg_data) for msg_data in data]
+    upgraded = _upgrade_legacy_message_sequence(data)
+    if not isinstance(upgraded, list):
+        raise ValueError("Serialized message history must be a list of message dictionaries")
+    messages: list[ChatMessage] = []
+    for message in upgraded:
+        if not isinstance(message, dict) or not all(isinstance(key, str) for key in message):
+            raise ValueError("Serialized message history must be a list of message dictionaries")
+        messages.append(deserialize_message({key: value for key, value in message.items() if isinstance(key, str)}))
+    return messages
 
 
 @dataclass
@@ -281,13 +295,17 @@ class CacheState:
     @classmethod
     def from_dict(cls, data: dict) -> "CacheState":
         """Create CacheState from JSON dictionary."""
+        run_metadata_by_turn = data.get("run_metadata_by_turn")
+        if run_metadata_by_turn is None:
+            legacy_run_metadata = data.get("run_metadata")
+            run_metadata_by_turn = {} if legacy_run_metadata is None else {"__legacy__": legacy_run_metadata}
         return cls(
             msgs=deserialize_messages(data["msgs"]),
             full_msg_history=[deserialize_messages(group) for group in data["full_msg_history"]],
             task_hash=data["task_hash"],
             timestamp=data.get("timestamp", ""),
             agent_name=data.get("agent_name", ""),
-            run_metadata_by_turn=data["run_metadata_by_turn"],
+            run_metadata_by_turn=run_metadata_by_turn,
         )
 
 

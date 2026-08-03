@@ -14,8 +14,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import polars as pl  # type: ignore[import-unresolved]
-from polars import col  # type: ignore[import-unresolved]
+import polars as pl  # ty: ignore[unresolved-import]
+from polars import col  # ty: ignore[unresolved-import]
 
 
 def load_data(file_path: str, sample_size: int | None = None) -> pl.DataFrame:
