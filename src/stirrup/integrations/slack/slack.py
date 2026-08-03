@@ -3,8 +3,8 @@
 Usage:
     @stirrup do xyz                              → default agent, default model
     @stirrup agent:data-analyst summarise this   → named agent
-    @stirrup model:gpt-4o do xyz                 → default agent, override model
-    @stirrup agent:data model:gpt-4o do xyz      → named agent + model override
+    @stirrup model:openai/gpt-5.6-luna do xyz    → default agent, override model
+    @stirrup agent:data model:openai/gpt-5.6-luna do xyz → named agent + model override
 
 Requires: pip install stirrup[slack]
 """
@@ -277,7 +277,12 @@ class SlackBot:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
         from stirrup.integrations.slack import SlackBot, SlackBotConfig, SlackAgentConfig
 
-        client = ChatCompletionsClient(model="google/gemini-3-flash-preview", base_url="https://openrouter.ai/api/v1")
+        client = ChatCompletionsClient(
+            model="google/gemini-3.6-flash",
+            base_url="https://openrouter.ai/api/v1",
+            max_tokens=8_192,
+            context_window_tokens=1_000_000,
+        )
         config = SlackBotConfig(
             slack_bot_token=os.environ["SLACK_BOT_TOKEN"],
             slack_app_token=os.environ["SLACK_APP_TOKEN"],

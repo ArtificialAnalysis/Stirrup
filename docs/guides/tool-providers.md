@@ -121,7 +121,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
 # Provider is set up when session starts, cleaned up when it ends
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="my_agent",
@@ -159,7 +159,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import CALCULATOR_TOOL, WebToolProvider
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="mixed_agent",

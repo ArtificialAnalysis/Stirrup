@@ -40,7 +40,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
     Usage with Agent:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(
             client=client,
             name="assistant",

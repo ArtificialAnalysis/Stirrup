@@ -25,7 +25,21 @@ __all__ = [
     "content_to_openai",
     "to_openai_messages",
     "to_openai_tools",
+    "validate_token_budgets",
 ]
+
+
+def validate_token_budgets(max_tokens: int, context_window_tokens: int) -> None:
+    """Reject an invalid budget pair at client construction.
+
+    Raises:
+        ValueError: If ``context_window_tokens`` is not positive, or
+            ``max_tokens`` exceeds it.
+    """
+    if context_window_tokens <= 0:
+        raise ValueError(f"context_window_tokens must be positive, got {context_window_tokens!r}")
+    if max_tokens > context_window_tokens:
+        raise ValueError(f"max_tokens ({max_tokens}) must not exceed context_window_tokens ({context_window_tokens})")
 
 
 def to_openai_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:

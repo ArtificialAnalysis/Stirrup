@@ -10,9 +10,10 @@ import os
 from time import perf_counter
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.clients.utils import validate_token_budgets
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     AudioContentBlock,
@@ -260,11 +261,16 @@ class OpenResponsesClient(LLMClient):
 
     Example:
         >>> # Standard OpenAI usage
-        >>> client = OpenResponsesClient(model="gpt-4o", max_tokens=128_000)
+        >>> client = OpenResponsesClient(
+        ...     model="gpt-5.6-luna",
+        ...     max_tokens=8_192,
+        ...     context_window_tokens=1_000_000,
+        ... )
         >>>
         >>> # Custom OpenAI-compatible endpoint
         >>> client = OpenResponsesClient(
-        ...     model="gpt-4o",
+        ...     model="gpt-5.6-luna",
+        ...     context_window_tokens=1_000_000,
         ...     base_url="http://localhost:8000/v1",
         ...     api_key="your-api-key",
         ... )
@@ -275,6 +281,7 @@ class OpenResponsesClient(LLMClient):
         model: str,
         max_tokens: int = 64_000,
         *,
+        context_window_tokens: int,
         base_url: str | None = None,
         api_key: str | None = None,
         reasoning_effort: str | None = None,
@@ -286,23 +293,35 @@ class OpenResponsesClient(LLMClient):
         """Initialize OpenAI SDK client with model configuration for Responses API.
 
         Args:
-            model: Model identifier (e.g., 'gpt-4o', 'o1-preview').
+            model: Model identifier (e.g., 'gpt-5.6-luna', 'gpt-5.6-sol').
             max_tokens: Maximum output tokens. Defaults to 64,000.
+            context_window_tokens: Context capacity used to decide when Agent history
+                should be summarized.
             base_url: API base URL. If None, uses OpenAI's standard URL.
                 Use for OpenAI-compatible providers.
             api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
                 environment variable.
             reasoning_effort: Reasoning effort level for extended thinking models
-                (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
+                (e.g., 'low', 'medium', 'high'). Only used with reasoning models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
             max_retries: Number of retries for transient errors. Defaults to 2.
                 The OpenAI SDK handles retries internally.
             instructions: Default system-level instructions. Can be overridden by
                 SystemMessage in the messages list.
             kwargs: Additional arguments passed to responses.create().
+                Values here override the base request parameters (model, input,
+                and the token cap) and bypass constructor validation; tool,
+                reasoning, and instruction parameters are always set by the client.
+
+        Raises:
+            ValueError: If ``context_window_tokens`` is not positive, or
+                ``max_tokens`` exceeds it.
         """
+        validate_token_budgets(max_tokens, context_window_tokens)
+
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._reasoning_effort = reasoning_effort
         self._default_instructions = instructions
         self._kwargs = kwargs or {}
@@ -328,6 +347,11 @@ class OpenResponsesClient(LLMClient):
         return self._max_tokens
 
     @property
+    def context_window_tokens(self) -> int:
+        """Context capacity used by agents for history summarization."""
+        return self._context_window_tokens
+
+    @property
     def model_slug(self) -> str:
         """Model identifier."""
         return self._model
@@ -348,7 +372,11 @@ class OpenResponsesClient(LLMClient):
             and token usage statistics.
 
         Raises:
-            ContextOverflowError: If the response is incomplete due to token limits.
+            ContextOverflowError: If the provider rejects the request because the input
+                exceeds the model's context capacity.
+            OutputTokenLimitError: If the provider exhausts ``max_tokens``.
+            IncompleteResponseError: If the response is incomplete for another provider
+                reason, such as a content filter.
         """
         # Convert messages to OpenResponses format
         instructions, input_items = _to_open_responses_input(messages)
@@ -373,22 +401,33 @@ class OpenResponsesClient(LLMClient):
             request_kwargs["tools"] = _to_open_responses_tools(tools)
             request_kwargs["tool_choice"] = "auto"
 
-        # Add reasoning effort if configured (for o1/o3 models)
+        # Add reasoning effort if configured (for reasoning models)
         if self._reasoning_effort:
             request_kwargs["reasoning"] = {"effort": self._reasoning_effort}
 
         # Make API call
         request_start_time = perf_counter()
-        response = await self._client.responses.create(**request_kwargs)
+        try:
+            response = await self._client.responses.create(**request_kwargs)
+        except BadRequestError as e:
+            # Only OpenAI's own code is recognised. Compatible endpoints that report a
+            # different code surface as a bad request instead of being recovered;
+            # widening this deliberately trades that for false positives.
+            if e.code != "context_length_exceeded":
+                raise
+            raise ContextOverflowError(str(e)) from e
         request_end_time = perf_counter()
 
-        # Check for incomplete response (context overflow)
         if response.status == "incomplete":
-            stop_reason = getattr(response, "incomplete_details", None)
-            raise ContextOverflowError(
-                f"Response incomplete for model {self.model_slug}: {stop_reason}. "
-                "Reduce max_tokens or message length and try again."
-            )
+            incomplete_details = getattr(response, "incomplete_details", None)
+            incomplete_reason = getattr(incomplete_details, "reason", None) or "unknown"
+            if incomplete_reason == "max_output_tokens":
+                raise OutputTokenLimitError(
+                    model_slug=self.model_slug,
+                    max_tokens=self._max_tokens,
+                    provider_reason=incomplete_reason,
+                )
+            raise IncompleteResponseError(f"Response incomplete for model {self.model_slug}: {incomplete_reason}")
 
         # Parse response output
         content, tool_calls, reasoning = _parse_response_output(response.output)

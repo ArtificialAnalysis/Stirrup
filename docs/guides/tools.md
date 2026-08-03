@@ -238,7 +238,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import default_tools
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="my_agent",
@@ -253,7 +253,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import CALCULATOR_TOOL
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(
     client=client,
     name="custom_agent",

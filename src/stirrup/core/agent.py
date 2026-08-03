@@ -272,7 +272,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         # Create client and agent
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(client=client, name="assistant")
 
         async with agent.session(output_dir="./output") as session:
@@ -365,6 +365,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         Args:
             client: LLM client for generating responses. Use ChatCompletionsClient for
                     OpenAI/OpenAI-compatible APIs, or LiteLLMClient for other providers.
+                    The client's context_window_tokens (a positive int) decides when
+                    conversation history is summarized; a ValueError is raised otherwise.
             name: Name of the agent (used for logging purposes)
             max_turns: Maximum number of turns before stopping
             system_prompt: System prompt to prepend to all runs (when using string prompts)
@@ -401,6 +403,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
         self._client: LLMClient = client
+        context_window_tokens = client.context_window_tokens
+        if (
+            isinstance(context_window_tokens, bool)
+            or not isinstance(context_window_tokens, int)
+            or context_window_tokens <= 0
+        ):
+            raise ValueError(
+                f"client.context_window_tokens must be a positive int, "
+                f"got {context_window_tokens!r} ({type(context_window_tokens).__name__})"
+            )
+        self._context_window_tokens = context_window_tokens
+
         self._name = name
         self._max_turns = max_turns
         self._system_prompt = system_prompt
@@ -1236,12 +1250,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 return True
         return False
 
-    @staticmethod
-    def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
+    def _context_boundary_error(self, messages: list[ChatMessage]) -> ContextOverflowError:
         boundary = (
             "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
         )
-        return ContextOverflowError(f"Context overflow reached the {boundary}")
+        return ContextOverflowError(
+            f"Context overflow reached the {boundary} "
+            f"(configured context_window_tokens={self._context_window_tokens}; providers that count "
+            "the response budget inside the context window leave less room for input)"
+        )
 
     async def step(
         self,
@@ -1513,7 +1530,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if finish_params:
                 break
 
-            pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
+            pct_context_used = assistant_message.token_usage.total / self._context_window_tokens
             if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)

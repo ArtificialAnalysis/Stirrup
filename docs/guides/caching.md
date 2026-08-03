@@ -11,7 +11,7 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import default_tools
 
-client = ChatCompletionsClient(model="gpt-5")
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 agent = Agent(client=client, name="researcher", tools=default_tools(), max_turns=50)
 
 async with agent.session(output_dir="./output", resume=True) as session:

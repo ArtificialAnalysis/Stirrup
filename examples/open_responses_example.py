@@ -25,7 +25,9 @@ async def main() -> None:
     # Uses the OpenAI Responses API (responses.create)
     # For reasoning models, you can set reasoning_effort
     client = OpenResponsesClient(
-        model="gpt-5.2",
+        model="gpt-5.6-luna",
+        max_tokens=8_192,
+        context_window_tokens=1_000_000,
         reasoning_effort="medium",
     )
 

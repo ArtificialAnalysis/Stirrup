@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent, SubAgentParams
 from stirrup.core.cache import CacheState
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -34,12 +34,17 @@ from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
 
 class MockLLMClient(LLMClient):
-    """Mock LLM client for testing."""
+    """Mock LLM client for testing. context_window_tokens matches max_tokens unless given."""
 
-    def __init__(self, responses: list[AssistantMessage | Exception], max_tokens: int = 100_000) -> None:
+    def __init__(
+        self,
+        responses: list[AssistantMessage | Exception],
+        max_tokens: int = 100_000,
+        context_window_tokens: int | None = None,
+    ) -> None:
         self.responses = responses
         self.call_count = 0
-        self._max_tokens = max_tokens
+        self._context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
         self.tools_seen: list[dict[str, Tool]] = []
 
     @property
@@ -47,8 +52,8 @@ class MockLLMClient(LLMClient):
         return "mock-model"
 
     @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
 
     async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
         self.tools_seen.append(tools)
@@ -141,6 +146,61 @@ async def test_agent_basic_finish() -> None:
     # Agent's own token usage metadata should be present
     assert "token_usage" in run_metadata
     assert len(message_history) == 1  # One turn
+    assert client.call_count == 1
+
+
+async def test_output_limit_does_not_control_context_summarization() -> None:
+    responses = [
+        AssistantMessage(content="Working", tool_calls=[], token_usage=TokenUsage(input=700, answer=100)),
+        AssistantMessage(
+            content="Done",
+            tool_calls=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "done", "paths": []}',
+                    tool_call_id="finish",
+                )
+            ],
+            token_usage=TokenUsage(),
+        ),
+    ]
+    client = MockLLMClient(responses, max_tokens=100, context_window_tokens=64_000)
+    agent = Agent(
+        client=client,
+        name="separate-budget-agent",
+        max_turns=2,
+        tools=[],
+        context_summarization_cutoff=0.7,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        finish_params, _history, _metadata = await session.run("complete the task")
+
+    assert finish_params is not None
+    assert client.call_count == 2
+
+
+@pytest.mark.parametrize("context_window_tokens", [0, True, 64_000.0])
+def test_agent_rejects_context_window_that_is_not_a_positive_int(context_window_tokens: int | float) -> None:
+    client = MockLLMClient([], max_tokens=1_000, context_window_tokens=context_window_tokens)  # ty: ignore[invalid-argument-type]
+
+    with pytest.raises(ValueError, match="context_window_tokens must be a positive int"):
+        Agent(client=client, name="invalid-context-agent", tools=[])
+
+
+async def test_output_token_limit_surfaces_without_agent_retry_or_recovery() -> None:
+    error = OutputTokenLimitError(model_slug="mock-model", max_tokens=100, provider_reason="length")
+    client = MockLLMClient(
+        [error, AssistantMessage(content="unused", tool_calls=[], token_usage=TokenUsage())],
+        max_tokens=100,
+    )
+    agent = Agent(client=client, name="output-limit-agent", tools=[])
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        with pytest.raises(OutputTokenLimitError) as exc_info:
+            await session.run("complete the task")
+
+    assert exc_info.value is error
     assert client.call_count == 1
 
 

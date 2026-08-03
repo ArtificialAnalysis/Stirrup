@@ -8,7 +8,7 @@ Example usage:
     from stirrup.tools import default_tools
     from stirrup.tools.browser_use import BrowserUseToolProvider
 
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
     agent = Agent(
         client=client,
         name="browser_agent",

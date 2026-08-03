@@ -1,8 +1,11 @@
 """Tests for OpenResponsesClient."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
 from stirrup.clients.open_responses_client import (
     OpenResponsesClient,
@@ -12,6 +15,7 @@ from stirrup.clients.open_responses_client import (
     _to_open_responses_input,
     _to_open_responses_tools,
 )
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     SystemMessage,
@@ -288,17 +292,21 @@ class TestOpenResponsesClient:
         """Test client property accessors."""
         client = OpenResponsesClient(
             model="gpt-4o",
-            max_tokens=50000,
+            max_tokens=50_000,
+            context_window_tokens=120_000,
             api_key="test-key",
         )
+
         assert client.model_slug == "gpt-4o"
-        assert client.max_tokens == 50000
+        assert client.max_tokens == 50_000
+        assert client.context_window_tokens == 120_000
 
     @pytest.mark.asyncio
     async def test_generate_basic(self) -> None:
         """Test basic generation with mocked response."""
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
         )
 
@@ -336,6 +344,7 @@ class TestOpenResponsesClient:
 
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
         )
 
@@ -377,6 +386,7 @@ class TestOpenResponsesClient:
         """Test that reasoning tokens are properly extracted."""
         client = OpenResponsesClient(
             model="o1-preview",
+            context_window_tokens=64_000,
             api_key="test-key",
             reasoning_effort="medium",
         )
@@ -413,34 +423,86 @@ class TestOpenResponsesClient:
         assert result.token_usage.answer == 20  # 100 - 80
 
     @pytest.mark.asyncio
-    async def test_generate_incomplete_raises_error(self) -> None:
-        """Test that incomplete response raises ContextOverflowError."""
-        from stirrup.core.exceptions import ContextOverflowError
-
+    async def test_output_limit_is_forwarded_and_reported_without_retry(self) -> None:
         client = OpenResponsesClient(
             model="gpt-4o",
+            max_tokens=456,
+            context_window_tokens=120_000,
             api_key="test-key",
         )
+        mock_response = MagicMock(
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+            output=[],
+            usage=MagicMock(input_tokens=100, output_tokens=0),
+        )
+        provider_call = AsyncMock(return_value=mock_response)
+        client._client.responses.create = provider_call  # type: ignore[method-assign]  # noqa: SLF001
 
-        mock_response = MagicMock()
-        mock_response.status = "incomplete"
-        mock_response.incomplete_details = "max_output_tokens reached"
-        mock_response.output = []
-        mock_response.usage = MagicMock(input_tokens=100, output_tokens=0)
-
-        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
-
-        with pytest.raises(ContextOverflowError, match="incomplete"):
+        with pytest.raises(OutputTokenLimitError) as exc_info:
             await client.generate(
                 messages=[UserMessage(content="Very long request")],
                 tools={},
             )
+
+        assert exc_info.value.model_slug == "gpt-4o"
+        assert exc_info.value.max_tokens == 456
+        assert exc_info.value.provider_reason == "max_output_tokens"
+        provider_call.assert_awaited_once()
+        provider_request = provider_call.await_args
+        assert provider_request is not None
+        assert provider_request.kwargs["max_output_tokens"] == 456
+
+    @pytest.mark.asyncio
+    async def test_context_length_rejection_surfaces_as_context_overflow(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", context_window_tokens=64_000, api_key="test-key")
+        response = httpx.Response(
+            400,
+            json={"error": {"message": "boom", "type": "invalid_request_error", "code": "context_length_exceeded"}},
+            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        )
+        client._client.responses.create = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+            side_effect=BadRequestError("boom", response=response, body=response.json()["error"])
+        )
+
+        with pytest.raises(ContextOverflowError):
+            await client.generate(messages=[UserMessage(content="Very long request")], tools={})
+
+    @pytest.mark.asyncio
+    async def test_unrelated_bad_request_is_not_mapped_to_context_overflow(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", context_window_tokens=64_000, api_key="test-key")
+        response = httpx.Response(
+            400,
+            json={"error": {"message": "boom", "type": "invalid_request_error", "code": "invalid_value"}},
+            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        )
+        client._client.responses.create = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+            side_effect=BadRequestError("boom", response=response, body=response.json()["error"])
+        )
+
+        with pytest.raises(BadRequestError):
+            await client.generate(messages=[UserMessage(content="hello")], tools={})
+
+    @pytest.mark.asyncio
+    async def test_non_output_limit_incomplete_raises_stirrup_error(self) -> None:
+        client = OpenResponsesClient(model="gpt-4o", context_window_tokens=64_000, api_key="test-key")
+        mock_response = MagicMock(
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason="content_filter"),
+            output=[],
+            usage=None,
+        )
+        client._client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]  # noqa: SLF001
+
+        with pytest.raises(IncompleteResponseError, match="content_filter"):
+            await client.generate(messages=[UserMessage(content="Hi")], tools={})
 
     @pytest.mark.asyncio
     async def test_instructions_from_system_message(self) -> None:
         """Test that SystemMessage is passed as instructions parameter."""
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
         )
 
@@ -480,6 +542,7 @@ class TestOpenResponsesClient:
         """Test that default instructions are used when no SystemMessage provided."""
         client = OpenResponsesClient(
             model="gpt-4o",
+            context_window_tokens=64_000,
             api_key="test-key",
             instructions="Default instructions",
         )

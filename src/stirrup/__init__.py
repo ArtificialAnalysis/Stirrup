@@ -7,7 +7,7 @@ Example usage:
     from stirrup.tools.mcp import MCPToolProvider
 
     # Create a client for your LLM provider
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 
     # Simple usage with default tools
     agent = Agent(
@@ -30,7 +30,7 @@ Example usage:
 
 from stirrup import tools
 from stirrup.core.agent import Agent, SessionAgent
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.models import (
     Addable,
     AssistantMessage,
@@ -63,7 +63,9 @@ __all__ = [
     "ContextOverflowError",
     "EmptyParams",
     "ImageContentBlock",
+    "IncompleteResponseError",
     "LLMClient",
+    "OutputTokenLimitError",
     "SessionAgent",
     "SubAgentMetadata",
     "SummaryMessage",
