@@ -180,26 +180,6 @@ async def test_output_limit_does_not_control_context_summarization() -> None:
     assert client.call_count == 2
 
 
-def test_agent_rejects_structural_client_without_context_window_tokens() -> None:
-    class DuckTypedLegacyClient:
-        """Structural client with no context_window_tokens attribute at all."""
-
-        @property
-        def model_slug(self) -> str:
-            return "duck-model"
-
-        @property
-        def max_tokens(self) -> int:
-            return 1_000
-
-        async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
-            del messages, tools
-            raise NotImplementedError
-
-    with pytest.raises(ValueError, match="context_window_tokens must be a positive int"):
-        Agent(client=DuckTypedLegacyClient(), name="duck-client-agent", tools=[])  # ty: ignore[invalid-argument-type]
-
-
 @pytest.mark.parametrize("context_window_tokens", [0, True, 64_000.0])
 def test_agent_rejects_context_window_that_is_not_a_positive_int(context_window_tokens: int | float) -> None:
     client = MockLLMClient([], max_tokens=1_000, context_window_tokens=context_window_tokens)  # ty: ignore[invalid-argument-type]

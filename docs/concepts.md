@@ -271,7 +271,7 @@ class MyCustomClient(LLMClient):
 ```
 
 `Agent` reads `context_window_tokens` at construction and raises a `ValueError`
-unless it is a positive int.
+when the returned value is not a positive int.
 
 → See [Custom Clients](extending/clients.md) for full documentation.
 

@@ -403,12 +403,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
         self._client: LLMClient = client
-        try:
-            context_window_tokens = client.context_window_tokens
-        except AttributeError as e:
-            raise ValueError(
-                "client.context_window_tokens must be a positive int; reading it raised AttributeError"
-            ) from e
+        context_window_tokens = client.context_window_tokens
         if (
             isinstance(context_window_tokens, bool)
             or not isinstance(context_window_tokens, int)
