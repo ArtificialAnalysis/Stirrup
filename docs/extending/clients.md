@@ -19,7 +19,7 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 | Member | Type | Description |
 |--------|------|-------------|
 | `generate()` | `async method` | Generate next message with optional tool calls |
-| `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
+| `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-5.6-luna"`) |
 | `context_window_tokens` | `property` | Model context capacity the agent summarizes history against |
 
 `context_window_tokens` must return a positive int; `Agent` reads it once at

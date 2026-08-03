@@ -63,7 +63,7 @@ class LiteLLMClient(LLMClient):
         """Initialize LiteLLM client with model configuration and capabilities.
 
         Args:
-            model: Model identifier for LiteLLM (e.g., 'anthropic/claude-3-5-sonnet-20241022')
+            model: Model identifier for LiteLLM (e.g., 'anthropic/claude-opus-5')
             max_tokens: Maximum number of tokens the provider may generate
             context_window_tokens: Context capacity used to decide when Agent history
                 should be summarized.

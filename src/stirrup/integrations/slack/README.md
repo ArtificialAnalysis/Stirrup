@@ -140,7 +140,7 @@ Once the bot is running:
 | `@Stirrup agent:data summarise this` + attach a CSV | Runs the "data" named agent with the file as input |
 | `@Stirrup agent:browser go to example.com and summarise it` | Runs the browser agent to navigate and extract info |
 | `@Stirrup model:anthropic/claude-opus-5 write a poem` | Runs the default agent but overrides the model |
-| `@Stirrup agent:data model:openai/gpt-4o analyze trends` + attach files | Named agent + model override + file input |
+| `@Stirrup agent:data model:openai/gpt-5.6-luna analyze trends` + attach files | Named agent + model override + file input |
 
 - **Responses appear in a thread** under your message to keep the channel clean
 - **Output files** (charts, CSVs, etc.) are uploaded back to the thread

@@ -75,7 +75,7 @@ class ChatCompletionsClient(LLMClient):
         """Initialize OpenAI SDK client with model configuration.
 
         Args:
-            model: Model identifier (e.g., 'gpt-5', 'gpt-4o', 'o1-preview').
+            model: Model identifier (e.g., 'gpt-5.6-luna', 'gpt-5.6-sol').
             max_tokens: Maximum number of tokens the provider may generate. Defaults to 64,000.
             context_window_tokens: Context capacity used to decide when Agent history
                 should be summarized.
@@ -84,7 +84,7 @@ class ChatCompletionsClient(LLMClient):
             api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
                 environment variable.
             reasoning_effort: Reasoning effort level for extended thinking models
-                (e.g., 'low', 'medium', 'high'). Only used with o1/o3 style models.
+                (e.g., 'low', 'medium', 'high'). Only used with reasoning models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
             max_retries: Number of retries for transient errors. Defaults to 2.
                 The OpenAI SDK handles retries internally with exponential backoff.
@@ -163,7 +163,7 @@ class ChatCompletionsClient(LLMClient):
             request_kwargs["tools"] = to_openai_tools(tools)
             request_kwargs["tool_choice"] = "auto"
 
-        # Add reasoning effort if configured (for o1/o3 models)
+        # Add reasoning effort if configured (for reasoning models)
         if self._reasoning_effort:
             request_kwargs["reasoning_effort"] = self._reasoning_effort
 
@@ -191,7 +191,7 @@ class ChatCompletionsClient(LLMClient):
 
         msg = choice.message
 
-        # Parse reasoning content (for o1/o3 models with extended thinking)
+        # Parse reasoning content (for reasoning models with extended thinking)
         reasoning: Reasoning | None = None
         if hasattr(msg, "reasoning_content") and msg.reasoning_content:
             reasoning = Reasoning(content=msg.reasoning_content)
@@ -211,7 +211,7 @@ class ChatCompletionsClient(LLMClient):
         input_tokens = usage.prompt_tokens if usage else 0
         output_tokens = usage.completion_tokens if usage else 0
 
-        # Handle reasoning tokens if available (for o1/o3 models)
+        # Handle reasoning tokens if available (for reasoning models)
         reasoning_tokens = 0
         if usage and hasattr(usage, "completion_tokens_details") and usage.completion_tokens_details:
             reasoning_tokens = getattr(usage.completion_tokens_details, "reasoning_tokens", 0) or 0

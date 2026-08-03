@@ -160,7 +160,7 @@ data_agent = SlackAgentConfig(
 | `@Stirrup agent:data summarise this` + attach a CSV | Runs the "data" named agent with the file as input |
 | `@Stirrup agent:browser go to example.com and summarise it` | Runs the browser agent |
 | `@Stirrup model:anthropic/claude-opus-5 write a poem` | Default agent with model override |
-| `@Stirrup agent:data model:openai/gpt-4o analyze trends` + files | Named agent + model override + files |
+| `@Stirrup agent:data model:openai/gpt-5.6-luna analyze trends` + files | Named agent + model override + files |
 
 - **Responses appear in a thread** under your message
 - **Output files** (charts, CSVs, etc.) are uploaded back to the thread

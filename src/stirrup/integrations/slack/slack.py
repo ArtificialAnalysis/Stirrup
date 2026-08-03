@@ -3,8 +3,8 @@
 Usage:
     @stirrup do xyz                              → default agent, default model
     @stirrup agent:data-analyst summarise this   → named agent
-    @stirrup model:gpt-4o do xyz                 → default agent, override model
-    @stirrup agent:data model:gpt-4o do xyz      → named agent + model override
+    @stirrup model:openai/gpt-5.6-luna do xyz    → default agent, override model
+    @stirrup agent:data model:openai/gpt-5.6-luna do xyz → named agent + model override
 
 Requires: pip install stirrup[slack]
 """

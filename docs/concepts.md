@@ -243,7 +243,7 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 | `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-opus-5"`) |
 | `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
 | `context_window_tokens` | `int` | required | Context capacity for summarization |
-| `reasoning_effort` | `str \| None` | `None` | For reasoning models (o1/o3) |
+| `reasoning_effort` | `str \| None` | `None` | For reasoning models (e.g. GPT-5.6) |
 | `kwargs` | `dict \| None` | `None` | Additional provider-specific arguments |
 
 !!! note "LiteLLM Installation"
