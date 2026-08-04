@@ -110,7 +110,7 @@ async def test_sync_tool_can_run_in_event_loop() -> None:
     assert thread_ids == [get_ident()]
 
 
-def test_truncator_requires_positive_budget() -> None:
+def test_truncator_requires_room_for_marker() -> None:
     with pytest.raises(ValueError, match="max_chars must be at least"):
         ToolTruncatorMiddleware(max_chars=0)
 
