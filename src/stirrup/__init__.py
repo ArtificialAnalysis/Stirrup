@@ -65,6 +65,13 @@ from stirrup.core.models import (
     reasoning_blocks,
     tool_call_blocks,
 )
+from stirrup.tools.middleware import (
+    DiskSpillMiddleware,
+    ExecEnvSink,
+    Sink,
+    ToolMiddleware,
+    ToolTruncatorMiddleware,
+)
 
 __all__ = [
     "Addable",
@@ -75,8 +82,10 @@ __all__ = [
     "AudioContentBlock",
     "ChatMessage",
     "ContextOverflowError",
+    "DiskSpillMiddleware",
     "EmptyParams",
     "EncryptedReasoningBlock",
+    "ExecEnvSink",
     "ImageContentBlock",
     "IncompleteResponseError",
     "LLMClient",
@@ -87,6 +96,7 @@ __all__ = [
     "RedactedReasoningBlock",
     "SessionAgent",
     "SignedReasoningBlock",
+    "Sink",
     "SubAgentMetadata",
     "SystemMessage",
     "TextBlock",
@@ -94,8 +104,10 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolMessage",
+    "ToolMiddleware",
     "ToolProvider",
     "ToolResult",
+    "ToolTruncatorMiddleware",
     "ToolUseCountMetadata",
     "UserMessage",
     "VideoContentBlock",

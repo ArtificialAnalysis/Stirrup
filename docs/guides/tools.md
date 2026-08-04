@@ -261,6 +261,24 @@ agent = Agent(
 )
 ```
 
+## Tool Middleware
+
+Middleware wraps an individual tool without changing its schema.
+
+- `DiskSpillMiddleware` writes large output to a `Sink` and adds its path to the result.
+- `ToolTruncatorMiddleware` shortens large output.
+
+```python
+--8<-- "examples/tool_middleware_example.py:middleware"
+```
+
+Middleware runs inside out. In this example, `spill` receives the full output and
+`truncate` shortens the result returned to the model. `ExecEnvSink` writes spilled files
+into the agent's execution environment. For thread-affine tools, set
+`run_sync_in_thread=False` on the middleware directly wrapping the synchronous tool.
+
+→ See [Middleware API](../api/tools/middleware.md) for the full reference.
+
 ## Next Steps
 
 - [Tool Providers](tool-providers.md) - Tools with lifecycle management

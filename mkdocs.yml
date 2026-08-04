@@ -105,6 +105,7 @@ nav:
           - LiteLLM: api/clients/litellm.md
       - Tools:
           - Overview: api/tools/index.md
+          - Middleware: api/tools/middleware.md
           - Web Tools: api/tools/web.md
           - Code Execution: api/tools/code_backends.md
           - MCP: api/tools/mcp.md
