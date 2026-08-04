@@ -31,6 +31,14 @@ Example usage:
 from stirrup import tools
 from stirrup.core.agent import Agent, SessionAgent
 from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.middleware import (
+    DiskSpillMiddleware,
+    ExecEnvSink,
+    LocalDirSink,
+    Sink,
+    ToolMiddleware,
+    ToolTruncatorMiddleware,
+)
 from stirrup.core.models import (
     Addable,
     AssistantMessage,
@@ -61,10 +69,14 @@ __all__ = [
     "AudioContentBlock",
     "ChatMessage",
     "ContextOverflowError",
+    "DiskSpillMiddleware",
     "EmptyParams",
+    "ExecEnvSink",
     "ImageContentBlock",
     "LLMClient",
+    "LocalDirSink",
     "SessionAgent",
+    "Sink",
     "SubAgentMetadata",
     "SummaryMessage",
     "SystemMessage",
@@ -72,8 +84,10 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolMessage",
+    "ToolMiddleware",
     "ToolProvider",
     "ToolResult",
+    "ToolTruncatorMiddleware",
     "ToolUseCountMetadata",
     "UserMessage",
     "VideoContentBlock",

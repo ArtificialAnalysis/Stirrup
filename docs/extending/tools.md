@@ -169,6 +169,32 @@ async def chart_tool(params: ChartParams) -> ToolResult[ToolUseCountMetadata]:
     )
 ```
 
+## Tool Middleware
+
+Write your own by subclassing `ToolMiddleware` and implementing `handle`:
+
+```python
+from pydantic import BaseModel
+
+from stirrup import Tool, ToolMiddleware, ToolResult
+from stirrup.core.middleware import Call
+
+
+class TraceMiddleware(ToolMiddleware):
+    async def handle(
+        self,
+        tool: Tool,
+        params: BaseModel,
+        call: Call,
+    ) -> ToolResult:
+        print(f"→ {tool.name}")
+        result = await call(params)
+        print(f"← {tool.name}")
+        return result
+```
+
+→ See [Tool Middleware](../guides/tools.md#tool-middleware) for the built-in options.
+
 ## Testing Tools
 
 ```python
@@ -201,5 +227,6 @@ async def test_tool_error_handling():
 ## Next Steps
 
 - [Tool Providers](../guides/tool-providers.md) - Provider pattern basics
+- [Middleware API](../api/core/middleware.md) - Truncation and disk spill
 - [Custom Loggers](loggers.md) - Logging customization
 - [Custom Backends](code_backends.md) - Code execution backends

@@ -98,6 +98,7 @@ nav:
       - Core:
           - Agent: api/core/agent.md
           - Models: api/core/models.md
+          - Middleware: api/core/middleware.md
           - Exceptions: api/core/exceptions.md
       - Clients:
           - ChatCompletions: api/clients/chat_completions.md
