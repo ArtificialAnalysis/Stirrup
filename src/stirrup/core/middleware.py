@@ -5,14 +5,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import anyio
 from pydantic import BaseModel
 
 from stirrup.core.models import Content, Tool, ToolResult
-from stirrup.utils.text import truncate_msg
 
 if TYPE_CHECKING:
     from stirrup.tools.code_backends.base import CodeExecToolProvider
@@ -35,21 +34,39 @@ type Call = Callable[[BaseModel], Awaitable[ToolResult]]
 type Summarizer = Callable[[str, int], str]
 """Shrinks text to fit within a character budget."""
 
+_TRUNCATION_MARKER = "\n...[truncated]...\n"
 
-async def call_executor(tool: Tool, params: BaseModel) -> ToolResult:
-    """Invoke a tool's executor, offloading synchronous executors to a worker thread."""
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    remaining = max_chars - len(_TRUNCATION_MARKER)
+    head_chars = (remaining + 1) // 2
+    tail_chars = remaining // 2
+    return f"{text[:head_chars]}{_TRUNCATION_MARKER}{text[-tail_chars:] if tail_chars else ''}"
+
+
+async def call_executor(tool: Tool, params: BaseModel, *, run_sync_in_thread: bool = True) -> ToolResult:
+    """Invoke a tool executor."""
     if inspect.iscoroutinefunction(tool.executor):
         return await tool.executor(params)
-    result = await anyio.to_thread.run_sync(tool.executor, params)  # ty: ignore[unresolved-attribute]
-    return await result if inspect.isawaitable(result) else result
+    if run_sync_in_thread:
+        result = await anyio.to_thread.run_sync(tool.executor, params)  # ty: ignore[unresolved-attribute]
+    else:
+        result = tool.executor(params)
+    return cast(ToolResult, await result) if inspect.isawaitable(result) else result
 
 
 class ToolMiddleware(ABC):
     """Wrap a tool's executor without changing its schema."""
 
+    _run_sync_in_thread = True
+
+    def __init__(self, *, run_sync_in_thread: bool = True) -> None:
+        self._run_sync_in_thread = run_sync_in_thread
+
     def __call__(self, tool: Tool) -> Tool:
         async def executor(params: BaseModel) -> ToolResult:
-            return await self.handle(tool, params, partial(call_executor, tool))
+            call = partial(call_executor, tool, run_sync_in_thread=self._run_sync_in_thread)
+            return await self.handle(tool, params, call)
 
         return tool.model_copy(update={"executor": executor})
 
@@ -109,9 +126,10 @@ def _session_exec_env() -> "CodeExecToolProvider | None":
 class DiskSpillMiddleware(ToolMiddleware):
     """Spills oversized tool output to a sink."""
 
-    def __init__(self, max_chars: int, sink: Sink) -> None:
+    def __init__(self, max_chars: int, sink: Sink, *, run_sync_in_thread: bool = True) -> None:
         if max_chars <= 0:
             raise ValueError("max_chars must be positive")
+        super().__init__(run_sync_in_thread=run_sync_in_thread)
         self._max_chars = max_chars
         self._sink = sink
 
@@ -122,29 +140,31 @@ class DiskSpillMiddleware(ToolMiddleware):
             return result
 
         path = await self._sink.write(_dump_name(tool.name), text)
-        notice = (
-            f"Output was {len(text)} characters and has been saved to {path}. "
-            f"Read that file to see it in full.\n\n{text}"
-        )
-        return result.model_copy(update={"content": _replace_text(result.content, notice)})
+        notice = f"Output was {len(text)} characters and has been saved to {path}. Read that file to see it in full."
+        content = [notice, result.content] if isinstance(result.content, str) else [notice, *result.content]
+        return result.model_copy(update={"content": content})
 
 
 class ToolTruncatorMiddleware(ToolMiddleware):
     """Truncates oversized tool output."""
 
-    def __init__(self, max_chars: int, *, summarize: Summarizer = truncate_msg) -> None:
-        if max_chars <= 0:
-            raise ValueError("max_chars must be positive")
+    def __init__(
+        self,
+        max_chars: int,
+        *,
+        summarize: Summarizer = _truncate_text,
+        run_sync_in_thread: bool = True,
+    ) -> None:
+        if max_chars < len(_TRUNCATION_MARKER):
+            raise ValueError(f"max_chars must be at least {len(_TRUNCATION_MARKER)}")
+        super().__init__(run_sync_in_thread=run_sync_in_thread)
         self._max_chars = max_chars
         self._summarize = summarize
 
     async def handle(self, tool: Tool, params: BaseModel, call: Call) -> ToolResult:  # noqa: ARG002
         result = await call(params)
-        text = "\n".join(_text_parts(result.content))
-        if len(text) <= self._max_chars:
-            return result
-        truncated = self._summarize(text, self._max_chars)
-        return result.model_copy(update={"content": _replace_text(result.content, truncated)})
+        content = _truncate_content(result.content, self._max_chars, self._summarize)
+        return result if content == result.content else result.model_copy(update={"content": content})
 
 
 def _text_parts(content: Content) -> list[str]:
@@ -153,21 +173,19 @@ def _text_parts(content: Content) -> list[str]:
     return [block for block in content if isinstance(block, str)]
 
 
-def _replace_text(content: Content, text: str) -> Content:
-    """Substitute the text of a result, preserving any image/video/audio blocks."""
+def _truncate_content(content: Content, max_chars: int, summarize: Summarizer) -> Content:
     if isinstance(content, str):
-        return text
+        return _summarize(content, max_chars, summarize)
+    return [_summarize(block, max_chars, summarize) if isinstance(block, str) else block for block in content]
 
-    replaced = False
-    output = []
-    for block in content:
-        if isinstance(block, str):
-            if not replaced:
-                output.append(text)
-                replaced = True
-        else:
-            output.append(block)
-    return output
+
+def _summarize(text: str, max_chars: int, summarize: Summarizer) -> str:
+    if len(text) <= max_chars:
+        return text
+    result = summarize(text, max_chars)
+    if len(result) > max_chars:
+        raise ValueError("summarizer returned more than max_chars")
+    return result
 
 
 def _dump_name(tool_name: str) -> str:
