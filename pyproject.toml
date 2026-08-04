@@ -68,6 +68,9 @@ dev = [
     "ty>=0.0.56",
 ]
 
+[tool.uv]
+exclude-newer = "7 days"
+
 [tool.pytest.ini_options]
 addopts = ["--strict-markers"]
 anyio_mode = "auto"
