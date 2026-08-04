@@ -19,8 +19,21 @@ All LLM clients must implement the [`LLMClient`][stirrup.core.models.LLMClient] 
 | Member | Type | Description |
 |--------|------|-------------|
 | `generate()` | `async method` | Generate next message with optional tool calls |
-| `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-4o"`) |
-| `max_tokens` | `property` | Maximum context window size |
+| `model_slug` | `property` | Model identifier string (e.g., `"openai/gpt-5.6-luna"`) |
+| `context_window_tokens` | `property` | Model context capacity the agent summarizes history against |
+
+`context_window_tokens` must return a positive int; `Agent` reads it once at
+construction and summarizes conversation history as usage approaches that
+capacity. There is no fallback: a client that does not expose it fails at
+`Agent` construction. An output cap (`max_tokens`) is a client-internal request
+parameter — the built-in clients take one, but the protocol does not require it
+and the framework never reads it.
+
+Custom clients that adapt provider stop reasons should raise
+`OutputTokenLimitError` when the provider exhausts the response budget. Reserve
+`ContextOverflowError` for request input that does not fit the model context.
+The agent may summarize and retry the latter; it surfaces an output-limit failure
+without summarization or retry with the unchanged limit.
 
 ## Basic Implementation
 
@@ -39,11 +52,14 @@ class MyCustomClient:
     def __init__(
         self,
         model: str,
-        max_tokens: int = 64_000,
+        max_tokens: int = 8_192,
+        *,
+        context_window_tokens: int,
         api_key: str | None = None,
     ):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._api_key = api_key
 
     @property
@@ -51,8 +67,8 @@ class MyCustomClient:
         return self._model
 
     @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
 
     async def generate(
         self,
@@ -79,7 +95,8 @@ from stirrup import Agent
 
 client = MyCustomClient(
     model="my-model-id",
-    max_tokens=100_000,
+    max_tokens=8_192,
+    context_window_tokens=100_000,
     api_key="...",
 )
 
@@ -92,19 +109,26 @@ agent = Agent(
 
 ## OpenAI API Example
 
-Stirrup message types use OpenAI-compatible field names (`role`, `content`, `tool_call_id`), so conversion is straightforward. The main difference is the `tool_calls` structure—OpenAI nests them under `function`.
+Stirrup's user, system, and tool message types use OpenAI-compatible field names (`role`, `content`, `tool_call_id`), so conversion is straightforward; assistant messages are block-based, and the `joined_text` / `tool_call_blocks` helpers project them into channel shape. The main difference is the `tool_calls` structure—OpenAI nests them under `function`.
 
 ```python
 import openai
-from stirrup import AssistantMessage, ChatMessage, Tool, ToolCall, ToolMessage, TokenUsage
+from stirrup import AssistantMessage, ChatMessage, TextBlock, Tool, ToolCall, ToolMessage, TokenUsage, joined_text, tool_call_blocks
 
 
 class OpenAIClient:
     """Direct OpenAI API client."""
 
-    def __init__(self, model: str = "gpt-4o", max_tokens: int = 128_000):
+    def __init__(
+        self,
+        model: str = "gpt-5.6-luna",
+        max_tokens: int = 8_192,
+        *,
+        context_window_tokens: int,
+    ):
         self._model = model
         self._max_tokens = max_tokens
+        self._context_window_tokens = context_window_tokens
         self._client = openai.AsyncOpenAI()
 
     @property
@@ -112,18 +136,18 @@ class OpenAIClient:
         return f"openai/{self._model}"
 
     @property
-    def max_tokens(self) -> int:
-        return self._max_tokens
+    def context_window_tokens(self) -> int:
+        return self._context_window_tokens
 
     def _convert_message(self, msg: ChatMessage) -> dict:
         """Convert a message to OpenAI format."""
         # SystemMessage, UserMessage, ToolMessage have compatible structure
         if isinstance(msg, AssistantMessage):
-            result = {"role": "assistant", "content": str(msg.content)}
-            if msg.tool_calls:
+            result = {"role": "assistant", "content": joined_text(msg.blocks) or ""}
+            if tool_calls := tool_call_blocks(msg.blocks):
                 result["tool_calls"] = [
                     {"id": tc.tool_call_id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
-                    for tc in msg.tool_calls
+                    for tc in tool_calls
                 ]
             return result
         elif isinstance(msg, ToolMessage):
@@ -139,18 +163,53 @@ class OpenAIClient:
             for t in tools.values()
         ] or None
 
-        response = await self._client.chat.completions.create(model=self._model, messages=api_messages, tools=api_tools)
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=api_messages,
+            tools=api_tools,
+            max_completion_tokens=self._max_tokens,
+        )
         message = response.choices[0].message
 
+        blocks = []
+        if message.content:
+            blocks.append(TextBlock(text=message.content))
+        blocks.extend(
+            ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id)
+            for tc in (message.tool_calls or [])
+        )
+
         return AssistantMessage(
-            content=message.content or "",
-            tool_calls=[ToolCall(name=tc.function.name, arguments=tc.function.arguments, tool_call_id=tc.id) for tc in (message.tool_calls or [])],
+            blocks=blocks,
             token_usage=TokenUsage(input=response.usage.prompt_tokens, answer=response.usage.completion_tokens),
         )
 ```
 
 You can optionally populate `request_start_time` and `request_end_time` on `AssistantMessage`
 to track generation speed. The derived `e2e_otps` property computes output tokens per second.
+
+Construct `AssistantMessage` from blocks and replay from `msg.blocks` when converting
+history back to your API format. This preserves ordered provider output, including
+interleaved thinking, text, and tool calls. Channel-shaped v0.1 data is supported only
+when reading persisted histories.
+
+## Integration contract
+
+Stirrup guarantees the following to client and integration authors:
+
+- **Stable identity.** `AssistantMessage.id` is assigned once at construction and survives
+  `model_dump`/`model_validate` round trips.
+- **Same object in history.** The exact object returned by `generate` is appended to
+  history and passed back on subsequent `generate` calls — the framework never copies or
+  rebuilds history messages outside summarization and context-overflow unwinding.
+- **Subclasses are preserved.** `generate` may return an `AssistantMessage` subclass; use
+  this as a typed in-memory carrier for integration state (mark extra fields
+  `exclude=True` to keep them out of serialized histories).
+- **`metadata` is opaque.** The framework never reads, writes, drops, or transmits message
+  metadata. Namespace your keys (e.g. `"myco/..."`); the un-namespaced space belongs to users.
+- **Summaries carry lineage.** When history is summarized, the `SummaryMessage` records the
+  ids of the assistant messages it replaced (`replaced_ids`, chained transitively across
+  summarization rounds), so dumped histories reconstruct which turns a summary stands for.
 
 ## Testing with Mock Client
 
@@ -167,8 +226,8 @@ class MockClient:
         return "mock/test-model"
 
     @property
-    def max_tokens(self) -> int:
-        return 10_000
+    def context_window_tokens(self) -> int:
+        return 100_000
 
     async def generate(self, messages, tools) -> AssistantMessage:
         response = self._responses[self._call_count]
@@ -178,7 +237,7 @@ class MockClient:
 
 # Use in tests
 mock = MockClient([
-    AssistantMessage(content="Hello!", tool_calls=[], token_usage=TokenUsage()),
+    AssistantMessage(blocks=[TextBlock(text="Hello!")], token_usage=TokenUsage()),
 ])
 
 agent = Agent(client=mock, name="test")

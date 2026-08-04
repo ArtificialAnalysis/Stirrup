@@ -7,7 +7,7 @@ Example usage:
     from stirrup.tools.mcp import MCPToolProvider
 
     # Create a client for your LLM provider
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
 
     # Simple usage with default tools
     agent = Agent(
@@ -30,7 +30,7 @@ Example usage:
 
 from stirrup import tools
 from stirrup.core.agent import Agent, SessionAgent
-from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
 from stirrup.core.middleware import (
     DiskSpillMiddleware,
     ExecEnvSink,
@@ -41,15 +41,23 @@ from stirrup.core.middleware import (
 )
 from stirrup.core.models import (
     Addable,
+    AnyReasoningBlock,
+    AssistantBlock,
     AssistantMessage,
     AudioContentBlock,
     ChatMessage,
     EmptyParams,
+    EncryptedReasoningBlock,
     ImageContentBlock,
     LLMClient,
+    OpaqueBlock,
+    ReasoningBlock,
+    ReasoningRefBlock,
+    RedactedReasoningBlock,
+    SignedReasoningBlock,
     SubAgentMetadata,
-    SummaryMessage,
     SystemMessage,
+    TextBlock,
     TokenUsage,
     Tool,
     ToolCall,
@@ -60,26 +68,40 @@ from stirrup.core.models import (
     UserMessage,
     VideoContentBlock,
     aggregate_metadata,
+    final_text,
+    joined_text,
+    reasoning_blocks,
+    tool_call_blocks,
 )
 
 __all__ = [
     "Addable",
     "Agent",
+    "AnyReasoningBlock",
+    "AssistantBlock",
     "AssistantMessage",
     "AudioContentBlock",
     "ChatMessage",
     "ContextOverflowError",
     "DiskSpillMiddleware",
     "EmptyParams",
+    "EncryptedReasoningBlock",
     "ExecEnvSink",
     "ImageContentBlock",
+    "IncompleteResponseError",
     "LLMClient",
     "LocalDirSink",
+    "OpaqueBlock",
+    "OutputTokenLimitError",
+    "ReasoningBlock",
+    "ReasoningRefBlock",
+    "RedactedReasoningBlock",
     "SessionAgent",
+    "SignedReasoningBlock",
     "Sink",
     "SubAgentMetadata",
-    "SummaryMessage",
     "SystemMessage",
+    "TextBlock",
     "TokenUsage",
     "Tool",
     "ToolCall",
@@ -92,5 +114,9 @@ __all__ = [
     "UserMessage",
     "VideoContentBlock",
     "aggregate_metadata",
+    "final_text",
+    "joined_text",
+    "reasoning_blocks",
+    "tool_call_blocks",
     "tools",
 ]

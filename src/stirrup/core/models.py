@@ -3,7 +3,7 @@ import mimetypes
 import warnings
 from abc import ABC, abstractmethod
 from base64 import b64encode
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -17,12 +17,21 @@ import filetype
 from moviepy import AudioFileClip, VideoFileClip
 from moviepy.video.fx import Resize
 from PIL import Image
-from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    PlainValidator,
+    model_validator,
+)
 
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
 
 __all__ = [
     "Addable",
+    "AnyReasoningBlock",
+    "AssistantBlock",
     "AssistantMessage",
     "AudioContentBlock",
     "BinaryContentBlock",
@@ -30,11 +39,19 @@ __all__ = [
     "Content",
     "ContentBlock",
     "EmptyParams",
+    "EncryptedReasoningBlock",
     "ImageContentBlock",
     "LLMClient",
+    "OpaqueBlock",
+    "Reasoning",
+    "ReasoningBlock",
+    "ReasoningRefBlock",
+    "RedactedReasoningBlock",
+    "SignedReasoningBlock",
     "SubAgentMetadata",
     "SummaryMessage",
     "SystemMessage",
+    "TextBlock",
     "TokenUsage",
     "Tool",
     "ToolCall",
@@ -46,6 +63,10 @@ __all__ = [
     "UserMessage",
     "VideoContentBlock",
     "aggregate_metadata",
+    "final_text",
+    "joined_text",
+    "reasoning_blocks",
+    "tool_call_blocks",
 ]
 
 
@@ -79,7 +100,7 @@ def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple
 
 
 # Content
-class BinaryContentBlock(BaseModel, ABC):
+class BinaryContentBlock(BaseModel, ABC, frozen=True):
     """Base class for binary content (images, video, audio) with MIME type validation."""
 
     data: Base64Bytes
@@ -114,7 +135,7 @@ class BinaryContentBlock(BaseModel, ABC):
         """Verify content can be opened and read; subclasses implement format-specific checks."""
 
 
-class ImageContentBlock(BinaryContentBlock):
+class ImageContentBlock(BinaryContentBlock, frozen=True):
     """Image content supporting PNG, JPEG, WebP, PSD formats with automatic downscaling."""
 
     kind: Literal["image_content_block"] = "image_content_block"
@@ -146,7 +167,7 @@ class ImageContentBlock(BinaryContentBlock):
         return f"data:image/png;base64,{b64encode(buf.getvalue()).decode()}"
 
 
-class VideoContentBlock(BinaryContentBlock):
+class VideoContentBlock(BinaryContentBlock, frozen=True):
     """MP4 video content with automatic transcoding and resolution downscaling."""
 
     kind: Literal["video_content_block"] = "video_content_block"
@@ -196,7 +217,7 @@ class VideoContentBlock(BinaryContentBlock):
                 return f"data:video/mp4;base64,{b64encode(fout.read()).decode()}"
 
 
-class AudioContentBlock(BinaryContentBlock):
+class AudioContentBlock(BinaryContentBlock, frozen=True):
     """Audio content supporting MPEG, WAV, AAC, and other common audio formats."""
 
     kind: Literal["audio_content_block"] = "audio_content_block"
@@ -280,9 +301,9 @@ def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
     aggregated: T = metadata_list[0]
     for m in metadata_list[1:]:
         if isinstance(aggregated, dict) and isinstance(m, dict):
-            aggregated = _merge_dicts(aggregated, m)  # type: ignore[assignment]
+            aggregated = _merge_dicts(aggregated, m)  # ty: ignore[invalid-assignment]
         else:
-            aggregated = aggregated + m  # type: ignore[assignment]
+            aggregated = aggregated + m
     return aggregated
 
 
@@ -433,14 +454,16 @@ class TokenUsage(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _deprecate_output_field(cls, data: dict | object) -> dict | object:  # type: ignore[override]
+    def _deprecate_output_field(cls, data: object) -> object:
         if isinstance(data, dict) and "output" in data:
             warnings.warn(
                 "The 'output' field is deprecated. Use 'answer' instead.",
                 DeprecationWarning,
                 stacklevel=3,
             )
-            data.setdefault("answer", data.pop("output"))  # type: ignore[union-attr]
+            values = dict(data)
+            values.setdefault("answer", values.pop("output"))
+            return values
         return data
 
     @property
@@ -533,7 +556,7 @@ class Tool[P: BaseModel, M](BaseModel):
 
     name: str
     description: str
-    parameters: type[P] = EmptyParams  # type: ignore[assignment]
+    parameters: type[P] = EmptyParams  # ty: ignore[invalid-assignment]
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
 
 
@@ -594,11 +617,15 @@ class LLMClient(Protocol):
     def model_slug(self) -> str: ...
 
     @property
-    def max_tokens(self) -> int: ...
+    def context_window_tokens(self) -> int: ...
 
 
-class ToolCall(BaseModel):
+class ToolCall(BaseModel, frozen=True):
     """Represents a tool invocation request from the LLM.
+
+    Also a member of the ``AssistantBlock`` union: the ``kind`` discriminator is
+    defaulted, so legacy payloads without the key still validate anywhere ToolCall
+    is used as a plain input, and new dumps always carry it.
 
     Attributes:
         name: Name of the tool to invoke
@@ -606,10 +633,48 @@ class ToolCall(BaseModel):
         tool_call_id: Unique identifier for tracking this tool call and its result
     """
 
+    kind: Literal["tool_call"] = "tool_call"
     signature: str | None = None
+    """Opaque passback state attached to this exact block, e.g. a Google thought signature."""
     name: str
     arguments: str
-    tool_call_id: str | None = None
+    tool_call_id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
+    has_provider_tool_call_id: bool = True
+    """Whether ``tool_call_id`` was present on the provider's original block.
+
+    A client may synthesize ``tool_call_id`` for internal call/result matching
+    while retaining that it must be omitted from provider-attached passback.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_internal_id(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if normalized.get("tool_call_id") in (None, ""):
+            normalized["tool_call_id"] = uuid4().hex
+            normalized["has_provider_tool_call_id"] = False
+        return normalized
+
+    @classmethod
+    def from_provider(
+        cls,
+        *,
+        provider_id: str | None,
+        name: str,
+        arguments: str,
+        signature: str | None = None,
+    ) -> Self:
+        """Capture one provider call with a stable internal correlation ID."""
+        native_id = provider_id or None
+        return cls(
+            tool_call_id=native_id or uuid4().hex,
+            has_provider_tool_call_id=native_id is not None,
+            name=name,
+            arguments=arguments,
+            signature=signature,
+        )
 
 
 class SystemMessage(BaseModel):
@@ -628,9 +693,15 @@ class UserMessage(BaseModel):
 
 
 class SummaryMessage(UserMessage):
-    """Summary message to the LLM."""
+    """Summary message bridging summarized-away conversation context.
+
+    Attributes:
+        replaced_ids: Ids of the AssistantMessages this summary replaced, so
+            consumers of dumped histories can reconstruct lineage offline.
+    """
 
     kind: Literal["summary"] = "summary"
+    replaced_ids: list[str] = Field(default_factory=list)
 
 
 class TurnWarningMessage(UserMessage):
@@ -640,24 +711,294 @@ class TurnWarningMessage(UserMessage):
 
 
 class Reasoning(BaseModel):
-    """Extended thinking/reasoning content from models that support chain-of-thought reasoning."""
+    """Channel-era reasoning shape accepted only while reading serialized v0.1 messages.
+
+    Deprecated as a standalone type: match on the ``AnyReasoningBlock`` kinds
+    (ReasoningBlock / SignedReasoningBlock / RedactedReasoningBlock /
+    ReasoningRefBlock / EncryptedReasoningBlock) instead.
+    """
 
     signature: str | None = None
     content: str
 
 
+# Assistant blocks: one assistant turn is an ordered sequence of blocks, in the
+# model's actual emission order (thinking → text → thinking → tool call, ...).
+class TextBlock(BaseModel, frozen=True):
+    """One contiguous run of answer text in an assistant turn.
+
+    ``signature`` carries opaque passback state attached to this exact block,
+    e.g. a Google thought signature emitted on a visible text part. A client
+    that cannot re-emit the signature must reject passback rather than silently
+    stripping it.
+    """
+
+    kind: Literal["text"] = "text"
+    text: str
+    signature: str | None = None
+
+
+class ReasoningBlock(BaseModel, frozen=True):
+    """In-band reasoning text with no passback token.
+
+    E.g. ``reasoning_content`` on Chat Completions-compatible hosts, or
+    <think>-tag extraction.
+    """
+
+    kind: Literal["reasoning"] = "reasoning"
+    content: str
+
+
+class SignedReasoningBlock(BaseModel, frozen=True):
+    """Reasoning bound to an opaque provider signature re-emitted verbatim on passback.
+
+    E.g. Anthropic signed thinking blocks.
+    """
+
+    kind: Literal["signed_reasoning"] = "signed_reasoning"
+    signature: str
+    content: str = ""
+
+
+class RedactedReasoningBlock(BaseModel, frozen=True):
+    """Reasoning the provider withheld, replaced by an opaque payload.
+
+    E.g. Anthropic ``redacted_thinking``: ``data`` must be re-emitted verbatim as a
+    ``redacted_thinking`` block on passback. Carries no readable content.
+    """
+
+    kind: Literal["redacted_reasoning"] = "redacted_reasoning"
+    data: str
+
+
+class ReasoningRefBlock(BaseModel, frozen=True):
+    """Reasoning held provider-side and passed back by reference.
+
+    This is retained for providers that require an item-level handle on replay.
+    OpenAI Responses continuation uses ``AssistantMessage.provider_response_id``
+    instead and does not create this block.
+    """
+
+    kind: Literal["reasoning_ref"] = "reasoning_ref"
+    id: str
+    content: str | None = None
+    summary: list[str] = Field(default_factory=list)
+
+
+class EncryptedReasoningBlock(BaseModel, frozen=True):
+    """Reasoning returned as an opaque encrypted payload for stateless passback.
+
+    E.g. OpenAI Responses reasoning items requested with
+    ``include: ["reasoning.encrypted_content"]`` (``store=false`` /
+    zero-data-retention): the item — id, summary parts, and encrypted payload —
+    is re-emitted verbatim in position on passback. The payload is opaque and
+    non-inspectable.
+    """
+
+    kind: Literal["encrypted_reasoning"] = "encrypted_reasoning"
+    id: str
+    encrypted_content: str
+    content: str | None = None
+    summary: list[str] = Field(default_factory=list)
+
+
+class OpaqueBlock(BaseModel, frozen=True):
+    """Provider-native block the framework carries uninterpreted.
+
+    For provider-issued marker/control blocks that must round-trip untouched:
+    ``data`` holds the block's raw JSON (self-describing — the provider's own
+    ``type`` field travels inside it). The framework preserves it in position
+    through history, projections, and serialization so a client that understands
+    the payload can re-emit it verbatim on passback; other clients fail loudly.
+    """
+
+    kind: Literal["opaque"] = "opaque"
+    data: str
+
+
+type AnyReasoningBlock = (
+    ReasoningBlock | SignedReasoningBlock | RedactedReasoningBlock | ReasoningRefBlock | EncryptedReasoningBlock
+)
+"""The reasoning family: one kind per passback mechanism."""
+
+REASONING_BLOCK_TYPES = (
+    ReasoningBlock,
+    SignedReasoningBlock,
+    RedactedReasoningBlock,
+    ReasoningRefBlock,
+    EncryptedReasoningBlock,
+)
+"""Runtime mirror of ``AnyReasoningBlock`` for isinstance checks — keep in lockstep."""
+
+# No current provider signs *and* references the same reasoning payload; if one
+# appears, it becomes a new kind rather than fields grafted onto an existing one.
+type AssistantBlock = Annotated[
+    TextBlock
+    | ReasoningBlock
+    | SignedReasoningBlock
+    | RedactedReasoningBlock
+    | ReasoningRefBlock
+    | EncryptedReasoningBlock
+    | OpaqueBlock
+    | ToolCall
+    | ImageContentBlock
+    | VideoContentBlock
+    | AudioContentBlock,
+    Field(discriminator="kind"),
+]
+"""One block of an assistant turn, discriminated on ``kind``."""
+
+type _MediaBlock = ImageContentBlock | VideoContentBlock | AudioContentBlock
+
+
+def joined_text(blocks: Sequence[AssistantBlock]) -> str | None:
+    """All answer text across text blocks, directly concatenated; None when absent."""
+    texts = [block.text for block in blocks if isinstance(block, TextBlock)]
+    if not texts:
+        return None
+    return "".join(texts)
+
+
+def final_text(blocks: Sequence[AssistantBlock]) -> str | None:
+    """Text of the last text block — the "answer" in thinking→text→thinking→text turns."""
+    for block in reversed(blocks):
+        if isinstance(block, TextBlock):
+            return block.text
+    return None
+
+
+def tool_call_blocks(blocks: Sequence[AssistantBlock]) -> list[ToolCall]:
+    """Tool calls in emission order."""
+    return [block for block in blocks if isinstance(block, ToolCall)]
+
+
+def reasoning_blocks(blocks: Sequence[AssistantBlock]) -> list[AnyReasoningBlock]:
+    """Reasoning blocks (any kind) in emission order."""
+    return [block for block in blocks if isinstance(block, REASONING_BLOCK_TYPES)]
+
+
+def _reasoning_to_block(reasoning: object) -> object:
+    """Upgrade a flat channel-era ``Reasoning`` value to its block equivalent.
+
+    A signature means signed passback; bare content is in-band reasoning.
+    """
+    match reasoning:
+        case Reasoning(signature=signature, content=content):
+            pass
+        case {**mapping}:
+            signature = mapping.get("signature")
+            content = mapping.get("content")
+        case _:
+            return reasoning  # let block validation fail loudly
+    if signature is not None:
+        if not isinstance(signature, str):
+            return reasoning
+        return SignedReasoningBlock(signature=signature, content=content if isinstance(content, str) else "")
+    return ReasoningBlock(content=content if isinstance(content, str) else "")
+
+
+_CHANNEL_PROJECTION_DEPRECATION = (
+    "AssistantMessage.{channel} is deprecated; {replacement}. "
+    "The compatibility projection will be removed in a future release."
+)
+
+
+def _warn_channel_projection(channel: str, replacement: str) -> None:
+    warnings.warn(
+        _CHANNEL_PROJECTION_DEPRECATION.format(channel=channel, replacement=replacement),
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+def _upgrade_legacy_assistant_message(data: object) -> object:
+    """Read a serialized v0.1 assistant message into canonical blocks."""
+    if not isinstance(data, dict):
+        return data
+    upgraded = dict(data)
+    content = upgraded.pop("content", None)
+    reasoning = upgraded.pop("reasoning", None)
+    tool_calls = upgraded.pop("tool_calls", None)
+
+    if "blocks" in upgraded:
+        if content not in (None, "", []) or reasoning or tool_calls:
+            raise ValueError("AssistantMessage cannot mix 'blocks' with legacy channels")
+        return upgraded
+
+    blocks: list[object] = []
+    if reasoning:
+        blocks.append(_reasoning_to_block(reasoning))
+    if isinstance(content, str):
+        if content:
+            blocks.append(TextBlock(text=content))
+    elif isinstance(content, list):
+        blocks.extend(TextBlock(text=item) if isinstance(item, str) else item for item in content if item != "")
+    elif content is not None:
+        raise ValueError(f"AssistantMessage 'content' must be a string or list, got {type(content).__name__}")
+    if tool_calls is not None and not isinstance(tool_calls, list | tuple):
+        raise ValueError("AssistantMessage 'tool_calls' must be a sequence")
+    blocks.extend({**call, "kind": "tool_call"} if isinstance(call, dict) else call for call in tool_calls or [])
+    upgraded["blocks"] = blocks
+    return upgraded
+
+
 class AssistantMessage(BaseModel):
-    """LLM response message with optional tool calls and token usage tracking."""
+    """LLM response message: an ordered sequence of assistant blocks.
+
+    ``blocks`` is the only stored content. The channel-era ``content`` and
+    ``tool_calls`` attributes remain deprecated views; ``reasoning`` raises because
+    an ordered reasoning block sequence has no faithful channel-shaped projection.
+    Serialized v0.1 payloads upgrade to blocks during validation. Channel-shaped
+    construction is not part of the v0.2 API; new code constructs blocks directly.
+    Mixing ``blocks`` with non-empty legacy channel keys raises.
+    """
 
     id: str = Field(default_factory=lambda: uuid4().hex)
+    provider_response_id: str | None = None
+    """Provider-attached continuation state, e.g. an OpenAI Responses ``resp_...`` id.
+
+    This is turn metadata rather than emitted assistant content, so it lives beside
+    ``blocks`` instead of inside their emission order. It is distinct from ``id``
+    (Stirrup's message identity) and ``ReasoningRefBlock.id`` (an emitted reasoning
+    item handle).
+    """
     role: Literal["assistant"] = "assistant"
-    reasoning: Reasoning | None = None
-    content: Content
-    tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
-    token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    blocks: list[AssistantBlock] = Field(default_factory=list)
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
     metadata: dict[str, Any] = Field(default_factory=dict)
     request_start_time: float | None = None
     request_end_time: float | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_channel_fields(cls, data: object) -> object:
+        return _upgrade_legacy_assistant_message(data)
+
+    # Channel-era compatibility accessors.
+    @property
+    def content(self) -> list[AssistantBlock] | str:
+        """Bare text for one text block, empty text for no blocks, or the block list."""
+        _warn_channel_projection("content", "inspect blocks or use joined_text(message.blocks)")
+        match self.blocks:
+            case []:
+                return ""
+            case [TextBlock(text=text)]:
+                return text
+            case blocks:
+                return blocks
+
+    @property
+    def reasoning(self) -> Reasoning | None:
+        """Deprecated channel accessor retained only to fail with migration guidance."""
+        raise NotImplementedError(
+            "AssistantMessage.reasoning is deprecated and no longer available; use reasoning_blocks(message.blocks)"
+        )
+
+    @property
+    def tool_calls(self) -> list[ToolCall]:
+        """Tool calls in emission order."""
+        _warn_channel_projection("tool_calls", "use tool_call_blocks(message.blocks)")
+        return tool_call_blocks(self.blocks)
 
     @property
     def e2e_otps(self) -> float | None:
@@ -684,7 +1025,7 @@ class ToolMessage(BaseModel):
 
     role: Literal["tool"] = "tool"
     content: Content
-    tool_call_id: str | None = None
+    tool_call_id: str = Field(min_length=1)
     name: str | None = None
     args_was_valid: bool = True
     success: bool = False
@@ -702,8 +1043,102 @@ class ToolMessage(BaseModel):
         return duration
 
 
-type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
+def _reject_untagged_user_message(data: object) -> object:
+    if isinstance(data, dict) and "kind" not in data:
+        raise ValueError(
+            "Cannot load a cached user message without the required 'kind' discriminator. "
+            "This cache predates typed user-message kinds and cannot be resumed safely; "
+            "delete the old Stirrup cache and restart the run."
+        )
+    return data
+
+
+type UserRoleMessage = Annotated[
+    UserMessage | SummaryMessage | TurnWarningMessage,
+    Field(discriminator="kind"),
+    BeforeValidator(_reject_untagged_user_message),
+]
+"""User-role messages, discriminated on ``kind`` — the agent-injected ``UserMessage``
+subclasses share ``role="user"``, so dumped histories need the nested discriminator
+to rehydrate them as their own types (e.g. ``SummaryMessage.replaced_ids``)."""
+
+type ChatMessage = Annotated[
+    SystemMessage | UserRoleMessage | AssistantMessage | ToolMessage, Field(discriminator="role")
+]
 """Discriminated union of all message types, automatically parsed based on role field."""
+
+
+def _upgrade_legacy_message_sequence(messages: object) -> object:
+    """Correlate nullable v0.1 tool-call/result IDs before per-message validation.
+
+    v0.1 allowed both sides of tool correlation to omit their ID. A single-message
+    validator cannot recover that relationship, so sequence readers assign a shared
+    ID to each idless call and copy it to the following null-ID result in emission
+    order. Explicit provider IDs are never rewritten.
+    """
+    if not isinstance(messages, list | tuple):
+        return messages
+
+    upgraded_messages: list[object] = []
+    pending_calls: list[tuple[str, str | None]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            pending_calls.clear()
+            upgraded_messages.append(message)
+            continue
+
+        upgraded = dict(message)
+        match upgraded.get("role"):
+            case "assistant":
+                pending_calls.clear()
+                container_key = "blocks" if isinstance(upgraded.get("blocks"), list) else "tool_calls"
+                items = upgraded.get(container_key)
+                if isinstance(items, list):
+                    migrated_items: list[object] = []
+                    for item in items:
+                        is_tool_call = container_key == "tool_calls" or (
+                            isinstance(item, dict) and item.get("kind") == "tool_call"
+                        )
+                        if not is_tool_call or not isinstance(item, dict):
+                            migrated_items.append(item)
+                            continue
+
+                        call = dict(item)
+                        call_id = call.get("tool_call_id")
+                        if call_id in (None, ""):
+                            call_id = uuid4().hex
+                            call["tool_call_id"] = call_id
+                            call["has_provider_tool_call_id"] = False
+                        if not isinstance(call_id, str):
+                            raise ValueError("Legacy tool_call_id must be a string or null")
+                        call_name = call.get("name")
+                        pending_calls.append((call_id, call_name if isinstance(call_name, str) else None))
+                        migrated_items.append(call)
+                    upgraded[container_key] = migrated_items
+
+            case "tool":
+                result_id = upgraded.get("tool_call_id")
+                if result_id in (None, ""):
+                    if not pending_calls:
+                        raise ValueError("Cannot correlate a null-ID v0.1 tool result with a preceding tool call")
+                    expected_id, expected_name = pending_calls.pop(0)
+                    result_name = upgraded.get("name")
+                    if isinstance(result_name, str) and expected_name is not None and result_name != expected_name:
+                        raise ValueError(
+                            f"Cannot correlate v0.1 tool result {result_name!r} with preceding call {expected_name!r}"
+                        )
+                    upgraded["tool_call_id"] = expected_id
+                elif isinstance(result_id, str):
+                    pending_calls = [call for call in pending_calls if call[0] != result_id]
+
+            case "user":
+                pending_calls.clear()
+
+            case _:
+                pending_calls.clear()
+
+        upgraded_messages.append(upgraded)
+    return upgraded_messages
 
 
 class SubAgentMetadata(BaseModel):
@@ -714,6 +1149,17 @@ class SubAgentMetadata(BaseModel):
 
     message_history: list[list[ChatMessage]]
     run_metadata: Annotated[dict[str, Any], Field(default_factory=dict)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_history(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        upgraded = dict(data)
+        history = upgraded.get("message_history")
+        if isinstance(history, list | tuple):
+            upgraded["message_history"] = [_upgrade_legacy_message_sequence(group) for group in history]
+        return upgraded
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":
         """Combine metadata from multiple subagent calls."""

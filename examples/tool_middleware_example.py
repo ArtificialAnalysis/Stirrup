@@ -48,7 +48,9 @@ DUMP_TOOL_WITH_MIDDLEWARE = truncate(spill(DUMP_TOOL))
 
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
-    model="anthropic/claude-sonnet-4.5",
+    model="anthropic/claude-opus-5",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
 )
 
 agent = Agent(

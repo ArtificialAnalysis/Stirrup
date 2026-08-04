@@ -40,8 +40,10 @@ from stirrup.core.models import (
     ToolUseCountMetadata,
     TurnWarningMessage,
     UserMessage,
+    joined_text,
+    tool_call_blocks,
 )
-from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE
+from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE, MESSAGE_SUMMARIZER_TEXT_ONLY
 from stirrup.skills import SkillMetadata, format_skills_section, load_skills_metadata
 from stirrup.tools import default_tools
 from stirrup.tools.code_backends.base import (
@@ -272,7 +274,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         # Create client and agent
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(client=client, name="assistant")
 
         async with agent.session(output_dir="./output") as session:
@@ -365,6 +367,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         Args:
             client: LLM client for generating responses. Use ChatCompletionsClient for
                     OpenAI/OpenAI-compatible APIs, or LiteLLMClient for other providers.
+                    The client's context_window_tokens (a positive int) decides when
+                    conversation history is summarized; a ValueError is raised otherwise.
             name: Name of the agent (used for logging purposes)
             max_turns: Maximum number of turns before stopping
             system_prompt: System prompt to prepend to all runs (when using string prompts)
@@ -401,6 +405,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
         self._client: LLMClient = client
+        context_window_tokens = client.context_window_tokens
+        if (
+            isinstance(context_window_tokens, bool)
+            or not isinstance(context_window_tokens, int)
+            or context_window_tokens <= 0
+        ):
+            raise ValueError(
+                f"client.context_window_tokens must be a positive int, "
+                f"got {context_window_tokens!r} ({type(context_window_tokens).__name__})"
+            )
+        self._context_window_tokens = context_window_tokens
+
         self._name = name
         self._max_turns = max_turns
         self._system_prompt = system_prompt
@@ -877,14 +893,17 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     state.exec_env_owned,
                 )
 
+                input_files: list[str | Path] = (
+                    [self._pending_input_files]
+                    if isinstance(self._pending_input_files, (str, Path))
+                    else self._pending_input_files
+                )
+
                 if state.depth > 0 and state.parent_exec_env:
                     if not state.exec_env_owned:
                         # SHARED EXEC ENV: Files already accessible - no transfer needed
                         # Just record the paths as "uploaded" for system prompt
-                        if isinstance(self._pending_input_files, (str, Path)):
-                            state.uploaded_file_paths = [str(self._pending_input_files)]
-                        else:
-                            state.uploaded_file_paths = [str(p) for p in self._pending_input_files]
+                        state.uploaded_file_paths = [str(p) for p in input_files]
                         logger.debug(
                             "[%s __aenter__] Shared exec_env - files already accessible: %s",
                             self._name,
@@ -894,7 +913,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         # SEPARATE EXEC ENV: Read files from parent's exec env, write to subagent's exec env
                         # input_files are paths within the parent's environment
                         result = await state.exec_env.upload_files(
-                            *self._pending_input_files,
+                            *input_files,
                             source_env=state.parent_exec_env,
                         )
                         logger.debug(
@@ -1157,12 +1176,12 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 prev_depth = _PARENT_DEPTH.set(self._logger.depth)
                 try:
                     if inspect.iscoroutinefunction(tool.executor):
-                        result = await tool.executor(params)  # ty: ignore[invalid-await]
+                        result = await tool.executor(params)
                     elif self._run_sync_in_thread:
-                        # ty: ignore - type checker doesn't understand iscoroutinefunction narrowing
+                        # type checker doesn't understand iscoroutinefunction narrowing
                         result = await anyio.to_thread.run_sync(tool.executor, params)  # ty: ignore[unresolved-attribute]
                     else:
-                        # ty: ignore - iscoroutinefunction check above ensures this is sync
+                        # iscoroutinefunction check above ensures this is sync
                         result = tool.executor(params)  # ty: ignore[invalid-assignment]
                 finally:
                     _PARENT_DEPTH.reset(prev_depth)
@@ -1236,12 +1255,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 return True
         return False
 
-    @staticmethod
-    def _context_boundary_error(messages: list[ChatMessage]) -> ContextOverflowError:
+    def _context_boundary_error(self, messages: list[ChatMessage]) -> ContextOverflowError:
         boundary = (
             "summarized context" if any(isinstance(msg, SummaryMessage) for msg in messages) else "original prompt"
         )
-        return ContextOverflowError(f"Context overflow reached the {boundary}")
+        return ContextOverflowError(
+            f"Context overflow reached the {boundary} "
+            f"(configured context_window_tokens={self._context_window_tokens}; providers that count "
+            "the response budget inside the context window leave less room for input)"
+        )
 
     async def step(
         self,
@@ -1271,18 +1293,19 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         finish_params: FinishParams | None = None
         tool_messages: list[ToolMessage] = []
-        if assistant_message.tool_calls:
+        tool_calls = tool_call_blocks(assistant_message.blocks)
+        if tool_calls:
             # If multiple finish tools were called in one turn, refuse all of them without
             # executing — silently picking one would discard the model's other intent and
             # may swap in contradictory params. Force the model to retry with a single call.
-            finish_call_names = [tc.name for tc in assistant_message.tool_calls if tc.name in self._finish_tools]
+            finish_call_names = [tc.name for tc in tool_calls if tc.name in self._finish_tools]
             reject_all_finish_calls = len(finish_call_names) > 1
 
             # Every ordinary call runs before any finish call, so a successful finish is always the
             # last thing that happens in the turn and no side effect can follow the run ending.
             # `sorted` is stable, so calls keep their relative order within each group. The returned
             # messages are in this execution order; providers match them to calls by tool_call_id.
-            for tool_call in sorted(assistant_message.tool_calls, key=lambda tc: tc.name in self._finish_tools):
+            for tool_call in sorted(tool_calls, key=lambda tc: tc.name in self._finish_tools):
                 if reject_all_finish_calls and tool_call.name in self._finish_tools:
                     tool_message = ToolMessage(
                         content=(
@@ -1319,17 +1342,52 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     takewhile(lambda m: not isinstance(m, (AssistantMessage, SummaryMessage)), current_messages)
                 )
 
-                summary_prompt = [*current_messages, UserMessage(content=MESSAGE_SUMMARIZER)]
+                # Give the summarizer the active tools so it can interpret prior tool
+                # calls/results. Some models answer with only a tool call despite the
+                # prompt telling them not to, so escalate: repeat with an explicit
+                # text-only warning, then withhold the tools entirely (rendered as
+                # text) so a tool call is structurally impossible.
+                text_only_prompt = f"{MESSAGE_SUMMARIZER}\n\n{MESSAGE_SUMMARIZER_TEXT_ONLY}"
+                tool_docs = "\n".join(f"- {tool.name}: {tool.description}" for tool in self._active_tools.values())
+                no_tools_prompt = (
+                    f"{text_only_prompt}\n\nTools are disabled for this response. "
+                    f"For reference, the tools available earlier in the conversation were:\n{tool_docs}"
+                )
+                attempts: list[tuple[str, dict[str, Tool]]] = [
+                    (MESSAGE_SUMMARIZER, self._active_tools),
+                    (text_only_prompt, self._active_tools),
+                    (no_tools_prompt, {}),
+                ]
+                summary_content: str | None = None
+                for prompt, tools in attempts:
+                    summary = await self._client.generate([*current_messages, UserMessage(content=prompt)], tools)
+                    summary_content = joined_text(summary.blocks)
+                    if summary_content is not None:
+                        break
+                    logger.warning("Summarizer response contained no text blocks; retrying summarization")
 
-                # Give the summarizer the active tools so it can interpret prior tool calls/results.
-                summary = await self._client.generate(summary_prompt, self._active_tools)
-
-                summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary.content)
-                summary_bridge = SummaryMessage(content=summary_bridge_prompt)
+                removed = current_messages[len(task_context) :]
+                if summary_content is None:
+                    # Replacing history with an empty summary would silently erase all
+                    # context past task_context, so give up loudly instead.
+                    raise RuntimeError("Summarizer response contained no text blocks; cannot summarize context")
+                summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_content)
+                # Chain lineage across summarization rounds: a removed prior summary
+                # contributes the ids it already stood for, so the final summary's
+                # replaced_ids transitively covers every collapsed assistant turn.
+                replaced_ids: list[str] = []
+                for m in removed:
+                    if isinstance(m, SummaryMessage):
+                        replaced_ids.extend(m.replaced_ids)
+                    elif isinstance(m, AssistantMessage):
+                        replaced_ids.append(m.id)
+                summary_bridge = SummaryMessage(
+                    content=summary_bridge_prompt,
+                    replaced_ids=replaced_ids,
+                )
                 # Use a user acknowledgement to avoid consecutive assistant messages with strict providers.
                 acknowledgement_msg = UserMessage(content="Got it, thanks!")
 
-                summary_content = summary.content if isinstance(summary.content, str) else str(summary.content)
                 self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
 
                 return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
@@ -1369,7 +1427,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             # Multiple messages
             await agent.run([
                 UserMessage(content="First, read the data"),
-                AssistantMessage(content="I've read the data file..."),
+                AssistantMessage(blocks=[TextBlock(text="I've read the data file...")]),
                 UserMessage(content="Now analyze it"),
             ])
 
@@ -1439,7 +1497,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Log the task at run start (only if not resuming)
         if not resumed:
-            self._logger.task_message(msgs[-1].content)
+            last_message = msgs[-1]
+            task_content = (
+                joined_text(last_message.blocks) or ""
+                if isinstance(last_message, AssistantMessage)
+                else last_message.content
+            )
+            self._logger.task_message(task_content)
 
         # Show warnings (top-level only, if logger supports it)
         if self._logger.depth == 0 and isinstance(self._logger, AgentLogger):
@@ -1513,7 +1577,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if finish_params:
                 break
 
-            pct_context_used = assistant_message.token_usage.total / self._client.max_tokens
+            pct_context_used = assistant_message.token_usage.total / self._context_window_tokens
             if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
@@ -1527,7 +1591,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 and not user_messages
                 and not next_turn_will_show_warning
             ):
-                msgs.extend([UserMessage(content="Please continue the task")])
+                continue_msg = UserMessage(content="Please continue the task")
+                msgs.append(continue_msg)
 
         if finish_params is None:
             LOGGER.error(
@@ -1537,10 +1602,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         full_msg_history.append(msgs)
 
         # Add agent's own token usage, tool durations, and model speed to run_metadata
-        run_metadata = _merge_run_metadata(run_metadata_by_turn)
+        run_metadata: dict[str, Any] = _merge_run_metadata(run_metadata_by_turn)
         run_metadata["token_usage"] = _get_total_token_usage(full_msg_history)
-        run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)  # type: ignore[assignment]
-        run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)  # type: ignore[assignment]
+        run_metadata["_tool_durations"] = _get_tool_durations(full_msg_history)
+        run_metadata["_model_speed"] = _get_model_speed_stats(full_msg_history, self._client.model_slug)
         if session_state is not None:
             session_state.finish_params = finish_params
             session_state.run_metadata = run_metadata
@@ -1614,7 +1679,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 # Files are transferred to parent's env at __aexit__ via save_output_files(dest_env=parent)
                 async with agent.session(
                     output_dir=".",  # Path in parent's exec env
-                    input_files=list(params.input_files) if params.input_files else None,  # ty: ignore[invalid-argument-type]
+                    input_files=list(params.input_files) if params.input_files else None,
                 ) as agent_session:
                     agent_session._logger.depth = sub_agent_depth  # noqa: SLF001
                     finish_params, msg_history, run_metadata = await agent_session.run(init_msgs)
@@ -1624,17 +1689,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 last_assistant_msg: AssistantMessage | None = None
                 for msg_group in reversed(msg_history):
                     for msg in reversed(msg_group):
-                        if isinstance(msg, AssistantMessage) and msg.content:
+                        if isinstance(msg, AssistantMessage) and joined_text(msg.blocks):
                             last_assistant_msg = msg
                             break
                     if last_assistant_msg:
                         break
 
                 content_parts: list[str] = []
-                if last_assistant_msg and last_assistant_msg.content:
-                    content = last_assistant_msg.content
-                    if isinstance(content, list):
-                        content = "\n".join(str(block) for block in content)
+                if last_assistant_msg and (content := joined_text(last_assistant_msg.blocks)):
                     content_parts.append(content)
 
                 if finish_params is not None:
@@ -1707,7 +1769,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             name=self._name,
             description=description,
             parameters=SubAgentParams,
-            executor=sub_agent_executor,  # ty: ignore[invalid-argument-type]
+            executor=sub_agent_executor,
         )
 
 

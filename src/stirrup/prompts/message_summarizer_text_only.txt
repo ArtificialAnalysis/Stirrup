@@ -1,0 +1,1 @@
+IMPORTANT: Respond with the summary as plain prose text only. Do NOT call any tools — a tool call cannot serve as a summary and will cause the summarization to fail.

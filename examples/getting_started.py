@@ -21,7 +21,9 @@ async def main() -> None:
     # Automatically uses OPENROUTER_API_KEY environment variable
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
-        model="anthropic/claude-sonnet-4.5",
+        model="anthropic/claude-opus-5",
+        max_tokens=8_192,
+        context_window_tokens=1_000_000,
     )
 
     # As no tools are provided, the agent will use the default tools, which consist of:

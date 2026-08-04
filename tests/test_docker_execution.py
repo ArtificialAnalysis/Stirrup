@@ -237,8 +237,11 @@ class TestDockerCodeExecToolProvider:
             mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
             async with provider as _:
+                temp_dir = provider.temp_dir
+                assert temp_dir is not None
+
                 # Create a file in the temp dir (simulating container creating it)
-                test_file = provider.temp_dir / "output.txt"
+                test_file = temp_dir / "output.txt"
                 test_file.write_text("test content")
 
                 # Test relative path
@@ -250,7 +253,7 @@ class TestDockerCodeExecToolProvider:
                 assert test_file.exists()
 
                 # Create another file for absolute path test
-                test_file2 = provider.temp_dir / "output2.txt"
+                test_file2 = temp_dir / "output2.txt"
                 test_file2.write_text("test content 2")
 
                 # Test absolute container path (e.g., /workspace/output2.txt)
@@ -340,15 +343,18 @@ class TestDockerCodeExecToolProvider:
             mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
             async with provider as _:
+                temp_dir = provider.temp_dir
+                assert temp_dir is not None
+
                 # Upload single file
                 result = await provider.upload_files(sample_file)
                 assert len(result.uploaded) == 1
-                assert (provider.temp_dir / sample_file.name).exists()
+                assert (temp_dir / sample_file.name).exists()
 
                 # Upload directory
                 result = await provider.upload_files(sample_dir)
                 assert len(result.uploaded) == 3
-                assert (provider.temp_dir / sample_dir.name / "file1.txt").exists()
+                assert (temp_dir / sample_dir.name / "file1.txt").exists()
 
     async def test_prepare_image_recovers_from_concurrent_pull_race(
         self, mock_docker_client: MagicMock, tmp_path: Path

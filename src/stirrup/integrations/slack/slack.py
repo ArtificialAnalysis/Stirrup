@@ -3,8 +3,8 @@
 Usage:
     @stirrup do xyz                              → default agent, default model
     @stirrup agent:data-analyst summarise this   → named agent
-    @stirrup model:gpt-4o do xyz                 → default agent, override model
-    @stirrup agent:data model:gpt-4o do xyz      → named agent + model override
+    @stirrup model:openai/gpt-5.6-luna do xyz    → default agent, override model
+    @stirrup agent:data model:openai/gpt-5.6-luna do xyz → named agent + model override
 
 Requires: pip install stirrup[slack]
 """
@@ -18,7 +18,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -32,6 +32,8 @@ from stirrup.core.models import (
     ToolProvider,
     UserMessage,
     aggregate_metadata,
+    joined_text,
+    tool_call_blocks,
 )
 from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider
 from stirrup.tools.web import WebToolProvider
@@ -149,14 +151,9 @@ class SlackLogger(AgentLoggerBase):
         )
 
     def assistant_message(self, turn: int, max_turns: int, assistant_message: AssistantMessage) -> None:
-        tool_names = [tc.name for tc in assistant_message.tool_calls]
+        tool_names = [tc.name for tc in tool_call_blocks(assistant_message.blocks)]
         content_preview = ""
-        if assistant_message.content:
-            text = (
-                assistant_message.content
-                if isinstance(assistant_message.content, str)
-                else str(assistant_message.content)
-            )
+        if text := joined_text(assistant_message.blocks):
             content_preview = text[:200] + "..." if len(text) > 200 else text
         if tool_names:
             logger.info("[%s] Turn %d/%d | Tools: %s", self.name, turn, max_turns, ", ".join(tool_names))
@@ -228,9 +225,10 @@ def _format_metadata_block(metadata: dict[str, list[Any]], agent_config: SlackAg
     if not metadata:
         return None
 
-    aggregated: dict[str, Any] = aggregate_metadata(metadata, return_json_serializable=True)  # type: ignore[assignment]
-    if not isinstance(aggregated, dict):
+    aggregated_obj = aggregate_metadata(metadata, return_json_serializable=True)
+    if not isinstance(aggregated_obj, dict):
         return None
+    aggregated = cast("dict[str, Any]", aggregated_obj)
 
     parts: list[str] = [":bar_chart: *Run Metadata*"]
 
@@ -277,7 +275,12 @@ class SlackBot:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
         from stirrup.integrations.slack import SlackBot, SlackBotConfig, SlackAgentConfig
 
-        client = ChatCompletionsClient(model="google/gemini-3-flash-preview", base_url="https://openrouter.ai/api/v1")
+        client = ChatCompletionsClient(
+            model="google/gemini-3.6-flash",
+            base_url="https://openrouter.ai/api/v1",
+            max_tokens=8_192,
+            context_window_tokens=1_000_000,
+        )
         config = SlackBotConfig(
             slack_bot_token=os.environ["SLACK_BOT_TOKEN"],
             slack_app_token=os.environ["SLACK_APP_TOKEN"],
@@ -346,7 +349,7 @@ class SlackBot:
             # Shallow copy the client and swap the model name.
             # This preserves base_url, api_key, etc. from the original config.
             client = copy.copy(client)
-            client._model = model_override  # type: ignore[attr-defined]  # noqa: SLF001
+            client._model = model_override  # ty: ignore[unresolved-attribute]  # noqa: SLF001
 
         # Deep copy tools so each concurrent run gets its own ToolProvider instances
         # (ToolProviders have lifecycle state that can't be shared across sessions).
@@ -509,7 +512,7 @@ class SlackBot:
     async def start_http(self, port: int = 3000) -> None:
         """Start the bot using HTTP mode (for production with a public URL)."""
         logger.info("Starting Stirrup Slack bot (HTTP mode, port %d)...", port)
-        await self._app.start_async(port=port)
+        await self._app.start_async(port=port)  # ty: ignore[unresolved-attribute]
 
 
 # ---------------------------------------------------------------------------

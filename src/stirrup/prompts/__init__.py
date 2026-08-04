@@ -14,9 +14,11 @@ BASE_SYSTEM_PROMPT_TEMPLATE = (prompts_dir / "base_system_prompt.txt").read_text
 
 # Ready-to-use prompts (no formatting needed)
 MESSAGE_SUMMARIZER = (prompts_dir / "message_summarizer.txt").read_text(encoding="utf-8")
+MESSAGE_SUMMARIZER_TEXT_ONLY = (prompts_dir / "message_summarizer_text_only.txt").read_text(encoding="utf-8")
 
 __all__ = [
     "BASE_SYSTEM_PROMPT_TEMPLATE",
     "MESSAGE_SUMMARIZER",
     "MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE",
+    "MESSAGE_SUMMARIZER_TEXT_ONLY",
 ]

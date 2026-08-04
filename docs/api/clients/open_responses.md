@@ -14,7 +14,7 @@ The `OpenResponsesClient` uses OpenAI's [Responses API](https://platform.openai.
 
 ## Usage
 
-For models that support extended thinking (like o1/o3), you can configure the reasoning effort:
+For reasoning models such as the GPT-5.6 family, you can configure the reasoning effort:
 
 ```python
 --8<-- "examples/open_responses_example.py:example"
@@ -24,11 +24,12 @@ For models that support extended thinking (like o1/o3), you can configure the re
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | `str` | required | Model identifier (e.g., `"gpt-4o"`, `"o1"`) |
+| `model` | `str` | required | Model identifier (e.g., `"gpt-5.6-luna"`, `"gpt-5.6-sol"`) |
 | `max_tokens` | `int` | `64_000` | Maximum output tokens |
+| `context_window_tokens` | `int` | required | Context capacity for summarization |
 | `base_url` | `str \| None` | `None` | Custom API base URL |
 | `api_key` | `str \| None` | `None` | API key (falls back to `OPENAI_API_KEY` env var) |
-| `reasoning_effort` | `str \| None` | `None` | Reasoning effort for o1/o3 models: `"low"`, `"medium"`, `"high"` |
+| `reasoning_effort` | `str \| None` | `None` | Reasoning effort for reasoning models: `"low"`, `"medium"`, `"high"` |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
 | `max_retries` | `int` | `2` | Number of retries for transient errors |
 | `instructions` | `str \| None` | `None` | Default system instructions |

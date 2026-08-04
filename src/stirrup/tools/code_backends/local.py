@@ -40,7 +40,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
     Usage with Agent:
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(
             client=client,
             name="assistant",
@@ -97,8 +97,12 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
         """Return the temp directory path, or None if not started."""
         return self._temp_dir
 
-    def _check_absolute_paths(self, cmd: str) -> CommandResult | None:
-        """Check if command contains absolute paths that could escape the temp directory.
+    def _check_absolute_paths(self, argv: list[str] | None, cmd: str) -> CommandResult | None:
+        """Check if a command references absolute paths that escape the temp directory.
+
+        Args:
+            argv: Parsed arguments when an allowlist is configured, else None.
+            cmd: Raw command, run through Bash when there is no allowlist.
 
         Returns:
             CommandResult with error if absolute paths detected, None otherwise.
@@ -107,14 +111,21 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
             This check is specific to LocalCodeExecToolProvider since Docker and E2B
             providers are already sandboxed and absolute paths are safe within them.
         """
+        # argv is what actually runs, so the patterns must see it rather than
+        # the raw string: quoting inside a path (``/et''c/passwd``) survives in
+        # the string but not in the parsed argument. Home-directory spellings
+        # are only expanded by Bash, so they are checked on that path alone.
         absolute_patterns = [
-            r"~/",  # ~/path - home directory shortcut
             r"/(?:home|Users|tmp|var|etc)/",  # /home/, /Users/, /tmp/, etc.
-            r"\$HOME/",  # $HOME/path
-            r"\$\{HOME\}/",  # ${HOME}/path
         ]
-        for pattern in absolute_patterns:
-            if re.search(pattern, cmd):
+        if argv is None:
+            absolute_patterns += [
+                r"~/",  # ~/path - home directory shortcut
+                r"\$HOME/",  # $HOME/path
+                r"\$\{HOME\}/",  # ${HOME}/path
+            ]
+        for target in argv if argv is not None else [cmd]:
+            if any(re.search(pattern, target) for pattern in absolute_patterns):
                 return CommandResult(
                     exit_code=1,
                     stdout="",
@@ -304,7 +315,7 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
             return rejection
 
         # Check for absolute paths (local environment is not sandboxed)
-        absolute_path_error = self._check_absolute_paths(cmd)
+        absolute_path_error = self._check_absolute_paths(argv, cmd)
         if absolute_path_error:
             return absolute_path_error
 

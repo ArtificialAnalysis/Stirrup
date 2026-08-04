@@ -22,7 +22,15 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-from stirrup.core.models import AssistantMessage, ToolMessage, UserMessage, _aggregate_list, aggregate_metadata
+from stirrup.core.models import (
+    AssistantMessage,
+    ToolMessage,
+    UserMessage,
+    _aggregate_list,
+    aggregate_metadata,
+    joined_text,
+    tool_call_blocks,
+)
 from stirrup.utils.text import truncate_msg
 
 __all__ = [
@@ -322,7 +330,7 @@ class AgentLogger(AgentLoggerBase):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         # Agent creates logger internally by default
-        client = ChatCompletionsClient(model="gpt-4")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(client=client, name="assistant")
 
         # Or pass a pre-configured logger
@@ -598,9 +606,10 @@ class AgentLogger(AgentLoggerBase):
                 token_usage_list = aggregated.get("token_usage", [])
             else:
                 token_usage_list = []
-            tool_durations: dict[str, list[float]] = (
-                self.run_metadata.get("_tool_durations", {}) if self.run_metadata else {}
-            )  # type: ignore[assignment]
+            tool_durations = cast(
+                "dict[str, list[float]]",
+                self.run_metadata.get("_tool_durations", {}) if self.run_metadata else {},
+            )
             tool_keys = (
                 [k for k in self.run_metadata if k not in ("token_usage", "_tool_durations", "_model_speed", "finish")]
                 if self.run_metadata
@@ -853,21 +862,20 @@ class AgentLogger(AgentLoggerBase):
         content = Text()
 
         # Add assistant content if present
-        if assistant_message.content:
-            text = assistant_message.content
-            if isinstance(text, list):
-                text = "\n".join(str(block) for block in text)
+        text = joined_text(assistant_message.blocks)
+        if text:
             # Truncate long content
             if len(text) > 500:
                 text = text[:500] + "..."
             content.append(text, style="white")
 
         # Add tool calls if present
-        if assistant_message.tool_calls:
-            if assistant_message.content:
+        tool_calls = tool_call_blocks(assistant_message.blocks)
+        if tool_calls:
+            if text:
                 content.append("\n\n")
             content.append("Tool Calls:\n", style="bold magenta")
-            for tc in assistant_message.tool_calls:
+            for tc in tool_calls:
                 content.append(f"  🔧 {tc.name}", style="magenta")
                 if tc.arguments and tc.arguments.strip():
                     args_parsed = json.loads(tc.arguments)

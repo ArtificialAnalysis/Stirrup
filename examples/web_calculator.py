@@ -10,18 +10,22 @@ This example demonstrates how to create an agent that can:
 import argparse
 import asyncio
 
-from stirrup import Agent
+from stirrup import Agent, Tool, ToolProvider
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import CALCULATOR_TOOL
 from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
 from stirrup.tools.web import WebToolProvider
 
-DEFAULT_OPENROUTER_SLUG = "anthropic/claude-sonnet-4.5"
+DEFAULT_OPENROUTER_SLUG = "anthropic/claude-opus-5"
+# Claude Opus 5's context window. Other slugs need their own --context-window-tokens.
+DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
 
 # Create client for OpenRouter
 client = ChatCompletionsClient(
     base_url="https://openrouter.ai/api/v1",
     model=DEFAULT_OPENROUTER_SLUG,
+    max_tokens=8_192,
+    context_window_tokens=DEFAULT_CONTEXT_WINDOW_TOKENS,
 )
 
 # Create agent with E2B execution + web tools + calculator
@@ -35,17 +39,18 @@ agent = Agent(
 
 
 # --8<-- [start:main]
-async def main(openrouter_slug: str) -> None:
+async def main(openrouter_slug: str, context_window_tokens: int) -> None:
     """Run a simple web-enabled calculator agent."""
-    # Create client for OpenRouter
+    # Create client for OpenRouter. context_window_tokens must match the chosen model.
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
         model=openrouter_slug,
-        max_tokens=50_000,
+        max_tokens=8_192,
+        context_window_tokens=context_window_tokens,
     )
 
     # Create agent with E2B execution + web tools + calculator
-    tools = [E2BCodeExecToolProvider(), WebToolProvider(), CALCULATOR_TOOL]
+    tools: list[Tool | ToolProvider] = [E2BCodeExecToolProvider(), WebToolProvider(), CALCULATOR_TOOL]
     agent = Agent(
         client=client,
         name="web_calculator_agent",
@@ -75,9 +80,15 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OPENROUTER_SLUG,
         help=f"OpenRouter model slug to use (default: {DEFAULT_OPENROUTER_SLUG})",
     )
+    parser.add_argument(
+        "--context-window-tokens",
+        type=int,
+        default=DEFAULT_CONTEXT_WINDOW_TOKENS,
+        help=f"Context window of the chosen model (default: {DEFAULT_CONTEXT_WINDOW_TOKENS})",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(main(args.openrouter_slug))
+    asyncio.run(main(args.openrouter_slug, args.context_window_tokens))

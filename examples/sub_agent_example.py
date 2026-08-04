@@ -19,8 +19,9 @@ async def main() -> None:
     # Create client for OpenRouter (shared across all agents)
     client = ChatCompletionsClient(
         base_url="https://openrouter.ai/api/v1",
-        model="anthropic/claude-sonnet-4.5",
-        max_tokens=64_000,
+        model="anthropic/claude-opus-5",
+        max_tokens=8_192,
+        context_window_tokens=1_000_000,
     )
 
     ## ------- define research sub-agent ------- ##

@@ -1,14 +1,21 @@
 """Tests for OpenAI client utility helpers."""
 
 from stirrup.clients.utils import to_openai_messages
-from stirrup.core.models import AssistantMessage, TokenUsage
+from stirrup.core.models import AssistantMessage, TextBlock, TokenUsage
 
 
 def test_assistant_message_generates_id() -> None:
-    first = AssistantMessage(content="Hello", tool_calls=[], token_usage=TokenUsage(), metadata={})
+    first = AssistantMessage(
+        blocks=[
+            TextBlock(text="Hello"),
+        ],
+        token_usage=TokenUsage(),
+        metadata={},
+    )
     second = AssistantMessage(
-        content="Hello again",
-        tool_calls=[],
+        blocks=[
+            TextBlock(text="Hello again"),
+        ],
         token_usage=TokenUsage(),
         metadata={},
     )
@@ -18,10 +25,12 @@ def test_assistant_message_generates_id() -> None:
     assert first.id != second.id
 
 
-def test_to_openai_messages_forwards_assistant_metadata() -> None:
+def test_to_openai_messages_never_sends_metadata() -> None:
+    """Message metadata is integrator/user state — opaque to the framework, never on the wire."""
     message = AssistantMessage(
-        content="Hello",
-        tool_calls=[],
+        blocks=[
+            TextBlock(text="Hello"),
+        ],
         token_usage=TokenUsage(),
         metadata={"source": "cache", "attempt": 2},
     )
@@ -32,6 +41,5 @@ def test_to_openai_messages_forwards_assistant_metadata() -> None:
         {
             "role": "assistant",
             "content": [{"type": "text", "text": "Hello"}],
-            "metadata": {"source": "cache", "attempt": 2},
         }
     ]

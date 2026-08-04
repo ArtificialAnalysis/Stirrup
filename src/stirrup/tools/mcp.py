@@ -9,7 +9,7 @@ Example usage:
     from stirrup.tools import default_tools
 
     # With Agent (preferred)
-    client = ChatCompletionsClient(model="gpt-5")
+    client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
     agent = Agent(
         client=client,
         name="assistant",
@@ -73,7 +73,7 @@ except ImportError as e:
 try:
     from mcp.client.websocket import websocket_client
 except ImportError:
-    websocket_client = None  # type: ignore[assignment, misc]
+    websocket_client = None  # ty: ignore[invalid-assignment]
 
 
 __all__ = [
@@ -216,7 +216,7 @@ class MCPToolProvider(ToolProvider):
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
         from stirrup.tools import default_tools
 
-        client = ChatCompletionsClient(model="gpt-5")
+        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
         agent = Agent(
             client=client,
             name="assistant",

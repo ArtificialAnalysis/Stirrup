@@ -20,7 +20,9 @@ async def main():
     # Create client for OpenAI (shared across agents)
     client = ChatCompletionsClient(
         base_url="https://api.openai.com/v1",
-        model="gpt-5",
+        model="gpt-5.6-luna",
+        max_tokens=8_192,
+        context_window_tokens=1_000_000,
     )
 
     # Create a specialist agent
@@ -97,7 +99,9 @@ from stirrup.tools import WebToolProvider
 
 client = ChatCompletionsClient(
     base_url="https://api.openai.com/v1",
-    model="gpt-5",
+    model="gpt-5.6-luna",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
 )
 
 # Sub-agent does web research only (no files produced)
@@ -124,7 +128,9 @@ from stirrup.tools import LocalCodeExecToolProvider
 
 client = ChatCompletionsClient(
     base_url="https://api.openai.com/v1",
-    model="gpt-5",
+    model="gpt-5.6-luna",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
 )
 
 # Sub-agent creates files
@@ -163,7 +169,9 @@ from stirrup.tools import LocalCodeExecToolProvider, WebToolProvider
 
 client = ChatCompletionsClient(
     base_url="https://api.openai.com/v1",
-    model="gpt-5",
+    model="gpt-5.6-luna",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
 )
 
 # Specialist agents
@@ -214,7 +222,9 @@ from stirrup.tools import LocalCodeExecToolProvider, WebToolProvider
 
 client = ChatCompletionsClient(
     base_url="https://api.openai.com/v1",
-    model="gpt-5",
+    model="gpt-5.6-luna",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
 )
 
 # Level 2: Specialist
@@ -271,7 +281,12 @@ from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import LocalCodeExecToolProvider
 
-client = ChatCompletionsClient(base_url="https://api.openai.com/v1", model="gpt-5")
+client = ChatCompletionsClient(
+    base_url="https://api.openai.com/v1",
+    model="gpt-5.6-luna",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
+)
 
 # Each agent specializes in one task
 researcher = Agent(client=client, name="researcher", ...)
@@ -297,7 +312,12 @@ orchestrator = Agent(
 from stirrup import Agent
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-client = ChatCompletionsClient(base_url="https://api.openai.com/v1", model="gpt-5")
+client = ChatCompletionsClient(
+    base_url="https://api.openai.com/v1",
+    model="gpt-5.6-luna",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
+)
 
 # Multiple research specialists
 web_researcher = Agent(client=client, name="web_researcher", ...)

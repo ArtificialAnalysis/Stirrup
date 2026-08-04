@@ -75,30 +75,49 @@ A list of message groups representing the conversation history. Each group conta
 
 - `SystemMessage`: System prompts
 - `UserMessage`: User inputs and file contents
-- `AssistantMessage`: LLM responses with tool calls
+- `AssistantMessage`: LLM responses — an ordered sequence of blocks (reasoning, text, tool calls, media)
 - `ToolMessage`: Results from tool executions
+
+An assistant turn is stored as `blocks`, preserving the model's actual emission order
+(modern models interleave thinking → text → thinking → tool call). Each block is
+discriminated on `kind`: `text`, `reasoning` (in-band), `signed_reasoning`,
+`redacted_reasoning`, `reasoning_ref` (provider-side reference), `encrypted_reasoning`
+(opaque payload for stateless / zero-data-retention passback), `opaque`
+(provider-native block carried uninterpreted), `tool_call`, and the media block kinds.
+
+Alongside its blocks, an `AssistantMessage` may carry `provider_response_id` —
+provider-attached continuation state (e.g. an OpenAI Responses `resp_...` id). The
+Responses client uses it in its default stateful mode to continue conversations via
+`previous_response_id` instead of replaying full history. Provider response IDs are
+provider/project scoped and may expire; on a definitive not-found response the client
+replays full local history once when every block is losslessly representable, otherwise
+it raises because reference-only reasoning cannot be reconstructed.
 
 ```python
 history = [
     SystemMessage(role='system', content="You are an AI agent..."),
     UserMessage(role='user', content="What is the population of Australia..."),
     AssistantMessage(
-        role='assistant',
-        content="I'll search for Australia's population data...",
-        tool_calls=[ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...')],
+        blocks=[
+            TextBlock(text="I'll search for Australia's population data..."),
+            ToolCall(name='web_search', arguments='{"query": "..."}', tool_call_id='...'),
+        ],
         token_usage=TokenUsage(input=1523, answer=156, reasoning=0)
     ),
     ToolMessage(role='tool', content="<results>...ABS data...</results>", name='web_search', ...),
     # ... additional turns ...
-    AssistantMessage(
-        role='assistant',
-        content="All files are ready. Let me finish the task.",
-        tool_calls=[ToolCall(name='finish', arguments='{"reason": "...", "paths": [...]}', ...)],
-        token_usage=TokenUsage(input=25102, answer=285, reasoning=0)
-    ),
-    ToolMessage(role='tool', content="Successfully completed...", name='finish', ...),
 ]
 ```
+
+The channel-era `content` and `tool_calls` attributes remain temporarily available as
+deprecated views of `blocks`; reading them emits a `DeprecationWarning`. `content` is a
+bare string only for an empty response or a single text block and otherwise exposes the
+block list directly. The deprecated `reasoning` attribute raises with guidance to use
+`reasoning_blocks`. New messages must be constructed from `blocks`; channel-shaped v0.1
+data is accepted only as a legacy deserialization format and is synthesized in reasoning
+→ text → tool-call order. Construct a replacement message instead of assigning channels.
+Convenience accessors `joined_text`, `final_text`, `tool_call_blocks`, and
+`reasoning_blocks` operate on any block list.
 
 #### `metadata`
 
@@ -204,6 +223,14 @@ The agent receives a list of available skills in its system prompt and can read 
 
 Stirrup supports multiple ways to connect to LLM providers.
 
+`max_tokens` and `context_window_tokens` are separate budgets: the first caps a single response,
+the second is the model context capacity the agent summarizes history against. Built-in clients
+require `context_window_tokens` at construction and reject `max_tokens` values that exceed it —
+note the default `max_tokens` is `64_000`, so small context windows need an explicit `max_tokens`
+too. The examples in this repository pair an explicit `max_tokens=8_192` response budget with an
+explicit context window. Exceeding a response budget raises `OutputTokenLimitError` and aborts
+the run rather than retrying, so increase `max_tokens` if your task needs long responses.
+
 ### ChatCompletionsClient
 
 Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
@@ -214,8 +241,9 @@ Use `ChatCompletionsClient` for OpenAI or OpenAI-compatible APIs:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | `str` | required | Model identifier (e.g., `"gpt-5"`, `"deepseek-chat"`) |
-| `max_tokens` | `int` | `64_000` | Context window size |
+| `model` | `str` | required | Model identifier (e.g., `"gpt-5.6-luna"`, `"deepseek-v4-flash"`) |
+| `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
+| `context_window_tokens` | `int` | required | Context capacity for summarization |
 | `base_url` | `str \| None` | `None` | Custom API URL (for Deepseek, vLLM, etc.) |
 | `api_key` | `str \| None` | `None` | API key (defaults to `OPENROUTER_API_KEY` env var) |
 | `timeout` | `float \| None` | `None` | Request timeout in seconds |
@@ -231,9 +259,10 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-sonnet-4-5"`) |
-| `max_tokens` | `int` | required | Context window size |
-| `reasoning_effort` | `str \| None` | `None` | For reasoning models (o1/o3) |
+| `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-opus-5"`) |
+| `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
+| `context_window_tokens` | `int` | required | Context capacity for summarization |
+| `reasoning_effort` | `str \| None` | `None` | For reasoning models (e.g. GPT-5.6) |
 | `kwargs` | `dict \| None` | `None` | Additional provider-specific arguments |
 
 !!! note "LiteLLM Installation"
@@ -256,9 +285,12 @@ class MyCustomClient(LLMClient):
         return "my-model"
 
     @property
-    def max_tokens(self) -> int:
+    def context_window_tokens(self) -> int:
         return 128_000
 ```
+
+`Agent` reads `context_window_tokens` at construction and raises a `ValueError`
+when the returned value is not a positive int.
 
 → See [Custom Clients](extending/clients.md) for full documentation.
 
@@ -443,6 +475,14 @@ print(f"Total tokens: {aggregated['token_usage'].total}")
 ### Context Overflow Recovery
 
 By default, Stirrup retries context overflow errors by shortening the conversation and trying again.
+An output-limit stop is different: `OutputTokenLimitError` surfaces without
+summarization or retry with the same `max_tokens` limit.
+
+The built-in OpenAI-family clients detect overflow from OpenAI's `context_length_exceeded`
+error code. OpenAI-compatible endpoints that report a different code (such as OpenRouter,
+whose error codes depend on the upstream provider) surface a plain `BadRequestError` instead,
+so this recovery does not trigger for them — proactive summarization at
+`context_summarization_cutoff` remains the primary protection.
 
 When overflow happens, the agent removes the latest completed assistant turn. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
 
@@ -457,6 +497,15 @@ agent = Agent(
     recover_from_context_overflow=False,
 )
 ```
+
+Recovery only covers `ContextOverflowError`. Two other client failures deliberately abort the run:
+
+- Summarization is itself a model call, so `summarize_messages` can raise `OutputTokenLimitError`
+  out of `session.run()` even though you never call it directly. Retrying it with the same
+  `max_tokens` cannot succeed, so it is not recovered.
+- `OpenResponsesClient` raises `IncompleteResponseError` for incomplete responses that are not
+  output-limit stops, such as `incomplete_details.reason == "content_filter"`. Before token
+  budgets were split these unwound a turn and retried; only context overflow does that now.
 
 ## Logging
 

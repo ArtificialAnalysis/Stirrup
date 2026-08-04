@@ -39,7 +39,7 @@ type Summarizer = Callable[[str, int], str]
 async def call_executor(tool: Tool, params: BaseModel) -> ToolResult:
     """Invoke a tool's executor, offloading synchronous executors to a worker thread."""
     if inspect.iscoroutinefunction(tool.executor):
-        return await tool.executor(params)  # ty: ignore[invalid-await]
+        return await tool.executor(params)
     result = await anyio.to_thread.run_sync(tool.executor, params)  # ty: ignore[unresolved-attribute]
     return await result if inspect.isawaitable(result) else result
 
