@@ -1,14 +1,13 @@
 """Use middleware to spill and truncate large tool output."""
 
 import asyncio
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from stirrup import (
     Agent,
     DiskSpillMiddleware,
-    LocalDirSink,
+    ExecEnvSink,
     Tool,
     ToolResult,
     ToolTruncatorMiddleware,
@@ -16,6 +15,7 @@ from stirrup import (
 )
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools import CALCULATOR_TOOL
+from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 
 
 class DumpParams(BaseModel):
@@ -38,7 +38,7 @@ DUMP_TOOL = Tool(
 # --8<-- [start:middleware]
 spill = DiskSpillMiddleware(
     max_chars=200,
-    sink=LocalDirSink(Path("output/tool_outputs")),
+    sink=ExecEnvSink(),
 )
 truncate = ToolTruncatorMiddleware(max_chars=200)
 
@@ -56,7 +56,7 @@ client = ChatCompletionsClient(
 agent = Agent(
     client=client,
     name="middleware_agent",
-    tools=[DUMP_TOOL_WITH_MIDDLEWARE, CALCULATOR_TOOL],
+    tools=[LocalCodeExecToolProvider(), DUMP_TOOL_WITH_MIDDLEWARE, CALCULATOR_TOOL],
 )
 
 

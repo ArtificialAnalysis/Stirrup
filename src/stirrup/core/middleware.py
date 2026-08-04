@@ -4,7 +4,6 @@ import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -20,7 +19,6 @@ __all__ = [
     "Call",
     "DiskSpillMiddleware",
     "ExecEnvSink",
-    "LocalDirSink",
     "Sink",
     "ToolMiddleware",
     "ToolTruncatorMiddleware",
@@ -81,19 +79,6 @@ class Sink(ABC):
     @abstractmethod
     async def write(self, name: str, text: str) -> str:
         """Store `text` and return a path the agent can refer to."""
-
-
-class LocalDirSink(Sink):
-    """Writes dumps to a local directory."""
-
-    def __init__(self, directory: Path | str) -> None:
-        self._directory = Path(directory)
-
-    async def write(self, name: str, text: str) -> str:
-        await anyio.Path(self._directory).mkdir(parents=True, exist_ok=True)
-        path = self._directory / name
-        await anyio.Path(path).write_text(text, encoding="utf-8")
-        return str(path)
 
 
 class ExecEnvSink(Sink):

@@ -34,7 +34,6 @@ from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseErro
 from stirrup.core.middleware import (
     DiskSpillMiddleware,
     ExecEnvSink,
-    LocalDirSink,
     Sink,
     ToolMiddleware,
     ToolTruncatorMiddleware,
@@ -90,7 +89,6 @@ __all__ = [
     "ImageContentBlock",
     "IncompleteResponseError",
     "LLMClient",
-    "LocalDirSink",
     "OpaqueBlock",
     "OutputTokenLimitError",
     "ReasoningBlock",

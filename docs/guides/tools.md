@@ -273,9 +273,9 @@ Middleware wraps an individual tool without changing its schema.
 ```
 
 Middleware runs inside out. In this example, `spill` receives the full output and
-`truncate` shortens the result returned to the model. Use `ExecEnvSink` when the file
-should be available inside the agent's execution environment. For thread-affine tools,
-set `run_sync_in_thread=False` on the middleware directly wrapping the synchronous tool.
+`truncate` shortens the result returned to the model. `ExecEnvSink` writes spilled files
+into the agent's execution environment. For thread-affine tools, set
+`run_sync_in_thread=False` on the middleware directly wrapping the synchronous tool.
 
 → See [Middleware API](../api/core/middleware.md) for the full reference.
 
