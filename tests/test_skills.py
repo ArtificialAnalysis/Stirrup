@@ -1,0 +1,64 @@
+"""Tests for skill metadata loading."""
+
+from pathlib import Path
+
+import pytest
+
+from stirrup.skills.skills import SkillMetadata, load_skills_metadata, parse_frontmatter
+
+
+@pytest.mark.parametrize(
+    ("indicator", "expected"),
+    [
+        (">", "Inspect production metrics and identify likely causes."),
+        ("|", "Inspect production metrics\nand identify likely causes."),
+    ],
+)
+def test_parse_frontmatter_supports_yaml_block_scalars(indicator: str, expected: str) -> None:
+    content = f"""---
+name: investigate-metrics
+description: {indicator}
+  Inspect production metrics
+  and identify likely causes.
+---
+
+# Instructions
+"""
+
+    assert parse_frontmatter(content) == {
+        "name": "investigate-metrics",
+        "description": expected,
+    }
+
+
+def test_parse_frontmatter_rejects_malformed_yaml() -> None:
+    content = """---
+name: [unterminated
+description: broken
+---
+"""
+
+    assert parse_frontmatter(content) == {}
+
+
+def test_load_skills_metadata_reads_folded_description(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "investigate-metrics"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: investigate-metrics
+description: >
+  Inspect production metrics and
+  identify likely causes.
+---
+""",
+        encoding="utf-8",
+    )
+
+    assert load_skills_metadata(tmp_path) == [
+        SkillMetadata(
+            name="investigate-metrics",
+            description="Inspect production metrics and identify likely causes.",
+            path="skills/investigate-metrics",
+        )
+    ]
