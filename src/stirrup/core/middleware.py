@@ -22,7 +22,6 @@ __all__ = [
     "ExecEnvSink",
     "LocalDirSink",
     "Sink",
-    "Summarizer",
     "ToolMiddleware",
     "ToolTruncatorMiddleware",
     "call_executor",
@@ -31,10 +30,11 @@ __all__ = [
 type Call = Callable[[BaseModel], Awaitable[ToolResult]]
 """Invokes the next layer of a wrapped tool with the given params."""
 
-type Summarizer = Callable[[str, int], str]
-"""Shrinks text to fit within a character budget."""
-
 _TRUNCATION_MARKER = "\n...[truncated]...\n"
+
+
+class _SpillNotice(str):
+    pass
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -140,7 +140,7 @@ class DiskSpillMiddleware(ToolMiddleware):
             return result
 
         path = await self._sink.write(_dump_name(tool.name), text)
-        notice = f"Output was {len(text)} characters and has been saved to {path}. Read that file to see it in full."
+        notice = _SpillNotice(f"Spilled {len(text)} characters to {path}.")
         content = [notice, result.content] if isinstance(result.content, str) else [notice, *result.content]
         return result.model_copy(update={"content": content})
 
@@ -152,18 +152,16 @@ class ToolTruncatorMiddleware(ToolMiddleware):
         self,
         max_chars: int,
         *,
-        summarize: Summarizer = _truncate_text,
         run_sync_in_thread: bool = True,
     ) -> None:
         if max_chars < len(_TRUNCATION_MARKER):
             raise ValueError(f"max_chars must be at least {len(_TRUNCATION_MARKER)}")
         super().__init__(run_sync_in_thread=run_sync_in_thread)
         self._max_chars = max_chars
-        self._summarize = summarize
 
     async def handle(self, tool: Tool, params: BaseModel, call: Call) -> ToolResult:  # noqa: ARG002
         result = await call(params)
-        content = _truncate_content(result.content, self._max_chars, self._summarize)
+        content = _truncate_content(result.content, self._max_chars)
         return result if content == result.content else result.model_copy(update={"content": content})
 
 
@@ -173,19 +171,48 @@ def _text_parts(content: Content) -> list[str]:
     return [block for block in content if isinstance(block, str)]
 
 
-def _truncate_content(content: Content, max_chars: int, summarize: Summarizer) -> Content:
+def _truncate_content(content: Content, max_chars: int) -> Content:
     if isinstance(content, str):
-        return _summarize(content, max_chars, summarize)
-    return [_summarize(block, max_chars, summarize) if isinstance(block, str) else block for block in content]
+        return content if len(content) <= max_chars else _truncate_text(content, max_chars)
 
+    protected_chars = sum(len(block) for block in content if isinstance(block, _SpillNotice))
+    text_chars = sum(len(block) for block in content if isinstance(block, str) and not isinstance(block, _SpillNotice))
+    if protected_chars + text_chars <= max_chars:
+        return content
 
-def _summarize(text: str, max_chars: int, summarize: Summarizer) -> str:
-    if len(text) <= max_chars:
-        return text
-    result = summarize(text, max_chars)
-    if len(result) > max_chars:
-        raise ValueError("summarizer returned more than max_chars")
-    return result
+    available = max_chars - protected_chars
+    if available < len(_TRUNCATION_MARKER):
+        raise ValueError("max_chars is too small to preserve the spill notice")
+
+    remaining = available - len(_TRUNCATION_MARKER)
+    head_chars = (remaining + 1) // 2
+    tail_chars = remaining // 2
+    tail_start = text_chars - tail_chars
+    position = 0
+    marker_added = False
+    output = []
+
+    for block in content:
+        if isinstance(block, _SpillNotice) or not isinstance(block, str):
+            output.append(block)
+            continue
+
+        start = position
+        end = start + len(block)
+        position = end
+        parts: list[str] = []
+
+        if start < head_chars:
+            parts.append(block[: head_chars - start])
+        if not marker_added and end > head_chars:
+            parts.append(_TRUNCATION_MARKER)
+            marker_added = True
+        if end > tail_start:
+            parts.append(block[max(0, tail_start - start) :])
+        if parts:
+            output.append("".join(parts))
+
+    return output
 
 
 def _dump_name(tool_name: str) -> str:

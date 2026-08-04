@@ -55,8 +55,9 @@ async def test_spill_then_truncate_preserves_full_output(tmp_path: Path) -> None
     assert isinstance(result.content, list)
     assert isinstance(result.content[0], str)
     assert isinstance(result.content[1], str)
-    assert "has been saved to" in result.content[0]
+    assert "Spilled 1000 characters to" in result.content[0]
     assert "[truncated]" in result.content[1]
+    assert sum(len(block) for block in result.content if isinstance(block, str)) == 500
 
 
 async def test_truncator_preserves_media_order() -> None:
@@ -73,7 +74,7 @@ async def test_truncator_preserves_media_order() -> None:
         parameters=Params,
         executor=executor,
     )
-    wrapped = ToolTruncatorMiddleware(max_chars=20)(tool)
+    wrapped = ToolTruncatorMiddleware(max_chars=40)(tool)
 
     result = await call_executor(wrapped, Params(text="x" * 100))
 
@@ -82,7 +83,16 @@ async def test_truncator_preserves_media_order() -> None:
     assert isinstance(result.content[2], str)
     assert result.content[1] is image
     assert "[truncated]" in result.content[0]
-    assert "[truncated]" in result.content[2]
+    assert sum(len(block) for block in result.content if isinstance(block, str)) == 40
+
+
+async def test_truncator_rejects_budget_smaller_than_spill_notice(tmp_path: Path) -> None:
+    spill = DiskSpillMiddleware(max_chars=20, sink=LocalDirSink(tmp_path))
+    truncate = ToolTruncatorMiddleware(max_chars=20)
+    tool = truncate(spill(make_tool()))
+
+    with pytest.raises(ValueError, match="too small to preserve the spill notice"):
+        await call_executor(tool, Params(text="x" * 100))
 
 
 async def test_sync_tool_can_run_in_event_loop() -> None:
