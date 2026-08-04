@@ -177,7 +177,7 @@ Write your own by subclassing `ToolMiddleware` and implementing `handle`:
 from pydantic import BaseModel
 
 from stirrup import Tool, ToolMiddleware, ToolResult
-from stirrup.core.middleware import Call
+from stirrup.tools.middleware import Call
 
 
 class TraceMiddleware(ToolMiddleware):
@@ -227,6 +227,6 @@ async def test_tool_error_handling():
 ## Next Steps
 
 - [Tool Providers](../guides/tool-providers.md) - Provider pattern basics
-- [Middleware API](../api/core/middleware.md) - Truncation and disk spill
+- [Middleware API](../api/tools/middleware.md) - Truncation and disk spill
 - [Custom Loggers](loggers.md) - Logging customization
 - [Custom Backends](code_backends.md) - Code execution backends

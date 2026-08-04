@@ -98,7 +98,6 @@ nav:
       - Core:
           - Agent: api/core/agent.md
           - Models: api/core/models.md
-          - Middleware: api/core/middleware.md
           - Exceptions: api/core/exceptions.md
       - Clients:
           - ChatCompletions: api/clients/chat_completions.md
@@ -106,6 +105,7 @@ nav:
           - LiteLLM: api/clients/litellm.md
       - Tools:
           - Overview: api/tools/index.md
+          - Middleware: api/tools/middleware.md
           - Web Tools: api/tools/web.md
           - Code Execution: api/tools/code_backends.md
           - MCP: api/tools/mcp.md

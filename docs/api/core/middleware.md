@@ -1,3 +1,0 @@
-# Middleware
-
-::: stirrup.core.middleware

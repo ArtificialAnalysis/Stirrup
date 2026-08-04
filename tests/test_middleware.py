@@ -15,8 +15,8 @@ from stirrup import (
     ToolResult,
     ToolTruncatorMiddleware,
 )
-from stirrup.core.middleware import call_executor
 from stirrup.tools.code_backends.base import CodeExecToolProvider
+from stirrup.tools.middleware import call_executor
 
 
 class Params(BaseModel):

@@ -277,7 +277,7 @@ Middleware runs inside out. In this example, `spill` receives the full output an
 into the agent's execution environment. For thread-affine tools, set
 `run_sync_in_thread=False` on the middleware directly wrapping the synchronous tool.
 
-→ See [Middleware API](../api/core/middleware.md) for the full reference.
+→ See [Middleware API](../api/tools/middleware.md) for the full reference.
 
 ## Next Steps
 

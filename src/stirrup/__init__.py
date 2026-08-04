@@ -31,13 +31,6 @@ Example usage:
 from stirrup import tools
 from stirrup.core.agent import Agent, SessionAgent
 from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
-from stirrup.core.middleware import (
-    DiskSpillMiddleware,
-    ExecEnvSink,
-    Sink,
-    ToolMiddleware,
-    ToolTruncatorMiddleware,
-)
 from stirrup.core.models import (
     Addable,
     AnyReasoningBlock,
@@ -71,6 +64,13 @@ from stirrup.core.models import (
     joined_text,
     reasoning_blocks,
     tool_call_blocks,
+)
+from stirrup.tools.middleware import (
+    DiskSpillMiddleware,
+    ExecEnvSink,
+    Sink,
+    ToolMiddleware,
+    ToolTruncatorMiddleware,
 )
 
 __all__ = [
