@@ -32,6 +32,7 @@ dependencies = [
     "openai>=1.0.0",
     "pillow>=10.4.0",
     "pydantic>=2.0.0",
+    "pyyaml>=6.0.3",
     "rich>=13.0.0",
     "tenacity>=5.0.0",
     "trafilatura>=1.9.0",
