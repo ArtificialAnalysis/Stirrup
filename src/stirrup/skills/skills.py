@@ -136,8 +136,8 @@ def format_skills_section(skills: list[SkillMetadata]) -> str:
         "Each skill contains a SKILL.md file with detailed instructions and potentially bundled scripts.",
         "",
         "To use a skill:",
-        "1. Read the full instructions: `cat <skill_path>/SKILL.md`",
-        "2. Follow the instructions and use any bundled resources as described",
+        "1. Read the full `<skill_path>/SKILL.md` with an available file-reading tool.",
+        "2. Follow the instructions and use any bundled resources as described.",
         "",
     ]
     lines.extend([f"- **{skill.name}**: {skill.description} (`{skill.path}/SKILL.md`)" for skill in skills])

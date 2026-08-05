@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from stirrup.skills.skills import SkillMetadata, load_skills_metadata, parse_frontmatter
+from stirrup.skills.skills import SkillMetadata, format_skills_section, load_skills_metadata, parse_frontmatter
 
 
 @pytest.mark.parametrize(
@@ -62,3 +62,12 @@ description: >
             path="skills/investigate-metrics",
         )
     ]
+
+
+def test_format_skills_section_does_not_assume_shell_access() -> None:
+    section = format_skills_section(
+        [SkillMetadata(name="investigate-metrics", description="Inspect metrics.", path="skills/investigate-metrics")]
+    )
+
+    assert "file-reading tool" in section
+    assert "cat " not in section
