@@ -1,12 +1,16 @@
-"""Example: Code execution agent (E2B, Docker, or local).
+"""Example: Code execution agent (E2B, Daytona, Docker, or local).
 
 This example demonstrates how to create an agent that can execute shell or Python
-code in an isolated execution environment using one of several backends (E2B, Docker, or local).
+code in an isolated execution environment using one of several backends (E2B, Daytona,
+Docker, or local).
 You can switch between backends by commenting/uncommenting the relevant execution
 environment instantiation.
 
 Prerequisites for E2B:
 - Set E2B_API_KEY environment variable.
+
+Prerequisites for Daytona:
+- Set DAYTONA_API_KEY environment variable.
 
 See accompanying comments in the file for backend options.
 """
@@ -33,6 +37,7 @@ async def main() -> None:
     code_exec_tool_provider = LocalCodeExecToolProvider()  # Local
     # code_exec_tool_provider = DockerCodeExecToolProvider.from_image("python:3.12-slim")  # Docker
     # code_exec_tool_provider = E2BCodeExecToolProvider()  # E2B (requires E2B_API_KEY)
+    # code_exec_tool_provider = DaytonaCodeExecToolProvider()  # Daytona (requires DAYTONA_API_KEY)
 
     agent = Agent(
         client=client,
