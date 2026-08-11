@@ -31,6 +31,7 @@ actual emission order. `blocks` is the only stored content; the channel-era
 
 ### Added
 
+- `DaytonaCodeExecToolProvider`: Daytona cloud sandbox backend for code execution. Install with `stirrup[daytona]`; set `DAYTONA_API_KEY`. Supports `snapshot`, `image`, `timeout` (converted to `ttl_minutes`), `auto_stop_interval`, `config`, `sandbox_kwargs`, and `allowed_commands`. Commands run in per-command sandbox sessions (stdout/stderr captured separately, no shell state leaks between calls); working directory is resolved from the snapshot or image at startup.
 - Assistant block types, discriminated on `kind`: `TextBlock`, `ReasoningBlock`
   (in-band), `SignedReasoningBlock` (opaque signature passback),
   `RedactedReasoningBlock` (opaque withheld-reasoning payload), `ReasoningRefBlock`

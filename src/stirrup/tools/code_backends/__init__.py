@@ -9,6 +9,7 @@ Available here (no optional dependencies):
 Optional backends require explicit imports:
 - DockerCodeExecToolProvider: `from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider`
 - E2BCodeExecToolProvider: `from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider`
+- DaytonaCodeExecToolProvider: `from stirrup.tools.code_backends.daytona import DaytonaCodeExecToolProvider`
 """
 
 from .base import (

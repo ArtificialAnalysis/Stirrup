@@ -108,8 +108,8 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
             CommandResult with error if absolute paths detected, None otherwise.
 
         Note:
-            This check is specific to LocalCodeExecToolProvider since Docker and E2B
-            providers are already sandboxed and absolute paths are safe within them.
+            This check is specific to LocalCodeExecToolProvider since Docker, E2B, and
+            Daytona providers are already sandboxed and absolute paths are safe within them.
         """
         # argv is what actually runs, so the patterns must see it rather than
         # the raw string: quoting inside a path (``/et''c/passwd``) survives in
@@ -136,7 +136,8 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
                     error_kind="absolute_path_detected",
                     advice=(
                         "Use relative paths (e.g., './output.txt' instead of '~/output.txt'). "
-                        "For full filesystem access, use DockerCodeExecToolProvider or E2BCodeExecToolProvider."
+                        "For full filesystem access, use DockerCodeExecToolProvider, "
+                        "E2BCodeExecToolProvider, or DaytonaCodeExecToolProvider."
                     ),
                 )
         return None

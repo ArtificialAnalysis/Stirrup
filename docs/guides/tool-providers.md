@@ -146,6 +146,7 @@ Stirrup includes several ToolProviders:
 | `LocalCodeExecToolProvider` | `code_exec` | Local temp directory execution |
 | `DockerCodeExecToolProvider` | `code_exec` | Docker container execution |
 | `E2BCodeExecToolProvider` | `code_exec` | E2B cloud sandbox |
+| `DaytonaCodeExecToolProvider` | `code_exec` | Daytona cloud sandbox |
 | `WebToolProvider` | `web_fetch`, `web_search` | Web tools with isolated fetch transport and state, plus safe cleanup |
 | `ViewImageToolProvider` | `view_image` | View images from exec env |
 | `MCPToolProvider` | varies | MCP server tools |
