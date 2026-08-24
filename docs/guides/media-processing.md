@@ -43,6 +43,39 @@ Implement the `MediaProcessor` protocol to supply a different strategy. A proces
 receives an immutable `BinaryContentBlock` and returns `ProcessedMedia`; provider
 serializers remain responsible only for their wire format.
 
+## Caching repeated conversions
+
+Wrap a deterministic processor when the same media may be serialized across multiple
+model turns:
+
+```python
+from stirrup import CachingMediaProcessor, DefaultMediaProcessor
+from stirrup.clients import ChatCompletionsClient
+
+with CachingMediaProcessor(
+    DefaultMediaProcessor(),
+    max_bytes=256 * 1024 * 1024,
+) as media:
+    client = ChatCompletionsClient(
+        model="gpt-4o",
+        context_window_tokens=128_000,
+        media_processor=media,
+    )
+    # Use the client while the cache is open.
+```
+
+The cache:
+
+- uses the media type, byte length, and SHA-256 digest as its key;
+- stores processed output in a private temporary directory;
+- evicts least-recently-used files to stay within `max_bytes`;
+- ensures concurrent requests process a cache miss only once;
+- never stores failed conversions.
+
+Leaving the context or calling `close()` waits for active conversions and removes the
+entire directory. `TemporaryDirectory` also provides process-exit cleanup as a fallback.
+The code that creates a caching processor owns its lifecycle.
+
 The existing `ImageContentBlock.to_base64_url()`,
 `VideoContentBlock.to_base64_url()`, and `AudioContentBlock.to_base64_url()` methods
 remain available and delegate to a v0.2-compatible default processor.

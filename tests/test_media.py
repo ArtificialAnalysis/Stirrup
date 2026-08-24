@@ -1,16 +1,24 @@
 """Tests for the media processing policy boundary."""
 
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
+from threading import Event
 
+import pytest
 from imageio_ffmpeg import get_ffmpeg_exe
 from PIL import Image
 
 from stirrup.clients.open_responses_client import _content_to_open_responses_input
 from stirrup.clients.utils import content_to_openai
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
-from stirrup.core.media import DEFAULT_MEDIA_PROCESSOR, DefaultMediaProcessor, ProcessedMedia
+from stirrup.core.media import (
+    DEFAULT_MEDIA_PROCESSOR,
+    CachingMediaProcessor,
+    DefaultMediaProcessor,
+    ProcessedMedia,
+)
 from stirrup.core.models import AudioContentBlock, BinaryContentBlock, ImageContentBlock, VideoContentBlock
 from stirrup.utils.ffmpeg import probe_audio, video_dimensions
 
@@ -37,6 +45,26 @@ class RecordingMediaProcessor:
     def process(self, block: BinaryContentBlock) -> ProcessedMedia:
         self.blocks.append(block)
         return ProcessedMedia(data=b"custom", mime_type="image/png", extension="png")
+
+
+class BlockingMediaProcessor(RecordingMediaProcessor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+
+    def process(self, block: BinaryContentBlock) -> ProcessedMedia:
+        self.started.set()
+        assert self.release.wait(timeout=5)
+        return super().process(block)
+
+
+class FlakyMediaProcessor(RecordingMediaProcessor):
+    def process(self, block: BinaryContentBlock) -> ProcessedMedia:
+        if not self.blocks:
+            self.blocks.append(block)
+            raise ValueError("transcode failed")
+        return super().process(block)
 
 
 def test_default_policy_preserves_v02_limits() -> None:
@@ -119,4 +147,61 @@ def test_openai_serializers_use_injected_media_processor() -> None:
 
     assert chat_content == [{"type": "image_url", "image_url": {"url": expected_url}}]
     assert responses_content == [{"type": "input_image", "image_url": expected_url}]
+    assert processor.blocks == [block, block]
+
+
+def test_cache_reuses_processed_media_and_cleans_up() -> None:
+    block = _image_block()
+    processor = RecordingMediaProcessor()
+    cache = CachingMediaProcessor(processor)
+    directory = cache.cache_directory
+
+    with cache:
+        assert cache.process(block) == cache.process(block)
+        assert directory.is_dir()
+        assert any(directory.iterdir())
+
+    assert processor.blocks == [block]
+    assert not directory.exists()
+    with pytest.raises(RuntimeError, match="closed"):
+        cache.process(block)
+
+
+def test_cache_evicts_least_recently_used_media_by_total_bytes() -> None:
+    first = _image_block()
+    second = _image_block(2, 1)
+    processor = RecordingMediaProcessor()
+
+    with CachingMediaProcessor(processor, max_bytes=len(b"custom")) as cache:
+        cache.process(first)
+        cache.process(second)
+        cache.process(first)
+
+    assert processor.blocks == [first, second, first]
+
+
+def test_cache_processes_concurrent_misses_once() -> None:
+    block = _image_block()
+    processor = BlockingMediaProcessor()
+
+    with CachingMediaProcessor(processor) as cache, ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(cache.process, block)
+        assert processor.started.wait(timeout=5)
+        second = pool.submit(cache.process, block)
+        processor.release.set()
+
+        assert first.result(timeout=5) == second.result(timeout=5)
+
+    assert processor.blocks == [block]
+
+
+def test_cache_does_not_store_failed_conversions() -> None:
+    block = _image_block()
+    processor = FlakyMediaProcessor()
+
+    with CachingMediaProcessor(processor) as cache:
+        with pytest.raises(ValueError, match="transcode failed"):
+            cache.process(block)
+        assert cache.process(block).data == b"custom"
+
     assert processor.blocks == [block, block]
