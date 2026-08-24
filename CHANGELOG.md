@@ -47,6 +47,9 @@ actual emission order. `blocks` is the only stored content; the channel-era
   the optional `media` extra directly, removing MoviePy and its
   NumPy/ImageIO/Proglog dependency chain from the base installation. The backend
   loads only when video or audio is used.
+- `CachingMediaProcessor`, an opt-in bounded temporary-disk cache for avoiding
+  repeated media conversions across model turns, with LRU eviction, single-flight
+  concurrency, and deterministic cleanup.
 - Accessors `joined_text`, `final_text`, `tool_call_blocks`, `reasoning_blocks`,
   and block replacement via `AssistantMessage.with_blocks`.
 - `SummaryMessage.replaced_ids`: ids of the assistant messages a summary replaced.
