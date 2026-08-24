@@ -4,7 +4,7 @@ import subprocess
 from io import BytesIO
 from pathlib import Path
 
-from imageio_ffmpeg import get_ffmpeg_exe
+import pytest
 from PIL import Image
 
 from stirrup.clients.open_responses_client import _content_to_open_responses_input
@@ -12,12 +12,14 @@ from stirrup.clients.utils import content_to_openai
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
 from stirrup.core.media import DEFAULT_MEDIA_PROCESSOR, DefaultMediaProcessor, ProcessedMedia
 from stirrup.core.models import AudioContentBlock, BinaryContentBlock, ImageContentBlock, VideoContentBlock
+from stirrup.utils import ffmpeg as ffmpeg_module
 from stirrup.utils.ffmpeg import probe_audio, video_dimensions
 
 
 def _ffmpeg(*args: str) -> None:
+    imageio_ffmpeg = pytest.importorskip("imageio_ffmpeg")
     subprocess.run(
-        [get_ffmpeg_exe(), *args],
+        [imageio_ffmpeg.get_ffmpeg_exe(), *args],
         check=True,
         capture_output=True,
     )
@@ -37,6 +39,16 @@ class RecordingMediaProcessor:
     def process(self, block: BinaryContentBlock) -> ProcessedMedia:
         self.blocks.append(block)
         return ProcessedMedia(data=b"custom", mime_type="image/png", extension="png")
+
+
+def test_missing_media_extra_has_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_import(_name: str) -> None:
+        raise ModuleNotFoundError
+
+    monkeypatch.setattr(ffmpeg_module, "import_module", missing_import)
+
+    with pytest.raises(ImportError, match=r"stirrup\[media\]"):
+        video_dimensions(b"video")
 
 
 def test_default_policy_preserves_v02_limits() -> None:

@@ -2,16 +2,32 @@
 
 import subprocess
 from collections.abc import Generator
+from importlib import import_module
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Protocol, cast
 
-from imageio_ffmpeg import get_ffmpeg_exe, read_frames
+
+class _ImageIOFFmpeg(Protocol):
+    def get_ffmpeg_exe(self) -> str: ...
+
+    def read_frames(self, path: str) -> Generator[dict[str, Any] | bytes, None, None]: ...
+
+
+def _load_ffmpeg() -> _ImageIOFFmpeg:
+    try:
+        return cast(_ImageIOFFmpeg, import_module("imageio_ffmpeg"))
+    except ModuleNotFoundError as error:
+        raise ImportError(
+            "Video and audio processing requires the 'media' extra. "
+            "Install it with: pip install 'stirrup[media]'"
+        ) from error
 
 
 def _run_ffmpeg(*args: str) -> None:
+    ffmpeg = _load_ffmpeg()
     try:
         result = subprocess.run(
-            [get_ffmpeg_exe(), "-nostdin", "-hide_banner", "-loglevel", "error", *args],
+            [ffmpeg.get_ffmpeg_exe(), "-nostdin", "-hide_banner", "-loglevel", "error", *args],
             check=False,
             capture_output=True,
             text=True,
@@ -25,11 +41,12 @@ def _run_ffmpeg(*args: str) -> None:
 
 def video_dimensions(data: bytes) -> tuple[int, int]:
     """Read a video's dimensions without decoding it into Python."""
+    ffmpeg = _load_ffmpeg()
     with NamedTemporaryFile(suffix=".bin") as source:
         source.write(data)
         source.flush()
         try:
-            frames: Generator[dict[str, Any] | bytes, None, None] = read_frames(source.name)
+            frames = ffmpeg.read_frames(source.name)
             try:
                 metadata = next(frames)
             finally:
