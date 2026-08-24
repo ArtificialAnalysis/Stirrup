@@ -16,6 +16,7 @@ from openai.types.responses import Response
 
 from stirrup.clients.utils import validate_token_budgets
 from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
+from stirrup.core.media import DEFAULT_MEDIA_PROCESSOR, MediaProcessor
 from stirrup.core.models import (
     AssistantBlock,
     AssistantMessage,
@@ -67,7 +68,11 @@ def _is_missing_previous_response(error: APIStatusError) -> bool:
     return error.code == "previous_response_not_found" and error.param == "previous_response_id"
 
 
-def _content_to_open_responses_input(content: Content) -> list[dict[str, Any]]:
+def _content_to_open_responses_input(
+    content: Content,
+    *,
+    media_processor: MediaProcessor = DEFAULT_MEDIA_PROCESSOR,
+) -> list[dict[str, Any]]:
     """Convert Content blocks to OpenResponses input content format.
 
     Uses input_text for text content (vs output_text for responses).
@@ -80,19 +85,20 @@ def _content_to_open_responses_input(content: Content) -> list[dict[str, Any]]:
         if isinstance(block, str):
             out.append({"type": "input_text", "text": block})
         elif isinstance(block, ImageContentBlock):
-            out.append({"type": "input_image", "image_url": block.to_base64_url()})
+            out.append({"type": "input_image", "image_url": media_processor.process(block).data_url})
         elif isinstance(block, AudioContentBlock):
+            processed = media_processor.process(block)
             out.append(
                 {
                     "type": "input_audio",
                     "input_audio": {
-                        "data": block.to_base64_url().split(",")[1],
+                        "data": processed.data_url.split(",")[1],
                         "format": block.extension,
                     },
                 }
             )
         elif isinstance(block, VideoContentBlock):
-            out.append({"type": "input_file", "file_data": block.to_base64_url()})
+            out.append({"type": "input_file", "file_data": media_processor.process(block).data_url})
         else:
             raise NotImplementedError(f"Unsupported content block: {type(block)}")
     return out
@@ -144,6 +150,7 @@ def _to_open_responses_input(
     msgs: Sequence[ChatMessage],
     *,
     allow_reference_reasoning: bool = True,
+    media_processor: MediaProcessor = DEFAULT_MEDIA_PROCESSOR,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert ChatMessage list to OpenResponses (instructions, input) tuple.
 
@@ -169,7 +176,7 @@ def _to_open_responses_input(
             input_items.append(
                 {
                     "role": "user",
-                    "content": _content_to_open_responses_input(m.content),
+                    "content": _content_to_open_responses_input(m.content, media_processor=media_processor),
                 }
             )
         elif isinstance(m, AssistantMessage):
@@ -283,6 +290,7 @@ def _to_open_responses_request(
     msgs: Sequence[ChatMessage],
     *,
     use_provider_response_id: bool,
+    media_processor: MediaProcessor = DEFAULT_MEDIA_PROCESSOR,
 ) -> tuple[str | None, str | None, list[dict[str, Any]]]:
     """Build one Responses request while preserving response-level continuation state.
 
@@ -290,7 +298,10 @@ def _to_open_responses_request(
     are extracted from the complete local history because the Responses API does not
     carry a previous response's ``instructions`` into the next request.
     """
-    instructions, _ = _to_open_responses_input([msg for msg in msgs if isinstance(msg, SystemMessage)])
+    instructions, _ = _to_open_responses_input(
+        [msg for msg in msgs if isinstance(msg, SystemMessage)],
+        media_processor=media_processor,
+    )
     previous_response_id: str | None = None
     messages_to_process = msgs
 
@@ -309,6 +320,7 @@ def _to_open_responses_request(
     _, input_items = _to_open_responses_input(
         messages_to_process,
         allow_reference_reasoning=previous_response_id is not None,
+        media_processor=media_processor,
     )
     return instructions, previous_response_id, input_items
 
@@ -477,6 +489,7 @@ class OpenResponsesClient(LLMClient):
         max_retries: int = 2,
         instructions: str | None = None,
         kwargs: dict[str, Any] | None = None,
+        media_processor: MediaProcessor | None = None,
     ) -> None:
         """Initialize OpenAI SDK client with model configuration for Responses API.
 
@@ -506,6 +519,8 @@ class OpenResponsesClient(LLMClient):
                 ``tool_choice`` and ``reasoning`` remain available for provider-native
                 configuration, but cannot be combined with the corresponding dedicated
                 ``generate(tools=...)`` or ``reasoning_effort`` configuration.
+            media_processor: Image, video, and audio processing policy. Defaults
+                to Stirrup's v0.2-compatible limits and encodings.
 
         Raises:
             ValueError: If ``context_window_tokens`` is not positive, ``max_tokens``
@@ -520,6 +535,7 @@ class OpenResponsesClient(LLMClient):
         self._encrypted_reasoning = encrypted_reasoning
         self._default_instructions = instructions
         self._kwargs = dict(kwargs or {})
+        self._media_processor = media_processor if media_processor is not None else DEFAULT_MEDIA_PROCESSOR
         reserved_keys = sorted(_OWNED_REQUEST_KEYS & self._kwargs.keys())
         if reserved_keys:
             raise ValueError(
@@ -599,6 +615,7 @@ class OpenResponsesClient(LLMClient):
         instructions, previous_response_id, input_items = _to_open_responses_request(
             messages,
             use_provider_response_id=stateful,
+            media_processor=self._media_processor,
         )
 
         # Use provided instructions or fall back to default
@@ -655,6 +672,7 @@ class OpenResponsesClient(LLMClient):
                 replay_instructions, _, replay_input = _to_open_responses_request(
                     messages,
                     use_provider_response_id=False,
+                    media_processor=self._media_processor,
                 )
             except (NotImplementedError, TypeError) as replay_error:
                 raise RuntimeError(

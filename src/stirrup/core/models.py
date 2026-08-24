@@ -2,20 +2,16 @@ import base64
 import mimetypes
 import warnings
 from abc import ABC, abstractmethod
-from base64 import b64encode
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from io import BytesIO
 from math import isinf, isnan, sqrt
-from tempfile import NamedTemporaryFile
 from types import TracebackType
 from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, overload, runtime_checkable
 from uuid import uuid4
 
 import filetype
-from moviepy import AudioFileClip, VideoFileClip
-from moviepy.video.fx import Resize
 from PIL import Image
 from pydantic import (
     BaseModel,
@@ -155,16 +151,10 @@ class ImageContentBlock(BinaryContentBlock, frozen=True):
             im.verify()
 
     def to_base64_url(self, max_pixels: int | None = RESOLUTION_1MP) -> str:
-        """Convert image to base64 data URL, optionally resizing to max pixel count."""
-        img: Image.Image = Image.open(BytesIO(self.data))
-        if max_pixels is not None and img.width * img.height > max_pixels:
-            tw, th = downscale_image(img.width, img.height, max_pixels)
-            img.thumbnail((tw, th), Image.Resampling.LANCZOS)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        return f"data:image/png;base64,{b64encode(buf.getvalue()).decode()}"
+        """Use the v0.2-compatible default processor to produce a PNG data URL."""
+        from stirrup.core.media import DefaultMediaProcessor
+
+        return DefaultMediaProcessor(image_max_pixels=max_pixels).process(self).data_url
 
 
 class VideoContentBlock(BinaryContentBlock, frozen=True):
@@ -184,37 +174,16 @@ class VideoContentBlock(BinaryContentBlock, frozen=True):
     }
 
     def _probe(self) -> None:
-        """Verify video data is valid by attempting to open it as a VideoFileClip."""
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
-        with NamedTemporaryFile(suffix=".bin") as f:
-            f.write(self.data)
-            f.flush()
-            clip = VideoFileClip(f.name)
-            clip.close()
+        """Verify that FFmpeg can read the video's metadata."""
+        from stirrup.utils.ffmpeg import video_dimensions
+
+        video_dimensions(self.data)
 
     def to_base64_url(self, max_pixels: int | None = RESOLUTION_480P, fps: int | None = None) -> str:
-        """Transcode to MP4 and return base64 data URL."""
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
-            with NamedTemporaryFile(suffix=".mp4") as fin, NamedTemporaryFile(suffix=".mp4") as fout:
-                fin.write(self.data)
-                fin.flush()
-                clip = VideoFileClip(fin.name)
-                tw, th = downscale_image(int(clip.w), int(clip.h), max_pixels)
-                clip = clip.with_effects([Resize(new_size=(tw, th))])
+        """Use the v0.2-compatible default processor to produce an MP4 data URL."""
+        from stirrup.core.media import DefaultMediaProcessor
 
-                clip.write_videofile(
-                    fout.name,
-                    codec="libx264",
-                    fps=fps,
-                    audio=clip.audio is not None,
-                    audio_codec="aac",
-                    preset="veryfast",
-                    logger=None,
-                )
-                clip.close()
-                return f"data:video/mp4;base64,{b64encode(fout.read()).decode()}"
+        return DefaultMediaProcessor(video_max_pixels=max_pixels, video_fps=fps).process(self).data_url
 
 
 class AudioContentBlock(BinaryContentBlock, frozen=True):
@@ -238,26 +207,16 @@ class AudioContentBlock(BinaryContentBlock, frozen=True):
     }
 
     def _probe(self) -> None:
-        """Verify audio data is valid by attempting to open it as an AudioFileClip."""
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
-        with NamedTemporaryFile(suffix=".bin") as fin:
-            fin.write(self.data)
-            fin.flush()
-            clip = AudioFileClip(fin.name)
-            clip.close()
+        """Verify that FFmpeg can decode the beginning of the audio stream."""
+        from stirrup.utils.ffmpeg import probe_audio
+
+        probe_audio(self.data)
 
     def to_base64_url(self, bitrate: str = "192k") -> str:
-        """Transcode to MP3 and return base64 data URL."""
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
-            with NamedTemporaryFile(suffix=".bin") as fin, NamedTemporaryFile(suffix=".mp3") as fout:
-                fin.write(self.data)
-                fin.flush()
-                clip = AudioFileClip(fin.name)
-                clip.write_audiofile(fout.name, codec="libmp3lame", bitrate=bitrate, logger=None)
-                clip.close()
-                return f"data:audio/mpeg;base64,{b64encode(fout.read()).decode()}"
+        """Use the v0.2-compatible default processor to produce an MP3 data URL."""
+        from stirrup.core.media import DefaultMediaProcessor
+
+        return DefaultMediaProcessor(audio_bitrate=bitrate).process(self).data_url
 
 
 type ContentBlock = ImageContentBlock | VideoContentBlock | AudioContentBlock | str

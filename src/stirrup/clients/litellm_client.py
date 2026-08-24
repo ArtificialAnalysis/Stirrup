@@ -24,6 +24,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from stirrup.clients.utils import to_openai_messages, to_openai_tools, validate_token_budgets
 from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
+from stirrup.core.media import DEFAULT_MEDIA_PROCESSOR, MediaProcessor
 from stirrup.core.models import (
     AssistantBlock,
     AssistantMessage,
@@ -83,6 +84,7 @@ class LiteLLMClient(LLMClient):
         api_key: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         kwargs: dict[str, Any] | None = None,
+        media_processor: MediaProcessor | None = None,
     ) -> None:
         """Initialize LiteLLM client with model configuration and capabilities.
 
@@ -97,6 +99,8 @@ class LiteLLMClient(LLMClient):
                 Keys that collide with the arguments this client sets (including
                 ``max_tokens``) raise TypeError at request time; other keys pass
                 through unvalidated.
+            media_processor: Image, video, and audio processing policy. Defaults
+                to Stirrup's v0.2-compatible limits and encodings.
 
         Raises:
             ValueError: If no model is provided, ``context_window_tokens`` is not
@@ -120,6 +124,7 @@ class LiteLLMClient(LLMClient):
         self._reasoning_effort: ReasoningEffort | None = reasoning_effort
         self._api_key = api_key
         self._kwargs = kwargs or {}
+        self._media_processor = media_processor if media_processor is not None else DEFAULT_MEDIA_PROCESSOR
 
     @property
     def max_tokens(self) -> int:
@@ -147,7 +152,11 @@ class LiteLLMClient(LLMClient):
         try:
             r = await acompletion(
                 model=self.model_slug,
-                messages=to_openai_messages(messages, allow_tool_call_signatures=True),
+                messages=to_openai_messages(
+                    messages,
+                    allow_tool_call_signatures=True,
+                    media_processor=self._media_processor,
+                ),
                 tools=to_openai_tools(tools) if tools else None,
                 tool_choice="auto" if tools else None,
                 max_tokens=self._max_tokens,

@@ -84,6 +84,7 @@ nav:
       - Tool Providers: guides/tool-providers.md
       - Code Execution: guides/code-execution.md
       - Caching: guides/caching.md
+      - Media Processing: guides/media-processing.md
       - Skills: guides/skills.md
       - Sub-Agents: guides/sub-agents.md
       - Slack Integration: guides/slack.md
@@ -97,6 +98,7 @@ nav:
   - API Reference:
       - Core:
           - Agent: api/core/agent.md
+          - Media: api/core/media.md
           - Models: api/core/models.md
           - Exceptions: api/core/exceptions.md
       - Clients:

@@ -31,6 +31,7 @@ Example usage:
 from stirrup import tools
 from stirrup.core.agent import Agent, SessionAgent
 from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
+from stirrup.core.media import DEFAULT_MEDIA_PROCESSOR, DefaultMediaProcessor, MediaProcessor, ProcessedMedia
 from stirrup.core.models import (
     Addable,
     AnyReasoningBlock,
@@ -67,6 +68,7 @@ from stirrup.core.models import (
 )
 
 __all__ = [
+    "DEFAULT_MEDIA_PROCESSOR",
     "Addable",
     "Agent",
     "AnyReasoningBlock",
@@ -75,13 +77,16 @@ __all__ = [
     "AudioContentBlock",
     "ChatMessage",
     "ContextOverflowError",
+    "DefaultMediaProcessor",
     "EmptyParams",
     "EncryptedReasoningBlock",
     "ImageContentBlock",
     "IncompleteResponseError",
     "LLMClient",
+    "MediaProcessor",
     "OpaqueBlock",
     "OutputTokenLimitError",
+    "ProcessedMedia",
     "ReasoningBlock",
     "ReasoningRefBlock",
     "RedactedReasoningBlock",
