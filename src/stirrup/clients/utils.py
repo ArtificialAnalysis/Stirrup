@@ -8,6 +8,7 @@ formats, these utilities are shared between both client implementations.
 from collections.abc import Sequence
 from typing import Any, assert_never
 
+from stirrup.core.media import DEFAULT_MEDIA_PROCESSOR, MediaProcessor
 from stirrup.core.models import (
     AssistantBlock,
     AssistantMessage,
@@ -85,7 +86,11 @@ def to_openai_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:
     return out
 
 
-def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
+def content_to_openai(
+    content: Content,
+    *,
+    media_processor: MediaProcessor = DEFAULT_MEDIA_PROCESSOR,
+) -> list[dict[str, Any]] | str:
     """Convert Content blocks to OpenAI message content format.
 
     Handles text, images, audio, and video content blocks, converting them
@@ -93,6 +98,7 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
 
     Args:
         content: Either a string or list of content blocks.
+        media_processor: Policy used to encode media blocks.
 
     Returns:
         List of content dictionaries in OpenAI format; a non-empty string is wrapped
@@ -113,19 +119,22 @@ def content_to_openai(content: Content) -> list[dict[str, Any]] | str:
                 continue
             out.append({"type": "text", "text": block})
         elif isinstance(block, ImageContentBlock):
-            out.append({"type": "image_url", "image_url": {"url": block.to_base64_url()}})
+            out.append({"type": "image_url", "image_url": {"url": media_processor.process(block).data_url}})
         elif isinstance(block, AudioContentBlock):
+            processed = media_processor.process(block)
             out.append(
                 {
                     "type": "input_audio",
                     "input_audio": {
-                        "data": block.to_base64_url().split(",")[1],
+                        "data": processed.data_url.split(",")[1],
+                        # Preserve v0.2's input-format field while processing policy
+                        # remains independently configurable.
                         "format": block.extension,
                     },
                 }
             )
         elif isinstance(block, VideoContentBlock):
-            out.append({"type": "file", "file": {"file_data": block.to_base64_url()}})
+            out.append({"type": "file", "file": {"file_data": media_processor.process(block).data_url}})
         else:
             raise NotImplementedError(f"Unsupported content block: {type(block)}")
     if not out:
@@ -180,6 +189,7 @@ def to_openai_messages(
     msgs: list[ChatMessage],
     *,
     allow_tool_call_signatures: bool = False,
+    media_processor: MediaProcessor = DEFAULT_MEDIA_PROCESSOR,
 ) -> list[dict[str, Any]]:
     """Convert ChatMessage list to OpenAI-compatible message dictionaries.
 
@@ -189,6 +199,9 @@ def to_openai_messages(
 
     Args:
         msgs: List of ChatMessage objects (System, User, Assistant, or Tool messages).
+        allow_tool_call_signatures: Whether provider-specific tool-call signatures
+            may be passed through.
+        media_processor: Policy used to encode media blocks.
 
     Returns:
         List of message dictionaries ready for the OpenAI API.
@@ -199,9 +212,9 @@ def to_openai_messages(
     out: list[dict[str, Any]] = []
     for m in msgs:
         if isinstance(m, SystemMessage):
-            out.append({"role": "system", "content": content_to_openai(m.content)})
+            out.append({"role": "system", "content": content_to_openai(m.content, media_processor=media_processor)})
         elif isinstance(m, UserMessage):
-            out.append({"role": "user", "content": content_to_openai(m.content)})
+            out.append({"role": "user", "content": content_to_openai(m.content, media_processor=media_processor)})
         elif isinstance(m, AssistantMessage):
             _validate_chat_assistant_blocks(
                 m.blocks,
@@ -209,7 +222,10 @@ def to_openai_messages(
             )
             # Note: message metadata is deliberately NOT sent on the wire — it is
             # integrator/user state, opaque to the framework.
-            msg: dict[str, Any] = {"role": "assistant", "content": content_to_openai(_assistant_content(m.blocks))}
+            msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": content_to_openai(_assistant_content(m.blocks), media_processor=media_processor),
+            }
 
             rblocks = reasoning_blocks(m.blocks)
             reasoning_parts: list[str] = []
@@ -258,7 +274,7 @@ def to_openai_messages(
             out.append(
                 {
                     "role": "tool",
-                    "content": content_to_openai(m.content),
+                    "content": content_to_openai(m.content, media_processor=media_processor),
                     "tool_call_id": m.tool_call_id,
                     "name": m.name,
                 }

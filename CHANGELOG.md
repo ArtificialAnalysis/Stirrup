@@ -39,6 +39,14 @@ actual emission order. `blocks` is the only stored content; the channel-era
   `OpaqueBlock` (provider-native block carried uninterpreted, for marker/control
   blocks that must survive passback), plus `ToolCall` and the media blocks as
   union members (`AssistantBlock`).
+- Injectable `MediaProcessor` policy for client-side image, video, and audio
+  conversion. `DefaultMediaProcessor` preserves v0.2 limits and encodings, while
+  legacy content-block `to_base64_url()` methods remain available as compatibility
+  delegates.
+- Video and audio probing/transcoding now invokes the FFmpeg binary provided by
+  the optional `media` extra directly, removing MoviePy and its
+  NumPy/ImageIO/Proglog dependency chain from the base installation. The backend
+  loads only when video or audio is used.
 - Accessors `joined_text`, `final_text`, `tool_call_blocks`, `reasoning_blocks`,
   and block replacement via `AssistantMessage.with_blocks`.
 - `SummaryMessage.replaced_ids`: ids of the assistant messages a summary replaced.

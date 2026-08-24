@@ -28,7 +28,6 @@ dependencies = [
     "filetype>=1.0.0",
     "httpx>=0.25.0",
     "json-schema-to-pydantic>=0.2.0",
-    "moviepy>=2.0.0",
     "openai>=1.0.0",
     "pillow>=10.4.0",
     "pydantic>=2.0.0",
@@ -45,7 +44,8 @@ docker = ["docker>=7.0.0", "python-dotenv>=1.0.0"]
 mcp = ["mcp>=1.9.0"]
 browser = ["browser-use>=0.11.3"]
 slack = ["slack-bolt>=1.20.0"]
-all = ["stirrup[litellm,e2b,e2b-throttle,docker,mcp,browser,slack]"]
+media = ["imageio-ffmpeg>=0.6.0"]
+all = ["stirrup[litellm,e2b,e2b-throttle,docker,mcp,browser,slack,media]"]
 
 [project.urls]
 Homepage = "https://github.com/ArtificialAnalysis/Stirrup"

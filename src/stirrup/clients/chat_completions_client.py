@@ -16,6 +16,7 @@ from openai import AsyncOpenAI, BadRequestError
 
 from stirrup.clients.utils import to_openai_messages, to_openai_tools, validate_token_budgets
 from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
+from stirrup.core.media import DEFAULT_MEDIA_PROCESSOR, MediaProcessor
 from stirrup.core.models import (
     AssistantBlock,
     AssistantMessage,
@@ -73,6 +74,7 @@ class ChatCompletionsClient(LLMClient):
         timeout: float | None = None,
         max_retries: int = 2,
         kwargs: dict[str, Any] | None = None,
+        media_processor: MediaProcessor | None = None,
     ) -> None:
         """Initialize OpenAI SDK client with model configuration.
 
@@ -94,6 +96,8 @@ class ChatCompletionsClient(LLMClient):
                 Values here override the base request parameters (model, messages,
                 and the token cap) and bypass constructor validation; tool and
                 reasoning parameters are always set by the client.
+            media_processor: Image, video, and audio processing policy. Defaults
+                to Stirrup's v0.2-compatible limits and encodings.
 
         Raises:
             ValueError: If ``context_window_tokens`` is not positive, or
@@ -106,6 +110,7 @@ class ChatCompletionsClient(LLMClient):
         self._context_window_tokens = context_window_tokens
         self._reasoning_effort = reasoning_effort
         self._kwargs = kwargs or {}
+        self._media_processor = media_processor if media_processor is not None else DEFAULT_MEDIA_PROCESSOR
 
         # Initialize AsyncOpenAI client
         # Read from OPENROUTER_API_KEY if no api_key provided
@@ -155,7 +160,7 @@ class ChatCompletionsClient(LLMClient):
         # Build request kwargs
         request_kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": to_openai_messages(messages),
+            "messages": to_openai_messages(messages, media_processor=self._media_processor),
             "max_completion_tokens": self._max_tokens,
             **self._kwargs,
         }
