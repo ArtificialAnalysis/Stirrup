@@ -7,7 +7,6 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from imageio_ffmpeg import get_ffmpeg_exe
 from PIL import Image
 
 from stirrup.clients.open_responses_client import _content_to_open_responses_input
@@ -20,12 +19,14 @@ from stirrup.core.media import (
     ProcessedMedia,
 )
 from stirrup.core.models import AudioContentBlock, BinaryContentBlock, ImageContentBlock, VideoContentBlock
+from stirrup.utils import ffmpeg as ffmpeg_module
 from stirrup.utils.ffmpeg import probe_audio, video_dimensions
 
 
 def _ffmpeg(*args: str) -> None:
+    imageio_ffmpeg = pytest.importorskip("imageio_ffmpeg")
     subprocess.run(
-        [get_ffmpeg_exe(), *args],
+        [imageio_ffmpeg.get_ffmpeg_exe(), *args],
         check=True,
         capture_output=True,
     )
@@ -65,6 +66,16 @@ class FlakyMediaProcessor(RecordingMediaProcessor):
             self.blocks.append(block)
             raise ValueError("transcode failed")
         return super().process(block)
+
+
+def test_missing_media_extra_has_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_import(_name: str) -> None:
+        raise ModuleNotFoundError
+
+    monkeypatch.setattr(ffmpeg_module, "import_module", missing_import)
+
+    with pytest.raises(ImportError, match=r"stirrup\[media\]"):
+        video_dimensions(b"video")
 
 
 def test_default_policy_preserves_v02_limits() -> None:

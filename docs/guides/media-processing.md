@@ -13,8 +13,16 @@ preserve Stirrup v0.2 behavior:
 - Videos are limited to 640 × 480's pixel area and encoded as H.264/AAC MP4.
 - Audio is encoded as 192 kbit/s MP3.
 
-Video and audio operations invoke the FFmpeg binary bundled by `imageio-ffmpeg`
-directly; MoviePy and its larger Python dependency chain are not required.
+Video and audio support is optional:
+
+```bash
+pip install "stirrup[media]"
+```
+
+The extra provides an FFmpeg binary through `imageio-ffmpeg`. Stirrup loads it only
+when video or audio is constructed or processed, so image-only installations do not
+download or import the media backend. MoviePy and its larger Python dependency chain
+are not required.
 
 Configure those limits when constructing a client:
 

@@ -5538,7 +5538,6 @@ dependencies = [
     { name = "anyio" },
     { name = "filetype" },
     { name = "httpx" },
-    { name = "imageio-ffmpeg" },
     { name = "json-schema-to-pydantic" },
     { name = "openai" },
     { name = "pillow" },
@@ -5554,6 +5553,7 @@ all = [
     { name = "browser-use" },
     { name = "docker" },
     { name = "e2b-code-interpreter" },
+    { name = "imageio-ffmpeg" },
     { name = "litellm" },
     { name = "mcp" },
     { name = "python-dotenv" },
@@ -5578,6 +5578,9 @@ litellm = [
 ]
 mcp = [
     { name = "mcp" },
+]
+media = [
+    { name = "imageio-ffmpeg" },
 ]
 slack = [
     { name = "slack-bolt" },
@@ -5604,7 +5607,7 @@ requires-dist = [
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = ">=2.3.0" },
     { name = "filetype", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
+    { name = "imageio-ffmpeg", marker = "extra == 'media'", specifier = ">=0.6.0" },
     { name = "json-schema-to-pydantic", specifier = ">=0.2.0" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.79.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.9.0" },
@@ -5615,11 +5618,11 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.20.0" },
     { name = "stirrup", extras = ["e2b"], marker = "extra == 'e2b-throttle'" },
-    { name = "stirrup", extras = ["litellm", "e2b", "e2b-throttle", "docker", "mcp", "browser", "slack"], marker = "extra == 'all'" },
+    { name = "stirrup", extras = ["litellm", "e2b", "e2b-throttle", "docker", "mcp", "browser", "slack", "media"], marker = "extra == 'all'" },
     { name = "tenacity", specifier = ">=5.0.0" },
     { name = "trafilatura", specifier = ">=1.9.0" },
 ]
-provides-extras = ["litellm", "e2b", "e2b-throttle", "docker", "mcp", "browser", "slack", "all"]
+provides-extras = ["litellm", "e2b", "e2b-throttle", "docker", "mcp", "browser", "slack", "media", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -44,8 +44,9 @@ actual emission order. `blocks` is the only stored content; the channel-era
   legacy content-block `to_base64_url()` methods remain available as compatibility
   delegates.
 - Video and audio probing/transcoding now invokes the FFmpeg binary provided by
-  `imageio-ffmpeg` directly, removing MoviePy and its NumPy/ImageIO/Proglog
-  dependency chain.
+  the optional `media` extra directly, removing MoviePy and its
+  NumPy/ImageIO/Proglog dependency chain from the base installation. The backend
+  loads only when video or audio is used.
 - `CachingMediaProcessor`, an opt-in bounded temporary-disk cache for avoiding
   repeated media conversions across model turns, with LRU eviction, single-flight
   concurrency, and deterministic cleanup.
