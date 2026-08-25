@@ -28,9 +28,16 @@ actual emission order. `blocks` is the only stored content; the channel-era
 | `OpenResponsesClient` kwargs containing client-owned request keys (`background`, `conversation`, `input`, `instructions`, `max_output_tokens`, `model`, `previous_response_id`, `store`, or `stream`), or colliding with dedicated tool/reasoning configuration | **raises `ValueError`** — these keys otherwise bypass invariants or are silently overwritten | Use the client's dedicated arguments; use `encrypted_reasoning=True` for stateless / ZDR operation. Provider-native `tools` / `tool_choice` and `reasoning` kwargs remain valid when no dedicated configuration conflicts. |
 | OpenAI Responses tool results with non-string content | **raise `NotImplementedError`** instead of stringifying and corrupting multimodal content | Convert to a provider-supported string representation before constructing `ToolMessage`. |
 | LiteLLM replay of signed thinking | wire change — one `thinking_blocks` entry per signed block (was: merged single entry, first signature only) | Intentional fidelity fix for multi-block signed thinking. |
+| Install `stirrup[mcp]` with MCP Python SDK 1.x, or configure WebSocket transport | **removed** — MCP now requires SDK 2.x and standard stdio/Streamable HTTP; deprecated SSE remains for legacy servers | Upgrade to `mcp>=2,<3` and replace WebSocket endpoints with Streamable HTTP. |
 
 ### Added
 
+- MCP `2026-07-28` support with automatic fallback to legacy servers, full
+  tool-list pagination, request timeouts, progress handling, exact input-schema
+  forwarding, output validation, and preserved tool error/structured/resource
+  result semantics.
+- Explicit MCP transport selection and `${VAR_NAME}` expansion in MCP config.
+- Negotiated MCP versions through `MCPToolProvider.protocol_versions`.
 - Assistant block types, discriminated on `kind`: `TextBlock`, `ReasoningBlock`
   (in-band), `SignedReasoningBlock` (opaque signature passback),
   `RedactedReasoningBlock` (opaque withheld-reasoning payload), `ReasoningRefBlock`

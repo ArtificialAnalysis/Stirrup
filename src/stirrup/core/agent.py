@@ -25,6 +25,7 @@ from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
+    AudioContentBlock,
     ChatMessage,
     ImageContentBlock,
     LLMClient,
@@ -40,6 +41,7 @@ from stirrup.core.models import (
     ToolUseCountMetadata,
     TurnWarningMessage,
     UserMessage,
+    VideoContentBlock,
     joined_text,
     tool_call_blocks,
 )
@@ -127,16 +129,17 @@ def _tool_arguments_json(tool_call: ToolCall) -> str:
 
 
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
-    """Extract image blocks from tool messages and convert them to user messages for text-only models."""
+    """Move media from tool-role messages to user messages for providers that require it."""
     user_messages: list[UserMessage] = []
     for tm in tool_messages:
         if isinstance(tm.content, list):
             for idx, block in enumerate(tm.content):
-                if isinstance(block, ImageContentBlock):
+                if isinstance(block, ImageContentBlock | AudioContentBlock | VideoContentBlock):
+                    media_kind = block.kind.removesuffix("_content_block")
                     user_messages.append(
-                        UserMessage(content=[f"Here is the image for tool call {tm.tool_call_id}", block]),
+                        UserMessage(content=[f"Here is the {media_kind} for tool call {tm.tool_call_id}", block]),
                     )
-                    tm.content[idx] = f"Done! The User will provide the image for tool call {tm.tool_call_id}"
+                    tm.content[idx] = f"Done! The User will provide the {media_kind} for tool call {tm.tool_call_id}"
                 elif isinstance(block, str):
                     continue
                 else:

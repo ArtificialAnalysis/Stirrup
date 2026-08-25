@@ -27,7 +27,6 @@ dependencies = [
     "anyio>=4.1.0",
     "filetype>=1.0.0",
     "httpx>=0.25.0",
-    "json-schema-to-pydantic>=0.2.0",
     "moviepy>=2.0.0",
     "openai>=1.0.0",
     "pillow>=10.4.0",
@@ -42,7 +41,10 @@ litellm = ["litellm>=1.79.3"]
 e2b = ["e2b-code-interpreter>=2.3.0"]
 e2b-throttle = ["stirrup[e2b]", "aiolimiter>=1.1.0"]
 docker = ["docker>=7.0.0", "python-dotenv>=1.0.0"]
-mcp = ["mcp>=1.9.0"]
+mcp = [
+    "jsonschema>=4.20.0",
+    "mcp>=2.0.0,<3",
+]
 browser = ["browser-use>=0.11.3"]
 slack = ["slack-bolt>=1.20.0"]
 all = ["stirrup[litellm,e2b,e2b-throttle,docker,mcp,browser,slack]"]
