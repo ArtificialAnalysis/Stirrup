@@ -1,5 +1,5 @@
 ---
-name: data_analysis
+name: data-analysis
 description: High-performance data analysis using Polars - load, transform, aggregate, visualize and export tabular data. Use for CSV/JSON/Parquet processing, statistical analysis, time series, and creating charts.
 ---
 
@@ -59,12 +59,12 @@ result.write_csv("output.csv")
 
 Detailed API reference and patterns for specific operations:
 
-- `reference/loading.md` - Loading data from all supported formats
-- `reference/transformations.md` - Column operations, filtering, sorting, type casting
-- `reference/aggregations.md` - Group by, window functions, running totals
-- `reference/time_series.md` - Date parsing, resampling, lag features
-- `reference/statistics.md` - Correlations, distributions, hypothesis testing setup
-- `reference/visualization.md` - Creating charts with matplotlib/plotly
+- `references/loading.md` - Loading data from all supported formats
+- `references/transformations.md` - Column operations, filtering, sorting, type casting
+- `references/aggregations.md` - Group by, window functions, running totals
+- `references/time_series.md` - Date parsing, resampling, lag features
+- `references/statistics.md` - Correlations, distributions, hypothesis testing setup
+- `references/visualization.md` - Creating charts with matplotlib/plotly
 
 ### Ready-to-Use Scripts
 
