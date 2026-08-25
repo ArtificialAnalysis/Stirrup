@@ -557,6 +557,8 @@ class Tool[P: BaseModel, M](BaseModel):
     name: str
     description: str
     parameters: type[P] = EmptyParams  # ty: ignore[invalid-assignment]
+    parameter_schema: dict[str, Any] | None = None
+    """Optional source JSON Schema to expose to the model instead of regenerating it from ``parameters``."""
     executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
 
 

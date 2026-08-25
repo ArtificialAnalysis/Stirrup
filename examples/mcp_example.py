@@ -10,7 +10,7 @@ Example .mcp/mcp.json:
     {
       "mcpServers": {
         "deepwiki": {
-          "url": "https://mcp.deepwiki.com/sse"
+          "url": "https://mcp.deepwiki.com/mcp"
         }
       }
     }

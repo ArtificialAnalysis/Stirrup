@@ -52,6 +52,20 @@ def _status_error(
     )
 
 
+def test_open_responses_tools_prefer_an_explicit_parameter_schema() -> None:
+    from stirrup.core.models import EmptyParams, Tool, ToolResult
+
+    schema = {"type": "object", "unevaluatedProperties": False}
+    tool = Tool[EmptyParams, None](
+        name="exact_schema",
+        description="Keep this schema unchanged",
+        parameter_schema=schema,
+        executor=lambda _: ToolResult(content="ok"),
+    )
+
+    assert _to_open_responses_tools({tool.name: tool})[0]["parameters"] == schema
+
+
 def _previous_response_not_found_error() -> APIStatusError:
     return _status_error(
         BadRequestError,

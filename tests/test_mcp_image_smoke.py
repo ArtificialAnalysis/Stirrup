@@ -14,7 +14,7 @@ from stirrup.clients.utils import to_openai_messages
 from stirrup.core.models import ImageContentBlock, ToolMessage, ToolResult, ToolUseCountMetadata
 from stirrup.tools.mcp import MCPConfig, MCPToolProvider
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp.server.mcpserver")
 
 
 def _image_b64(image_format: str) -> str:
@@ -33,9 +33,10 @@ def _write_image_server(script_path: Path, image_format: str, tool_name: str) ->
         f"""
 import base64
 
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Image
 
-mcp = FastMCP("image-server")
+mcp = MCPServer("image-server")
 
 
 @mcp.tool()
@@ -76,6 +77,7 @@ async def _assert_tool_returns_image(
 
     provider = _make_provider(script_path)
     async with provider as tools:
+        assert provider.protocol_versions == {"image_server": "2026-07-28"}
         tool = next(tool for tool in tools if tool.name == f"image_server__{tool_name}")
         executor_result = tool.executor(tool.parameters())
         raw_result = await executor_result if inspect.isawaitable(executor_result) else executor_result

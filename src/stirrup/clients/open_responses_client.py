@@ -134,7 +134,9 @@ def _to_open_responses_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:
             "name": t.name,
             "description": t.description,
         }
-        if t.parameters is not EmptyParams:
+        if t.parameter_schema is not None:
+            tool_def["parameters"] = t.parameter_schema
+        elif t.parameters is not EmptyParams:
             tool_def["parameters"] = t.parameters.model_json_schema()
         out.append(tool_def)
     return out
