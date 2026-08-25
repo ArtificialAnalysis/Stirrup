@@ -212,7 +212,7 @@ async with agent.session(
     skills_dir="skills",
     output_dir="./output",
 ) as session:
-    await session.run("Analyze the data using the data_analysis skill")
+    await session.run("Analyze the data using the data-analysis skill")
 ```
 
 The agent receives a list of available skills in its system prompt and can read the full instructions via `cat skills/<skill_name>/SKILL.md`.

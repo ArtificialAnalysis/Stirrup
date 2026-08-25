@@ -8,9 +8,10 @@ Learn more at [agentskills.io](https://agentskills.io/home)
 
 A skill is a directory containing:
 
-- **SKILL.md** - Main instruction file with YAML frontmatter (name, description) and detailed guidance
-- **reference/** - Optional subdirectory with reference documentation
+- **SKILL.md** - Main instruction file with YAML frontmatter and detailed guidance
+- **references/** - Optional subdirectory with reference documentation
 - **scripts/** - Optional subdirectory with ready-to-use Python scripts
+- **assets/** - Optional subdirectory with templates and static resources
 
 When skills are loaded, the agent receives:
 
@@ -24,9 +25,9 @@ When skills are loaded, the agent receives:
 
 ```
 skills/
-└── data_analysis/
+└── data-analysis/
     ├── SKILL.md
-    ├── reference/
+    ├── references/
     │   ├── loading.md
     │   └── transformations.md
     └── scripts/
@@ -38,8 +39,8 @@ skills/
 
 ```markdown
 ---
-name: data_analysis
-description: High-performance data analysis using Polars - load, transform, aggregate, and export tabular data.
+name: data-analysis
+description: High-performance data analysis using Polars. Use for loading, transforming, aggregating, and exporting tabular data.
 ---
 
 # Data Analysis Skill
@@ -73,7 +74,7 @@ df.describe()
 When you specify `skills_dir` in `session()`:
 
 1. **Discovery**: Stirrup scans the directory for subdirectories containing `SKILL.md` files
-2. **Metadata Extraction**: YAML frontmatter (name, description) is parsed from each `SKILL.md`
+2. **Metadata Validation**: YAML frontmatter is parsed and validated against the Agent Skills specification
 3. **System Prompt**: Available skills are listed in the agent's system prompt
 4. **File Upload**: The skills directory is uploaded to the execution environment
 
@@ -86,10 +87,11 @@ You have access to the following skills located in the `skills/` directory.
 Each skill contains a SKILL.md file with detailed instructions and potentially bundled scripts.
 
 To use a skill:
-1. Read the full instructions: `cat <skill_path>/SKILL.md`
-2. Follow the instructions and use any bundled resources as described
+1. When a task matches a skill's description, read its full instructions before proceeding: `cat <skill_path>/SKILL.md`
+2. Resolve relative paths against the skill directory (`<skill_path>/`) and use the resolved path in tool calls
+3. Follow the instructions and use bundled resources only as described
 
-- **data_analysis**: High-performance data analysis using Polars (`skills/data_analysis/SKILL.md`)
+- **data-analysis**: High-performance data analysis using Polars (`skills/data-analysis/SKILL.md`)
 ```
 
 ## Creating Effective Skills
@@ -100,8 +102,8 @@ A well-structured `SKILL.md` should include:
 
 ```markdown
 ---
-name: skill_name
-description: One-line description shown in the system prompt
+name: skill-name
+description: Describe what the skill does and when the agent should use it.
 ---
 
 # Skill Title
@@ -134,7 +136,7 @@ Tips for effective use of the skill.
 Bundle ready-to-use scripts that the agent can execute:
 
 ```
-skills/data_analysis/scripts/
+skills/data-analysis/scripts/
 ├── explore_data.py      # Quick dataset profiling
 └── summary_stats.py     # Generate statistics report
 ```
@@ -146,7 +148,7 @@ Reference them in SKILL.md:
 
 - `scripts/explore_data.py` - Quick dataset exploration
   ```bash
-  python scripts/explore_data.py data.csv --output report.txt
+  python skills/data-analysis/scripts/explore_data.py data.csv --output report.txt
   ```
 ```
 
@@ -155,7 +157,7 @@ Reference them in SKILL.md:
 For complex domains, split documentation into focused reference files:
 
 ```
-skills/data_analysis/reference/
+skills/data-analysis/references/
 ├── loading.md           # Data loading patterns
 ├── transformations.md   # Column operations
 ├── aggregations.md      # Group by, window functions
@@ -167,18 +169,18 @@ Reference them in SKILL.md:
 ```markdown
 ### Reference Documentation
 
-- `reference/loading.md` - Loading data from all supported formats
-- `reference/transformations.md` - Column operations, filtering, sorting
+- `references/loading.md` - Loading data from all supported formats
+- `references/transformations.md` - Column operations, filtering, sorting
 ```
 
 ## Example: Data Analysis Skill
 
-See the included example at `skills/data_analysis/`:
+See the included example at `skills/data-analysis/`:
 
 ```
-skills/data_analysis/
+skills/data-analysis/
 ├── SKILL.md                          # Main instructions
-├── reference/
+├── references/
 │   ├── aggregations.md               # Group by, window functions
 │   ├── loading.md                    # File format support
 │   ├── statistics.md                 # Statistical analysis
@@ -200,13 +202,19 @@ When using skills that require specific dependencies, create a Dockerfile:
 
 Then pass it to `DockerCodeExecToolProvider.from_dockerfile()` as shown in the example above.
 
+## Validation and Execution Requirements
+
+Stirrup validates each skill's required fields, length limits, name syntax, and parent directory match. Invalid skills are skipped with a warning that identifies the skill and validation error.
+
+Skills require a `CodeExecToolProvider`. Session setup raises if `skills_dir` is provided without one, or if any skill files fail to upload. When a provider uses `allowed_commands`, its patterns must permit `cat` to load `SKILL.md` and every command needed by the skill's scripts.
+
 ## Best Practices
 
 1. **Keep skills focused**: Each skill should cover one domain well
 2. **Provide working examples**: Quick start code that runs immediately
 3. **Include decision guidance**: Help the agent know when to use the skill
 4. **Bundle common scripts**: Save agent turns with ready-to-run utilities
-5. **Use reference docs for depth**: Keep SKILL.md scannable, put details in reference/
+5. **Use reference docs for depth**: Keep SKILL.md scannable, put details in references/
 
 ## API Reference
 

@@ -9,10 +9,22 @@ Based on: https://www.anthropic.com/engineering/equipping-agents-for-the-real-wo
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 logger = logging.getLogger(__name__)
+
+_FRONTMATTER_PATTERN = re.compile(
+    r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_MAX_NAME_LENGTH = 64
+_MAX_DESCRIPTION_LENGTH = 1_024
+_MAX_COMPATIBILITY_LENGTH = 500
 
 
 @dataclass
@@ -21,10 +33,14 @@ class SkillMetadata:
 
     name: str
     description: str
-    path: str  # Relative path like "skills/data_analysis"
+    path: str  # Runtime path like "skills/data-analysis"
+    license: str | None = None
+    compatibility: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    allowed_tools: str | None = None
 
 
-def parse_frontmatter(content: str) -> dict[str, str]:
+def parse_frontmatter(content: str) -> dict[str, Any]:
     """Parse YAML frontmatter from markdown content.
 
     Extracts metadata between --- markers at the start of the file.
@@ -35,25 +51,82 @@ def parse_frontmatter(content: str) -> dict[str, str]:
     Returns:
         Dictionary of frontmatter key-value pairs, empty if no frontmatter found
 
-    """
-    # Match YAML frontmatter between --- markers
-    pattern = r"^---\s*\n(.*?)\n---"
-    match = re.match(pattern, content, re.DOTALL)
+    Raises:
+        yaml.YAMLError: If the frontmatter contains invalid YAML.
+        ValueError: If the parsed frontmatter is not a mapping.
 
+    """
+    match = _FRONTMATTER_PATTERN.match(content)
     if not match:
         return {}
 
-    frontmatter_text = match.group(1)
-    result: dict[str, str] = {}
+    parsed = yaml.safe_load(match.group(1))
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise ValueError("frontmatter must be a YAML mapping")
+    if not all(isinstance(key, str) for key in parsed):
+        raise ValueError("frontmatter keys must be strings")
+    return parsed
 
-    # Simple YAML parsing for key: value pairs
-    for line in frontmatter_text.strip().split("\n"):
-        line = line.strip()
-        if ":" in line:
-            key, value = line.split(":", 1)
-            result[key.strip()] = value.strip()
 
-    return result
+def _required_string(frontmatter: dict[str, Any], field_name: str, max_length: int) -> str:
+    value = frontmatter.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"frontmatter field '{field_name}' must be a non-empty string")
+    if len(value) > max_length:
+        raise ValueError(f"frontmatter field '{field_name}' must be at most {max_length} characters")
+    return value
+
+
+def _optional_string(
+    frontmatter: dict[str, Any],
+    field_name: str,
+    *,
+    max_length: int | None = None,
+) -> str | None:
+    value = frontmatter.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"frontmatter field '{field_name}' must be a non-empty string when provided")
+    if max_length is not None and len(value) > max_length:
+        raise ValueError(f"frontmatter field '{field_name}' must be at most {max_length} characters")
+    return value
+
+
+def _skill_metadata(skill_path: Path, frontmatter: dict[str, Any]) -> SkillMetadata:
+    name = _required_string(frontmatter, "name", _MAX_NAME_LENGTH)
+    description = _required_string(frontmatter, "description", _MAX_DESCRIPTION_LENGTH)
+
+    if not _SKILL_NAME_PATTERN.fullmatch(name):
+        raise ValueError("frontmatter field 'name' must contain only lowercase letters, numbers, and single hyphens")
+    if name != skill_path.name:
+        raise ValueError(f"frontmatter field 'name' must match parent directory '{skill_path.name}'")
+
+    raw_metadata = frontmatter.get("metadata")
+    if raw_metadata is None:
+        metadata: dict[str, str] = {}
+    elif not isinstance(raw_metadata, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in raw_metadata.items()
+    ):
+        raise ValueError("frontmatter field 'metadata' must map strings to strings")
+    else:
+        metadata = dict(raw_metadata)
+
+    return SkillMetadata(
+        name=name,
+        description=description,
+        path=f"skills/{skill_path.name}",
+        license=_optional_string(frontmatter, "license"),
+        compatibility=_optional_string(
+            frontmatter,
+            "compatibility",
+            max_length=_MAX_COMPATIBILITY_LENGTH,
+        ),
+        metadata=metadata,
+        allowed_tools=_optional_string(frontmatter, "allowed-tools"),
+    )
 
 
 def load_skills_metadata(skills_dir: Path) -> list[SkillMetadata]:
@@ -75,12 +148,11 @@ def load_skills_metadata(skills_dir: Path) -> list[SkillMetadata]:
         logger.warning("Skills path is not a directory: %s", skills_dir)
         return []
 
-    skills: list[SkillMetadata] = []
+    skills_by_name: dict[str, SkillMetadata] = {}
+    source_by_name: dict[str, Path] = {}
 
-    for skill_path in skills_dir.iterdir():
-        if not skill_path.is_dir():
-            continue
-
+    skill_paths = sorted((path for path in skills_dir.iterdir() if path.is_dir()), key=lambda path: path.name)
+    for skill_path in skill_paths:
         skill_md = skill_path / "SKILL.md"
         if not skill_md.exists():
             logger.debug("Skill directory missing SKILL.md: %s", skill_path)
@@ -88,31 +160,23 @@ def load_skills_metadata(skills_dir: Path) -> list[SkillMetadata]:
 
         try:
             content = skill_md.read_text(encoding="utf-8")
-            metadata = parse_frontmatter(content)
-
-            name = metadata.get("name")
-            description = metadata.get("description")
-
-            if not name or not description:
+            skill = _skill_metadata(skill_path, parse_frontmatter(content))
+            if skill.name in skills_by_name:
                 logger.warning(
-                    "Skill %s missing required frontmatter (name, description)",
-                    skill_path.name,
+                    "Skipping duplicate skill name '%s' in %s; already loaded from %s",
+                    skill.name,
+                    skill_path,
+                    source_by_name[skill.name],
                 )
                 continue
 
-            skills.append(
-                SkillMetadata(
-                    name=name,
-                    description=description,
-                    path=f"skills/{skill_path.name}",
-                )
-            )
-            logger.debug("Loaded skill: %s", name)
+            skills_by_name[skill.name] = skill
+            source_by_name[skill.name] = skill_path
+            logger.debug("Loaded skill: %s", skill.name)
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
+            logger.warning("Skipping invalid skill %s: %s", skill_path, exc)
 
-        except Exception as e:
-            logger.warning("Failed to load skill %s: %s", skill_path.name, e)
-
-    return skills
+    return sorted(skills_by_name.values(), key=lambda skill: skill.name)
 
 
 def format_skills_section(skills: list[SkillMetadata]) -> str:
@@ -136,8 +200,10 @@ def format_skills_section(skills: list[SkillMetadata]) -> str:
         "Each skill contains a SKILL.md file with detailed instructions and potentially bundled scripts.",
         "",
         "To use a skill:",
-        "1. Read the full instructions: `cat <skill_path>/SKILL.md`",
-        "2. Follow the instructions and use any bundled resources as described",
+        "1. When a task matches a skill's description, read its full instructions before proceeding: "
+        "`cat <skill_path>/SKILL.md`",
+        "2. Resolve relative paths against the skill directory (`<skill_path>/`) and use the resolved path in tool calls",
+        "3. Follow the instructions and use bundled resources only as described",
         "",
     ]
     lines.extend([f"- **{skill.name}**: {skill.description} (`{skill.path}/SKILL.md`)" for skill in skills])

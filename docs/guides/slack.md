@@ -141,7 +141,7 @@ Then in Slack: `@Stirrup agent:browser go to example.com and summarise the page`
 
 ### Using Skills
 
-Pass a `skills_dir` to give agents domain-specific expertise. Skills are loaded at session start and their instructions are included in the agent's system prompt. See the [Skills guide](skills.md) for how to create skills.
+Pass a `skills_dir` to give agents domain-specific expertise. Skill names and descriptions are included in the system prompt; full instructions are loaded from the execution environment only when needed. See the [Skills guide](skills.md) for how to create skills.
 
 ```python
 data_agent = SlackAgentConfig(

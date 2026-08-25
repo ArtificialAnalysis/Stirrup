@@ -29,6 +29,7 @@ actual emission order. `blocks` is the only stored content; the channel-era
 | OpenAI Responses tool results with non-string content | **raise `NotImplementedError`** instead of stringifying and corrupting multimodal content | Convert to a provider-supported string representation before constructing `ToolMessage`. |
 | LiteLLM replay of signed thinking | wire change — one `thinking_blocks` entry per signed block (was: merged single entry, first signature only) | Intentional fidelity fix for multi-block signed thinking. |
 | Install `stirrup[mcp]` with MCP Python SDK 1.x, or configure WebSocket transport | **removed** — MCP now requires SDK 2.x and standard stdio/Streamable HTTP; deprecated SSE remains for legacy servers | Upgrade to `mcp>=2,<3` and replace WebSocket endpoints with Streamable HTTP. |
+| Load non-conforming skills, or provide `skills_dir` without code execution | **raises or skips with a clear diagnostic** instead of advertising an unusable skill | Use valid YAML and Agent Skills names, match each name to its directory, and configure a `CodeExecToolProvider`. The bundled example moved from `data_analysis` to `data-analysis`. |
 
 ### Added
 
@@ -38,6 +39,8 @@ actual emission order. `blocks` is the only stored content; the channel-era
   result semantics.
 - Explicit MCP transport selection and `${VAR_NAME}` expansion in MCP config.
 - Negotiated MCP versions through `MCPToolProvider.protocol_versions`.
+- Agent Skills YAML frontmatter parsing, specification validation, optional
+  metadata preservation, deterministic ordering, and duplicate detection.
 - Assistant block types, discriminated on `kind`: `TextBlock`, `ReasoningBlock`
   (in-band), `SignedReasoningBlock` (opaque signature passback),
   `RedactedReasoningBlock` (opaque withheld-reasoning payload), `ReasoningRefBlock`
@@ -95,6 +98,8 @@ actual emission order. `blocks` is the only stored content; the channel-era
   assistant messages, then migrated to the v0.2 key on the next save. Uniform
   legacy content encodings are exhaustive; mixed scalar/list encodings are
   bounded to 256 combinations per historical schema to avoid exponential work.
+- Skills sessions now fail immediately when files cannot be activated or
+  uploaded, including inherited skill transfers to subagents.
 
 ## v0.1.12 (2026-07-08)
 
