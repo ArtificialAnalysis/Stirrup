@@ -16,7 +16,7 @@ from stirrup.core.cache import (
     CacheState,
     deserialize_messages,
 )
-from stirrup.core.exceptions import ContextOverflowError, OutputTokenLimitError
+from stirrup.core.exceptions import CompactionRequiredError, ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -54,6 +54,7 @@ class MockLLMClient(LLMClient):
         self.call_count = 0
         self._context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
         self.tools_seen: list[dict[str, Tool]] = []
+        self.messages_seen: list[list[ChatMessage]] = []
 
     @property
     def model_slug(self) -> str:
@@ -63,8 +64,9 @@ class MockLLMClient(LLMClient):
     def context_window_tokens(self) -> int:
         return self._context_window_tokens
 
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
         self.tools_seen.append(tools)
+        self.messages_seen.append(list(messages))
         response = self.responses[self.call_count]
         self.call_count += 1
         if isinstance(response, Exception):
@@ -1783,6 +1785,88 @@ async def test_summarizer_tool_call_only_exhausts_retries_and_raises() -> None:
     with pytest.raises(RuntimeError, match="no text blocks"):
         async with agent.session() as session:
             await session.run([SystemMessage(content="System prompt"), UserMessage(content="Do the task")])
+
+
+def _text_response(text: str, *, input_tokens: int = 100) -> AssistantMessage:
+    return AssistantMessage(blocks=[TextBlock(text=text)], token_usage=TokenUsage(input=input_tokens, answer=50))
+
+
+def _finish_response() -> AssistantMessage:
+    return AssistantMessage(
+        blocks=[
+            ToolCall(
+                name=DEFAULT_FINISH_TOOL_NAME,
+                arguments='{"reason": "Completed", "paths": []}',
+                tool_call_id="call_finish",
+            ),
+        ],
+        token_usage=TokenUsage(input=100, answer=50),
+    )
+
+
+def _has_image(messages: list[ChatMessage]) -> bool:
+    return any(
+        isinstance(block, ImageContentBlock)
+        for msg in messages
+        if isinstance(msg, UserMessage | ToolMessage) and isinstance(msg.content, list)
+        for block in msg.content
+    )
+
+
+def _image_task() -> list[ChatMessage]:
+    return [SystemMessage(content="System prompt"), UserMessage(content=["Do the task", _sample_png_block()])]
+
+
+async def test_compaction_required_summarizes_without_media_and_retries_the_step() -> None:
+    client = MockLLMClient(
+        [
+            _text_response("First step"),
+            CompactionRequiredError("request too large"),
+            _text_response("Summary of the work so far."),
+            _finish_response(),
+        ]
+    )
+    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+
+    async with agent.session() as session:
+        finish_params, history, _ = await session.run(_image_task())
+
+    assert finish_params is not None
+    assert not _has_image(client.messages_seen[2])
+    assert "[image omitted]" in str(client.messages_seen[2])
+    # The retried step keeps the task's image and replaces the history with a summary.
+    retried = client.messages_seen[3]
+    assert _has_image(retried)
+    assert any(isinstance(msg, SummaryMessage) for msg in retried)
+    assert not any(isinstance(msg, AssistantMessage) for msg in retried)
+    assert len(history) == 2
+
+
+async def test_compaction_required_before_any_turn_propagates() -> None:
+    client = MockLLMClient([CompactionRequiredError("request too large")])
+    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+
+    with pytest.raises(CompactionRequiredError):
+        async with agent.session() as session:
+            await session.run(_image_task())
+
+    assert client.call_count == 1
+
+
+async def test_compaction_required_after_compacting_propagates() -> None:
+    client = MockLLMClient(
+        [
+            _text_response("First step"),
+            CompactionRequiredError("request too large"),
+            _text_response("Summary of the work so far."),
+            CompactionRequiredError("still too large"),
+        ]
+    )
+    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+
+    with pytest.raises(CompactionRequiredError, match="still too large"):
+        async with agent.session() as session:
+            await session.run(_image_task())
 
 
 async def test_shared_subagent_normalizes_absolute_local_output_and_rejects_directory() -> None:
