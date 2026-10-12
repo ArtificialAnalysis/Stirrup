@@ -30,7 +30,12 @@ Example usage:
 
 from stirrup import tools
 from stirrup.core.agent import Agent, SessionAgent
-from stirrup.core.exceptions import ContextOverflowError, IncompleteResponseError, OutputTokenLimitError
+from stirrup.core.exceptions import (
+    CompactionRequiredError,
+    ContextOverflowError,
+    IncompleteResponseError,
+    OutputTokenLimitError,
+)
 from stirrup.core.models import (
     Addable,
     AnyReasoningBlock,
@@ -74,6 +79,7 @@ __all__ = [
     "AssistantMessage",
     "AudioContentBlock",
     "ChatMessage",
+    "CompactionRequiredError",
     "ContextOverflowError",
     "EmptyParams",
     "EncryptedReasoningBlock",
