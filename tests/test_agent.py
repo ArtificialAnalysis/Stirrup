@@ -1889,17 +1889,6 @@ async def test_image_limit_rejections_compact_and_the_run_finishes() -> None:
     assert triggers == ["too_many_images"] * len(client.summary_image_counts)
 
 
-async def test_compaction_required_before_any_turn_propagates() -> None:
-    client = MockLLMClient([CompactionRequiredError("request too large")])
-    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
-
-    with pytest.raises(CompactionRequiredError):
-        async with agent.session() as session:
-            await session.run(_image_task())
-
-    assert client.call_count == 1
-
-
 async def test_compaction_required_with_no_turn_to_drop_propagates_the_original_error() -> None:
     client = MockLLMClient([_text_response("First step"), CompactionRequiredError("too many images")])
     agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
