@@ -56,7 +56,6 @@ class MockLLMClient(LLMClient):
         self.call_count = 0
         self._context_window_tokens = max_tokens if context_window_tokens is None else context_window_tokens
         self.tools_seen: list[dict[str, Tool]] = []
-        self.messages_seen: list[list[ChatMessage]] = []
 
     @property
     def model_slug(self) -> str:
@@ -66,9 +65,8 @@ class MockLLMClient(LLMClient):
     def context_window_tokens(self) -> int:
         return self._context_window_tokens
 
-    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
         self.tools_seen.append(tools)
-        self.messages_seen.append(list(messages))
         response = self.responses[self.call_count]
         self.call_count += 1
         if isinstance(response, Exception):
