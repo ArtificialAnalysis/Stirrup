@@ -7,7 +7,8 @@ class CompactionRequiredError(Exception):
     """Raised by an ``LLMClient`` when compacting the conversation could fix a rejected request.
 
     For limits other than tokens, such as request bytes or image count. The agent summarizes
-    the history without media and retries the step once.
+    the history, unwinding the latest turn if the summary request is rejected too, and
+    retries the step once.
     """
 
 

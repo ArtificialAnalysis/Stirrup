@@ -25,7 +25,6 @@ from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
 from stirrup.core.exceptions import CompactionRequiredError, ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
-    AudioContentBlock,
     ChatMessage,
     ImageContentBlock,
     LLMClient,
@@ -41,7 +40,6 @@ from stirrup.core.models import (
     ToolUseCountMetadata,
     TurnWarningMessage,
     UserMessage,
-    VideoContentBlock,
     joined_text,
     tool_call_blocks,
 )
@@ -126,29 +124,6 @@ def _tool_arguments_json(tool_call: ToolCall) -> str:
     must normalize it the same way.
     """
     return tool_call.arguments if tool_call.arguments.strip() else "{}"
-
-
-_MEDIA_PLACEHOLDERS: dict[type, str] = {
-    ImageContentBlock: "[image omitted]",
-    VideoContentBlock: "[video omitted]",
-    AudioContentBlock: "[audio omitted]",
-}
-
-
-def _without_media(messages: list[ChatMessage]) -> list[ChatMessage]:
-    """Replace media blocks in user and tool messages with short text placeholders."""
-    return [
-        message.model_copy(
-            update={
-                "content": [
-                    block if isinstance(block, str) else _MEDIA_PLACEHOLDERS[type(block)] for block in message.content
-                ]
-            }
-        )
-        if isinstance(message, UserMessage | ToolMessage) and isinstance(message.content, list)
-        else message
-        for message in messages
-    ]
 
 
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
@@ -1358,13 +1333,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self,
         messages: list[ChatMessage],
         run_metadata_by_turn: dict[str, dict[str, list[Any]]],
-        *,
-        strip_media: bool = False,
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
-        """Summarize messages, unwinding completed turns if summarization overflows.
-
-        With ``strip_media`` the summarizer reads media as text placeholders.
-        """
+        """Summarize messages, unwinding completed turns if summarization overflows."""
         current_messages = messages
         while True:
             try:
@@ -1389,9 +1359,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     (no_tools_prompt, {}),
                 ]
                 summary_content: str | None = None
-                summarizer_input = _without_media(current_messages) if strip_media else current_messages
                 for prompt, tools in attempts:
-                    summary = await self._client.generate([*summarizer_input, UserMessage(content=prompt)], tools)
+                    summary = await self._client.generate([*current_messages, UserMessage(content=prompt)], tools)
                     summary_content = joined_text(summary.blocks)
                     if summary_content is not None:
                         break
@@ -1422,10 +1391,15 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 self._logger.context_summarization_complete(summary_content, summary_bridge_prompt)
 
                 return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
-            except ContextOverflowError:
-                # Summarization can overflow too; drop the latest completed turn and retry.
+            except (ContextOverflowError, CompactionRequiredError) as error:
+                # Summarization can be rejected too; drop the latest completed turn and retry.
                 # _unwind_context_overflow raises if that would cross a progress boundary.
-                current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
+                try:
+                    current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
+                except ContextOverflowError:
+                    if isinstance(error, CompactionRequiredError):
+                        raise error from None
+                    raise
                 run_metadata_by_turn.pop(dropped_turn_id, None)
 
     async def run(
@@ -1589,9 +1563,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     if compacted or not any(isinstance(msg, AssistantMessage) for msg in msgs):
                         raise
                     LOGGER.warning(f"Compacting the conversation after a rejected request: {error}")
-                    messages_to_summarize, msgs = await self.summarize_messages(
-                        msgs, run_metadata_by_turn, strip_media=True
-                    )
+                    messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
                     full_msg_history.append(messages_to_summarize)
                     compacted = True
 

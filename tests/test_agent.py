@@ -20,6 +20,7 @@ from stirrup.core.exceptions import CompactionRequiredError, ContextOverflowErro
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
+    EmptyParams,
     ImageContentBlock,
     LLMClient,
     ReasoningBlock,
@@ -37,6 +38,7 @@ from stirrup.core.models import (
     UserMessage,
     joined_text,
 )
+from stirrup.prompts import MESSAGE_SUMMARIZER
 from stirrup.tools import default_tools
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
 
@@ -1804,8 +1806,52 @@ def _finish_response() -> AssistantMessage:
     )
 
 
-def _has_image(messages: list[ChatMessage]) -> bool:
-    return any(
+def _image_task() -> list[ChatMessage]:
+    return [SystemMessage(content="System prompt"), UserMessage(content=["Do the task", _sample_png_block()])]
+
+
+class ImageLimitClient(LLMClient):
+    """Rejects any request carrying more than ``limit`` images; otherwise screenshots until done."""
+
+    def __init__(self, *, limit: int, screenshots: int) -> None:
+        self.limit = limit
+        self.screenshots = screenshots
+        self.taken = 0
+        self.rejected = 0
+        self.summary_image_counts: list[int] = []
+
+    @property
+    def model_slug(self) -> str:
+        return "image-limit-model"
+
+    @property
+    def context_window_tokens(self) -> int:
+        return 1_000_000
+
+    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+        images = _image_count(messages)
+        if images > self.limit:
+            self.rejected += 1
+            raise CompactionRequiredError(f"request contains {images} images, exceeding the maximum of {self.limit}")
+        last = messages[-1]
+        if (
+            isinstance(last, UserMessage)
+            and isinstance(last.content, str)
+            and last.content.startswith(MESSAGE_SUMMARIZER)
+        ):
+            self.summary_image_counts.append(images)
+            return _text_response("Took screenshots of the page.")
+        if self.taken < self.screenshots:
+            self.taken += 1
+            return AssistantMessage(
+                blocks=[ToolCall(name="screenshot", arguments="{}", tool_call_id=f"call_{self.taken}")],
+                token_usage=TokenUsage(input=100, answer=50),
+            )
+        return _finish_response()
+
+
+def _image_count(messages: list[ChatMessage]) -> int:
+    return sum(
         isinstance(block, ImageContentBlock)
         for msg in messages
         if isinstance(msg, UserMessage | ToolMessage) and isinstance(msg.content, list)
@@ -1813,33 +1859,30 @@ def _has_image(messages: list[ChatMessage]) -> bool:
     )
 
 
-def _image_task() -> list[ChatMessage]:
-    return [SystemMessage(content="System prompt"), UserMessage(content=["Do the task", _sample_png_block()])]
-
-
-async def test_compaction_required_summarizes_without_media_and_retries_the_step() -> None:
-    client = MockLLMClient(
-        [
-            _text_response("First step"),
-            CompactionRequiredError("request too large"),
-            _text_response("Summary of the work so far."),
-            _finish_response(),
-        ]
+def _screenshot_tool() -> Tool[EmptyParams, None]:
+    return Tool[EmptyParams, None](
+        name="screenshot",
+        description="Take a screenshot",
+        parameters=EmptyParams,
+        executor=lambda _params: ToolResult(content=["screenshot", _sample_png_block()]),
     )
-    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+
+
+async def test_image_limit_rejections_compact_and_the_run_finishes() -> None:
+    client = ImageLimitClient(limit=3, screenshots=6)
+    agent = Agent(
+        client=client, name="test-agent", max_turns=30, tools=[_screenshot_tool()], finish_tool=SIMPLE_FINISH_TOOL
+    )
 
     async with agent.session() as session:
         finish_params, history, _ = await session.run(_image_task())
 
     assert finish_params is not None
-    assert not _has_image(client.messages_seen[2])
-    assert "[image omitted]" in str(client.messages_seen[2])
-    # The retried step keeps the task's image and replaces the history with a summary.
-    retried = client.messages_seen[3]
-    assert _has_image(retried)
-    assert any(isinstance(msg, SummaryMessage) for msg in retried)
-    assert not any(isinstance(msg, AssistantMessage) for msg in retried)
-    assert len(history) == 2
+    assert client.rejected > 0
+    # Each summary was written from accepted history, with its images.
+    assert client.summary_image_counts
+    assert all(0 < count <= client.limit for count in client.summary_image_counts)
+    assert len(history) == len(client.summary_image_counts) + 1
 
 
 async def test_compaction_required_before_any_turn_propagates() -> None:
@@ -1851,6 +1894,21 @@ async def test_compaction_required_before_any_turn_propagates() -> None:
             await session.run(_image_task())
 
     assert client.call_count == 1
+
+
+async def test_rejected_summary_with_no_turn_to_unwind_propagates_the_original_error() -> None:
+    client = MockLLMClient(
+        [
+            _text_response("First step"),
+            CompactionRequiredError("too many images"),
+            CompactionRequiredError("summary has too many images"),
+        ]
+    )
+    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+
+    with pytest.raises(CompactionRequiredError, match="summary has too many images"):
+        async with agent.session() as session:
+            await session.run(_image_task())
 
 
 async def test_compaction_required_after_compacting_propagates() -> None:

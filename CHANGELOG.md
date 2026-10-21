@@ -6,7 +6,8 @@
 
 - `CompactionRequiredError`: an `LLMClient` raises it when a request was rejected for a
   limit compaction could fix, such as request bytes or image count. The agent summarizes
-  the history without media and retries the step once.
+  the history and retries the step once. A summary request rejected the same way unwinds
+  the latest turn and retries, as summarization already does for `ContextOverflowError`.
 
 ## v0.2.0 (unreleased)
 
