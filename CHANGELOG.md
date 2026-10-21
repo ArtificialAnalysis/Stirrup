@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- A `ContextOverflowError` now drops the latest turn, summarizes the rest and retries the step
+  once, recording `trigger="token_overflow"`, the same flow as `CompactionRequiredError`.
+  Previously it only dropped the turn, so a turn that kept producing an oversized tool output
+  could retry forever. `recover_from_context_overflow=False` still disables recovery.
+
 ### Added
 
 - `CompactionRequiredError(reason=...)`: an `LLMClient` raises it when a request was

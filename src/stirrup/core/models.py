@@ -694,7 +694,7 @@ class UserMessage(BaseModel):
     content: Content
 
 
-type SummaryTrigger = Literal["token_threshold"] | CompactionReason
+type SummaryTrigger = Literal["token_threshold", "token_overflow"] | CompactionReason
 
 
 class SummaryMessage(UserMessage):
@@ -704,8 +704,8 @@ class SummaryMessage(UserMessage):
         replaced_ids: Ids of the AssistantMessages this summary replaced, so
             consumers of dumped histories can reconstruct lineage offline.
         trigger: Why the agent summarized: ``"token_threshold"`` when context usage
-            crossed the summarization cutoff, otherwise the ``reason`` of a
-            ``CompactionRequiredError``.
+            crossed the summarization cutoff, ``"token_overflow"`` after a
+            ``ContextOverflowError``, otherwise the ``reason`` of a ``CompactionRequiredError``.
     """
 
     kind: Literal["summary"] = "summary"

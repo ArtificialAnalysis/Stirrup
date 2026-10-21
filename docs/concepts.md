@@ -44,7 +44,7 @@ agent = Agent(
     | `run_sync_in_thread` | `bool` | `True` | Run sync tools in separate thread |
     | `text_only_tool_responses` | `bool` | `True` | Extract images to user messages |
     | `block_successive_assistant_messages` | `bool` | `True` | Inject continue prompt to prevent back-to-back assistant messages |
-    | `recover_from_context_overflow` | `bool` | `True` | Retry context overflows by unwinding recent completed turns |
+    | `recover_from_context_overflow` | `bool` | `True` | Recover from context overflows by dropping the latest turn and summarizing |
     | `logger` | `AgentLoggerBase \| None` | `None` | Custom logger instance |
 
 ### Understanding Agent Output
@@ -477,7 +477,7 @@ whose error codes depend on the upstream provider) surface a plain `BadRequestEr
 so this recovery does not trigger for them — proactive summarization at
 `context_summarization_cutoff` remains the primary protection.
 
-When overflow happens, the agent removes the latest completed assistant turn. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
+When overflow happens, the agent removes the latest completed assistant turn, summarizes the rest and retries the step once; the summary records `trigger="token_overflow"`. It will not remove the original prompt, existing summaries, or the only completed turn after either boundary; this ensures the surviving trajectory still has forward progress.
 
 This also applies when eager summarization overflows. Any removed turn is also removed from final metadata and does not count against `max_turns`.
 
@@ -488,7 +488,8 @@ compaction can fix: too many images (`reason="image_count"`) or too many request
 (`reason="request_size"`). The agent drops the latest completed turn, summarizes the rest
 and retries the step once. If the retry fails again, or no turn can be removed, the error
 surfaces. Each `SummaryMessage` records why it was created in `trigger`:
-`"token_threshold"` for proactive summarization, otherwise the error's `reason`.
+`"token_threshold"` for proactive summarization, `"token_overflow"` after a context overflow,
+otherwise the error's `reason`.
 
 To fail immediately instead:
 

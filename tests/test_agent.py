@@ -385,7 +385,7 @@ async def test_agent_max_turns() -> None:
     assert "token_usage" in run_metadata
 
 
-async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
+async def test_context_overflow_unwinds_one_turn_summarizes_and_retries() -> None:
     responses = [
         AssistantMessage(
             blocks=[
@@ -400,6 +400,10 @@ async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
+        AssistantMessage(
+            blocks=[TextBlock(text="Summary of the work so far.")],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
         AssistantMessage(
             blocks=[
                 TextBlock(text="Recovered"),
@@ -427,7 +431,9 @@ async def test_context_overflow_unwinds_one_turn_and_retries() -> None:
 
     assert finish_params is not None
     assert finish_params.reason == "Recovered"
-    assert client.call_count == 4
+    assert client.call_count == 5
+    [summary] = [msg for msg in history[-1] if isinstance(msg, SummaryMessage)]
+    assert summary.trigger == "token_overflow"
     assistant_contents = [
         joined_text(msg.blocks) for group in history for msg in group if isinstance(msg, AssistantMessage)
     ]
@@ -467,6 +473,10 @@ async def test_context_overflow_removes_unwound_turn_metadata() -> None:
             token_usage=TokenUsage(input=100, answer=50),
         ),
         ContextOverflowError("too much context"),
+        AssistantMessage(
+            blocks=[TextBlock(text="Summary of the work so far.")],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
         AssistantMessage(
             blocks=[
                 TextBlock(text="Recovered"),
@@ -513,6 +523,10 @@ async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
         ),
         ContextOverflowError("too much context"),
         AssistantMessage(
+            blocks=[TextBlock(text="Summary of the work so far.")],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+        AssistantMessage(
             blocks=[
                 TextBlock(text="Recovered second step"),
             ],
@@ -551,6 +565,58 @@ async def test_context_overflow_turn_count_uses_surviving_progress() -> None:
     assert finish_params is not None
     assert finish_params.reason == "Finished after recovery"
     assert assistant_contents == ["First step", "Recovered second step", "Done"]
+
+
+class HugeToolOutputClient(LLMClient):
+    """Overflows on any request carrying the huge tool output; the model keeps asking for it."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    @property
+    def model_slug(self) -> str:
+        return "huge-output-model"
+
+    @property
+    def context_window_tokens(self) -> int:
+        return 1_000_000
+
+    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:  # noqa: ARG002
+        self.call_count += 1
+        if self.call_count > 20:
+            raise RuntimeError("agent kept retrying the same overflow")
+        if any(isinstance(msg, ToolMessage) and msg.content == "HUGE" for msg in messages):
+            raise ContextOverflowError("too much context")
+        last = messages[-1]
+        if (
+            isinstance(last, UserMessage)
+            and isinstance(last.content, str)
+            and last.content.startswith(MESSAGE_SUMMARIZER)
+        ):
+            return _text_response("Summary of the work so far.")
+        if self.call_count == 1:
+            return _text_response("Planning")
+        return AssistantMessage(
+            blocks=[ToolCall(name="read_huge", arguments="{}", tool_call_id=f"call_{self.call_count}")],
+            token_usage=TokenUsage(input=100, answer=50),
+        )
+
+
+async def test_context_overflow_from_an_oversized_tool_output_stops_instead_of_looping() -> None:
+    client = HugeToolOutputClient()
+    read_huge = Tool[EmptyParams, None](
+        name="read_huge",
+        description="Read a huge file",
+        parameters=EmptyParams,
+        executor=lambda _params: ToolResult(content="HUGE"),
+    )
+    agent = Agent(client=client, name="test-agent", max_turns=30, tools=[read_huge], finish_tool=SIMPLE_FINISH_TOOL)
+
+    with pytest.raises(ContextOverflowError, match="summarized context"):
+        async with agent.session(cache_on_interrupt=False) as session:
+            await session.run([UserMessage(content="Do the task")])
+
+    assert client.call_count < 10
 
 
 async def test_cache_state_preserves_run_metadata_by_turn() -> None:

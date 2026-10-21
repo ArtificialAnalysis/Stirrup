@@ -213,7 +213,7 @@ Stirrup guarantees the following to client and integration authors:
 - **Summaries carry lineage.** When history is summarized, the `SummaryMessage` records the
   ids of the assistant messages it replaced (`replaced_ids`, chained transitively across
   summarization rounds), so dumped histories reconstruct which turns a summary stands for.
-  `trigger` records why it was summarized: `"token_threshold"`, or the
+  `trigger` records why it was summarized: `"token_threshold"`, `"token_overflow"`, or the
   `CompactionRequiredError` reason.
 
 ## Testing with Mock Client

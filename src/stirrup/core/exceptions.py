@@ -18,7 +18,8 @@ class CompactionRequiredError(Exception):
 
     For limits other than tokens: too many images (``"image_count"``) or too many request
     bytes (``"request_size"``). The agent drops the latest turn, summarizes the rest and
-    retries the step once. ``reason`` is recorded as the summary's ``trigger``.
+    retries the step once, as for ``ContextOverflowError``. ``reason`` is recorded as the
+    summary's ``trigger``.
     """
 
     def __init__(self, *args: object, reason: CompactionReason) -> None:
@@ -27,7 +28,10 @@ class CompactionRequiredError(Exception):
 
 
 class ContextOverflowError(Exception):
-    """Raised when request input exceeds the model's context capacity."""
+    """Raised when request input exceeds the model's context capacity.
+
+    The agent drops the latest turn, summarizes the rest and retries the step once.
+    """
 
 
 class IncompleteResponseError(Exception):

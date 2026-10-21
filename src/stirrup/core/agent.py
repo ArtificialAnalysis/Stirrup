@@ -386,10 +386,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             block_successive_assistant_messages: If True (default), automatically inject a continue
                                                message when assistant responds without tool calls to
                                                prevent successive assistant messages.
-            recover_from_context_overflow: If True (default), drop one completed turn and retry when
-                                           the model reports a context overflow; on
-                                           CompactionRequiredError, also summarize the rest first.
-                                           If no turn can be dropped, the error is raised.
+            recover_from_context_overflow: If True (default), drop one completed turn, summarize the
+                                           rest and retry when the model reports a context overflow
+                                           or raises CompactionRequiredError. If no turn can be
+                                           dropped, the error is raised.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -1565,18 +1565,16 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         max_turns=self._max_turns,
                     )
                     break
-                except ContextOverflowError:
-                    msgs, dropped_turn_id = self._unwind_context_overflow(msgs)
-                    run_metadata_by_turn.pop(dropped_turn_id, None)
-                except CompactionRequiredError as error:
+                except (ContextOverflowError, CompactionRequiredError) as error:
                     # Drop the turn that broke the limit, then summarize the history the model accepted.
                     if compacted:
                         raise
                     msgs, dropped_turn_id = self._unwind_rejected_turn(msgs, error)
                     run_metadata_by_turn.pop(dropped_turn_id, None)
+                    trigger = error.reason if isinstance(error, CompactionRequiredError) else "token_overflow"
                     LOGGER.warning(f"Compacting the conversation after a rejected request: {error}")
                     messages_to_summarize, msgs = await self.summarize_messages(
-                        msgs, run_metadata_by_turn, trigger=error.reason
+                        msgs, run_metadata_by_turn, trigger=trigger
                     )
                     full_msg_history.append(messages_to_summarize)
                     compacted = True

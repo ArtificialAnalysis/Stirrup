@@ -1,7 +1,7 @@
 # Exceptions
 
 `ContextOverflowError` means the request input does not fit the model context,
-so `Agent` may shorten the conversation and retry. `OutputTokenLimitError` means
+so `Agent` drops the latest turn, summarizes the rest and retries the step once. `OutputTokenLimitError` means
 the provider exhausted the configured `max_tokens` response budget. An output
 limit failure surfaces without summarization or retry with the unchanged limit.
 `IncompleteResponseError` means the provider stopped for some other reason, such as
