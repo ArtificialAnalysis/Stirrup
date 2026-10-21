@@ -8,6 +8,9 @@
   limit compaction could fix, such as request bytes or image count. The agent summarizes
   the history and retries the step once. A summary request rejected the same way unwinds
   the latest turn and retries, as summarization already does for `ContextOverflowError`.
+- `SummaryMessage.trigger`: why the agent summarized, `"context_window"` for the token
+  threshold or the `reason` passed to `CompactionRequiredError`. Histories saved without
+  it load as `"context_window"`, the only trigger before this release.
 
 ## v0.2.0 (unreleased)
 

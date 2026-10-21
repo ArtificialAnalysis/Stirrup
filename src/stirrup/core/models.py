@@ -698,10 +698,13 @@ class SummaryMessage(UserMessage):
     Attributes:
         replaced_ids: Ids of the AssistantMessages this summary replaced, so
             consumers of dumped histories can reconstruct lineage offline.
+        trigger: Why the agent summarized: ``"context_window"`` for the token
+            threshold, otherwise the ``reason`` of a ``CompactionRequiredError``.
     """
 
     kind: Literal["summary"] = "summary"
     replaced_ids: list[str] = Field(default_factory=list)
+    trigger: str = "context_window"
 
 
 class TurnWarningMessage(UserMessage):

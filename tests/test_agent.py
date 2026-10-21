@@ -713,7 +713,7 @@ def test_v01_uncorrelatable_tool_result_raises(history: list[dict[str, object]])
 async def test_cache_state_preserves_special_user_message_types() -> None:
     state = CacheState(
         msgs=[
-            SummaryMessage(content="Summary", replaced_ids=["turn-1", "turn-2"]),
+            SummaryMessage(content="Summary", replaced_ids=["turn-1", "turn-2"], trigger="too_many_images"),
             TurnWarningMessage(content="One turn left"),
             UserMessage(content="Regular user message"),
         ],
@@ -726,6 +726,7 @@ async def test_cache_state_preserves_special_user_message_types() -> None:
 
     assert isinstance(restored.msgs[0], SummaryMessage)
     assert restored.msgs[0].replaced_ids == ["turn-1", "turn-2"]
+    assert restored.msgs[0].trigger == "too_many_images"
     assert isinstance(restored.msgs[1], TurnWarningMessage)
     assert type(restored.msgs[2]) is UserMessage
 
@@ -1645,6 +1646,7 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
 
     # The summary content should be different between history[1] and history[2]
     assert summaries_1[0].content != summaries_2[0].content
+    assert summaries_1[0].trigger == summaries_2[0].trigger == "context_window"
 
 
 async def test_summarization_context_overflow_unwinds_and_retries() -> None:
@@ -1830,7 +1832,9 @@ class ImageLimitClient(LLMClient):
         images = _image_count(messages)
         if images > self.limit:
             self.rejected += 1
-            raise CompactionRequiredError(f"request contains {images} images, exceeding the maximum of {self.limit}")
+            raise CompactionRequiredError(
+                f"request contains {images} images, exceeding the maximum of {self.limit}", reason="too_many_images"
+            )
         last = messages[-1]
         if (
             isinstance(last, UserMessage)
@@ -1881,6 +1885,8 @@ async def test_image_limit_rejections_compact_and_the_run_finishes() -> None:
     assert client.summary_image_counts
     assert all(0 < count <= client.limit for count in client.summary_image_counts)
     assert len(history) == len(client.summary_image_counts) + 1
+    triggers = [msg.trigger for messages in history for msg in messages if isinstance(msg, SummaryMessage)]
+    assert triggers == ["too_many_images"] * len(client.summary_image_counts)
 
 
 async def test_compaction_required_before_any_turn_propagates() -> None:

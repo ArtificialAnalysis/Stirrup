@@ -1333,6 +1333,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self,
         messages: list[ChatMessage],
         run_metadata_by_turn: dict[str, dict[str, list[Any]]],
+        *,
+        trigger: str = "context_window",
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
         """Summarize messages, unwinding completed turns if summarization overflows."""
         current_messages = messages
@@ -1384,6 +1386,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 summary_bridge = SummaryMessage(
                     content=summary_bridge_prompt,
                     replaced_ids=replaced_ids,
+                    trigger=trigger,
                 )
                 # Use a user acknowledgement to avoid consecutive assistant messages with strict providers.
                 acknowledgement_msg = UserMessage(content="Got it, thanks!")
@@ -1563,7 +1566,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     if compacted or not any(isinstance(msg, AssistantMessage) for msg in msgs):
                         raise
                     LOGGER.warning(f"Compacting the conversation after a rejected request: {error}")
-                    messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
+                    messages_to_summarize, msgs = await self.summarize_messages(
+                        msgs, run_metadata_by_turn, trigger=error.reason
+                    )
                     full_msg_history.append(messages_to_summarize)
                     compacted = True
 

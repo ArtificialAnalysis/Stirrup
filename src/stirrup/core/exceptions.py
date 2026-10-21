@@ -8,8 +8,12 @@ class CompactionRequiredError(Exception):
 
     For limits other than tokens, such as request bytes or image count. The agent summarizes
     the history, unwinding the latest turn if the summary request is rejected too, and
-    retries the step once.
+    retries the step once. ``reason`` is recorded as the summary's ``trigger``.
     """
+
+    def __init__(self, *args: object, reason: str = "compaction_required") -> None:
+        super().__init__(*args)
+        self.reason = reason
 
 
 class ContextOverflowError(Exception):
