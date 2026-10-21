@@ -6,9 +6,9 @@ __all__ = ["CompactionRequiredError", "ContextOverflowError", "IncompleteRespons
 class CompactionRequiredError(Exception):
     """Raised by an ``LLMClient`` when compacting the conversation could fix a rejected request.
 
-    For limits other than tokens, such as request bytes or image count. The agent summarizes
-    the history, unwinding the latest turn if the summary request is rejected too, and
-    retries the step once. ``reason`` is recorded as the summary's ``trigger``.
+    For limits other than tokens, such as request bytes or image count. The agent drops the
+    latest turn, summarizes the rest and retries the step once. ``reason`` is recorded as the
+    summary's ``trigger``.
     """
 
     def __init__(self, *args: object, reason: str = "compaction_required") -> None:

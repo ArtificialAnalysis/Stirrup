@@ -386,8 +386,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                                                message when assistant responds without tool calls to
                                                prevent successive assistant messages.
             recover_from_context_overflow: If True (default), drop one completed turn and retry when
-                                           the model reports a context overflow. If the original
-                                           prompt still overflows, the context error is raised.
+                                           the model reports a context overflow; on
+                                           CompactionRequiredError, also summarize the rest first.
+                                           If no turn can be dropped, the error is raised.
             share_parent_exec_env: When True and used as a subagent, share the parent's code
                                    execution environment instead of creating a new one. This
                                    provides better performance (no file copying) and allows
@@ -1213,6 +1214,17 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             tool_end_time=tool_end_time,
         )
 
+    def _unwind_rejected_turn(
+        self, messages: list[ChatMessage], error: ContextOverflowError | CompactionRequiredError
+    ) -> tuple[list[ChatMessage], str]:
+        """Drop the latest completed turn, re-raising a ``CompactionRequiredError`` itself if none can go."""
+        try:
+            return self._unwind_context_overflow(messages)
+        except ContextOverflowError:
+            if isinstance(error, CompactionRequiredError):
+                raise error from None
+            raise
+
     def _unwind_context_overflow(self, messages: list[ChatMessage]) -> tuple[list[ChatMessage], str]:
         """Drop the latest completed turn, preserving the original task prompt."""
         if not self._recover_from_context_overflow:
@@ -1396,13 +1408,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 return current_messages, [*task_context, summary_bridge, acknowledgement_msg]
             except (ContextOverflowError, CompactionRequiredError) as error:
                 # Summarization can be rejected too; drop the latest completed turn and retry.
-                # _unwind_context_overflow raises if that would cross a progress boundary.
-                try:
-                    current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
-                except ContextOverflowError:
-                    if isinstance(error, CompactionRequiredError):
-                        raise error from None
-                    raise
+                current_messages, dropped_turn_id = self._unwind_rejected_turn(current_messages, error)
                 run_metadata_by_turn.pop(dropped_turn_id, None)
 
     async def run(
@@ -1562,9 +1568,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     msgs, dropped_turn_id = self._unwind_context_overflow(msgs)
                     run_metadata_by_turn.pop(dropped_turn_id, None)
                 except CompactionRequiredError as error:
-                    # Nothing to compact once only the task and a summary remain.
-                    if compacted or not any(isinstance(msg, AssistantMessage) for msg in msgs):
+                    # Drop the turn that broke the limit, then summarize the history the model accepted.
+                    if compacted:
                         raise
+                    msgs, dropped_turn_id = self._unwind_rejected_turn(msgs, error)
+                    run_metadata_by_turn.pop(dropped_turn_id, None)
                     LOGGER.warning(f"Compacting the conversation after a rejected request: {error}")
                     messages_to_summarize, msgs = await self.summarize_messages(
                         msgs, run_metadata_by_turn, trigger=error.reason

@@ -1900,25 +1900,22 @@ async def test_compaction_required_before_any_turn_propagates() -> None:
     assert client.call_count == 1
 
 
-async def test_rejected_summary_with_no_turn_to_unwind_propagates_the_original_error() -> None:
-    client = MockLLMClient(
-        [
-            _text_response("First step"),
-            CompactionRequiredError("too many images"),
-            CompactionRequiredError("summary has too many images"),
-        ]
-    )
+async def test_compaction_required_with_no_turn_to_drop_propagates_the_original_error() -> None:
+    client = MockLLMClient([_text_response("First step"), CompactionRequiredError("too many images")])
     agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
 
-    with pytest.raises(CompactionRequiredError, match="summary has too many images"):
+    with pytest.raises(CompactionRequiredError, match="too many images"):
         async with agent.session() as session:
             await session.run(_image_task())
+
+    assert client.call_count == 2
 
 
 async def test_compaction_required_after_compacting_propagates() -> None:
     client = MockLLMClient(
         [
             _text_response("First step"),
+            _text_response("Second step"),
             CompactionRequiredError("request too large"),
             _text_response("Summary of the work so far."),
             CompactionRequiredError("still too large"),
