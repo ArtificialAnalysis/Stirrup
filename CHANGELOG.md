@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `CompactionRequiredError`: an `LLMClient` raises it when a request was rejected for a
+  limit compaction could fix, such as request bytes or image count. The agent summarizes
+  the history without media and retries the step once.
+
 ## v0.2.0 (unreleased)
 
 Assistant messages are now block-based (SP-001): an assistant turn is an ordered

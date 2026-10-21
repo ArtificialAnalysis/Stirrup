@@ -1,6 +1,14 @@
 """Custom exceptions for agent framework."""
 
-__all__ = ["ContextOverflowError", "IncompleteResponseError", "OutputTokenLimitError"]
+__all__ = ["CompactionRequiredError", "ContextOverflowError", "IncompleteResponseError", "OutputTokenLimitError"]
+
+
+class CompactionRequiredError(Exception):
+    """Raised by an ``LLMClient`` when compacting the conversation could fix a rejected request.
+
+    For limits other than tokens, such as request bytes or image count. The agent summarizes
+    the history without media and retries the step once.
+    """
 
 
 class ContextOverflowError(Exception):
