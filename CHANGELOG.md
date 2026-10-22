@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.1 (2026-10-22)
 
 ### Changed
 
@@ -20,7 +20,7 @@
   Histories saved without it load as `"token_threshold"`, the only trigger before this
   release.
 
-## v0.2.0 (unreleased)
+## v0.2.0 (2026-08-04)
 
 Assistant messages are now block-based (SP-001): an assistant turn is an ordered
 sequence of blocks — reasoning, text, tool calls, media — preserving the model's
