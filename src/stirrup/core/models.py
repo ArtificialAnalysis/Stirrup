@@ -27,6 +27,7 @@ from pydantic import (
 )
 
 from stirrup.constants import RESOLUTION_1MP, RESOLUTION_480P
+from stirrup.core.exceptions import CompactionReason
 
 __all__ = [
     "Addable",
@@ -50,6 +51,7 @@ __all__ = [
     "SignedReasoningBlock",
     "SubAgentMetadata",
     "SummaryMessage",
+    "SummaryTrigger",
     "SystemMessage",
     "TextBlock",
     "TokenUsage",
@@ -692,19 +694,23 @@ class UserMessage(BaseModel):
     content: Content
 
 
+type SummaryTrigger = Literal["token_threshold"] | CompactionReason
+
+
 class SummaryMessage(UserMessage):
     """Summary message bridging summarized-away conversation context.
 
     Attributes:
         replaced_ids: Ids of the AssistantMessages this summary replaced, so
             consumers of dumped histories can reconstruct lineage offline.
-        trigger: Why the agent summarized: ``"context_window"`` for the token
-            threshold, otherwise the ``reason`` of a ``CompactionRequiredError``.
+        trigger: Why the agent summarized: ``"token_threshold"`` when context usage
+            crossed the summarization cutoff, otherwise the ``reason`` of a
+            ``CompactionRequiredError``.
     """
 
     kind: Literal["summary"] = "summary"
     replaced_ids: list[str] = Field(default_factory=list)
-    trigger: str = "context_window"
+    trigger: SummaryTrigger = "token_threshold"
 
 
 class TurnWarningMessage(UserMessage):

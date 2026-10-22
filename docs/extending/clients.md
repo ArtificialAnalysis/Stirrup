@@ -33,7 +33,10 @@ Custom clients that adapt provider stop reasons should raise
 `OutputTokenLimitError` when the provider exhausts the response budget. Reserve
 `ContextOverflowError` for request input that does not fit the model context.
 The agent may summarize and retry the latter; it surfaces an output-limit failure
-without summarization or retry with the unchanged limit.
+without summarization or retry with the unchanged limit. Raise
+`CompactionRequiredError(reason="image_count")` or `reason="request_size"` when the
+provider rejects a request for too many images or too many bytes, so the agent compacts
+the history and retries instead of failing the run.
 
 ## Basic Implementation
 
@@ -210,6 +213,8 @@ Stirrup guarantees the following to client and integration authors:
 - **Summaries carry lineage.** When history is summarized, the `SummaryMessage` records the
   ids of the assistant messages it replaced (`replaced_ids`, chained transitively across
   summarization rounds), so dumped histories reconstruct which turns a summary stands for.
+  `trigger` records why it was summarized: `"token_threshold"`, or the
+  `CompactionRequiredError` reason.
 
 ## Testing with Mock Client
 

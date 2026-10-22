@@ -713,7 +713,7 @@ def test_v01_uncorrelatable_tool_result_raises(history: list[dict[str, object]])
 async def test_cache_state_preserves_special_user_message_types() -> None:
     state = CacheState(
         msgs=[
-            SummaryMessage(content="Summary", replaced_ids=["turn-1", "turn-2"], trigger="too_many_images"),
+            SummaryMessage(content="Summary", replaced_ids=["turn-1", "turn-2"], trigger="image_count"),
             TurnWarningMessage(content="One turn left"),
             UserMessage(content="Regular user message"),
         ],
@@ -726,7 +726,7 @@ async def test_cache_state_preserves_special_user_message_types() -> None:
 
     assert isinstance(restored.msgs[0], SummaryMessage)
     assert restored.msgs[0].replaced_ids == ["turn-1", "turn-2"]
-    assert restored.msgs[0].trigger == "too_many_images"
+    assert restored.msgs[0].trigger == "image_count"
     assert isinstance(restored.msgs[1], TurnWarningMessage)
     assert type(restored.msgs[2]) is UserMessage
 
@@ -1646,7 +1646,7 @@ async def test_summarize_history_has_one_summary_per_trajectory() -> None:
 
     # The summary content should be different between history[1] and history[2]
     assert summaries_1[0].content != summaries_2[0].content
-    assert summaries_1[0].trigger == summaries_2[0].trigger == "context_window"
+    assert summaries_1[0].trigger == summaries_2[0].trigger == "token_threshold"
 
 
 async def test_summarization_context_overflow_unwinds_and_retries() -> None:
@@ -1833,7 +1833,7 @@ class ImageLimitClient(LLMClient):
         if images > self.limit:
             self.rejected += 1
             raise CompactionRequiredError(
-                f"request contains {images} images, exceeding the maximum of {self.limit}", reason="too_many_images"
+                f"request contains {images} images, exceeding the maximum of {self.limit}", reason="image_count"
             )
         last = messages[-1]
         if (
@@ -1886,11 +1886,13 @@ async def test_image_limit_rejections_compact_and_the_run_finishes() -> None:
     assert all(0 < count <= client.limit for count in client.summary_image_counts)
     assert len(history) == len(client.summary_image_counts) + 1
     triggers = [msg.trigger for messages in history for msg in messages if isinstance(msg, SummaryMessage)]
-    assert triggers == ["too_many_images"] * len(client.summary_image_counts)
+    assert triggers == ["image_count"] * len(client.summary_image_counts)
 
 
 async def test_compaction_required_with_no_turn_to_drop_propagates_the_original_error() -> None:
-    client = MockLLMClient([_text_response("First step"), CompactionRequiredError("too many images")])
+    client = MockLLMClient(
+        [_text_response("First step"), CompactionRequiredError("too many images", reason="image_count")]
+    )
     agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
 
     with pytest.raises(CompactionRequiredError, match="too many images"):
@@ -1905,9 +1907,9 @@ async def test_compaction_required_after_compacting_propagates() -> None:
         [
             _text_response("First step"),
             _text_response("Second step"),
-            CompactionRequiredError("request too large"),
+            CompactionRequiredError("request too large", reason="request_size"),
             _text_response("Summary of the work so far."),
-            CompactionRequiredError("still too large"),
+            CompactionRequiredError("still too large", reason="request_size"),
         ]
     )
     agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)

@@ -30,6 +30,7 @@ from stirrup.core.models import (
     LLMClient,
     SubAgentMetadata,
     SummaryMessage,
+    SummaryTrigger,
     SystemMessage,
     TokenUsage,
     Tool,
@@ -1346,7 +1347,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         messages: list[ChatMessage],
         run_metadata_by_turn: dict[str, dict[str, list[Any]]],
         *,
-        trigger: str = "context_window",
+        trigger: SummaryTrigger = "token_threshold",
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
         """Summarize messages, unwinding completed turns if summarization overflows."""
         current_messages = messages

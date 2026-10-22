@@ -481,6 +481,15 @@ When overflow happens, the agent removes the latest completed assistant turn. It
 
 This also applies when eager summarization overflows. Any removed turn is also removed from final metadata and does not count against `max_turns`.
 
+### Compaction on Client Request
+
+A client raises `CompactionRequiredError` when the provider rejects a request for a limit
+compaction can fix: too many images (`reason="image_count"`) or too many request bytes
+(`reason="request_size"`). The agent drops the latest completed turn, summarizes the rest
+and retries the step once. If the retry fails again, or no turn can be removed, the error
+surfaces. Each `SummaryMessage` records why it was created in `trigger`:
+`"token_threshold"` for proactive summarization, otherwise the error's `reason`.
+
 To fail immediately instead:
 
 ```python
@@ -491,7 +500,9 @@ agent = Agent(
 )
 ```
 
-Recovery only covers `ContextOverflowError`. Two other client failures deliberately abort the run:
+`recover_from_context_overflow=False` also disables compaction on `CompactionRequiredError`.
+
+Recovery only covers `ContextOverflowError` and `CompactionRequiredError`. Two other client failures deliberately abort the run:
 
 - Summarization is itself a model call, so `summarize_messages` can raise `OutputTokenLimitError`
   out of `session.run()` even though you never call it directly. Retrying it with the same
