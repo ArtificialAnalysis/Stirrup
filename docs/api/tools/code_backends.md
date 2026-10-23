@@ -51,6 +51,23 @@ from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
 provider = E2BCodeExecToolProvider()
 ```
 
+## DaytonaCodeExecToolProvider
+
+Executes code in a Daytona cloud sandbox.
+
+!!! note
+    Requires `pip install stirrup[daytona]` (or: `uv add stirrup[daytona]`) and `DAYTONA_API_KEY` environment variable.
+
+```python
+from stirrup.tools.code_backends.daytona import DaytonaCodeExecToolProvider
+
+provider = DaytonaCodeExecToolProvider()
+```
+
+::: stirrup.tools.code_backends.daytona.DaytonaCodeExecToolProvider
+    options:
+      show_source: true
+
 ## Data Types
 
 ::: stirrup.tools.code_backends.CodeExecutionParams

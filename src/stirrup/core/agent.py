@@ -627,7 +627,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             if isinstance(tool, LocalCodeExecToolProvider):
                 warnings.append(
                     "LocalCodeExecToolProvider can access your local filesystem. "
-                    "Consider using DockerCodeExecToolProvider or E2BCodeExecToolProvider for sandboxed execution.",
+                    "Consider using DockerCodeExecToolProvider, E2BCodeExecToolProvider, or "
+                    "DaytonaCodeExecToolProvider for sandboxed execution.",
                 )
                 break
 
