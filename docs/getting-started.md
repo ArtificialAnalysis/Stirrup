@@ -28,7 +28,7 @@ pip install 'stirrup[all]'  # or: uv add 'stirrup[all]'
 | `litellm` | Multi-provider support via LiteLLM (Anthropic, Google, etc.) |
 | `docker` | Docker-based code execution |
 | `e2b` | E2B cloud sandboxes |
-| `mcp` | MCP server support |
+| `mcp` | MCP tools host support |
 | `all` | All optional components |
 
 ## Your First Agent
