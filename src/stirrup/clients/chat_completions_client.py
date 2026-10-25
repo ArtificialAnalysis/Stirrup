@@ -59,6 +59,13 @@ class ChatCompletionsClient(LLMClient):
         ...     base_url="http://localhost:8000/v1",
         ...     api_key="your-api-key",
         ... )
+        >>>
+        >>> # OpenPaths (OpenAI-compatible gateway); reads OPENPATHS_API_KEY if
+        >>> # api_key is not passed and OPENROUTER_API_KEY is unset
+        >>> client = ChatCompletionsClient(
+        ...     model="openai/gpt-4o",
+        ...     base_url="https://openpaths.io/v1",
+        ... )
     """
 
     def __init__(
@@ -82,9 +89,11 @@ class ChatCompletionsClient(LLMClient):
             context_window_tokens: Context capacity used to decide when Agent history
                 should be summarized.
             base_url: API base URL. If None, uses OpenAI's standard URL.
-                Use for OpenAI-compatible providers (e.g., 'http://localhost:8000/v1').
-            api_key: API key for authentication. If None, reads from OPENROUTER_API_KEY
-                environment variable.
+                Use for OpenAI-compatible providers (e.g., 'http://localhost:8000/v1',
+                or 'https://openpaths.io/v1' for OpenPaths).
+            api_key: API key for authentication. If None, reads from the
+                OPENROUTER_API_KEY environment variable, falling back to
+                OPENPATHS_API_KEY.
             reasoning_effort: Reasoning effort level for extended thinking models
                 (e.g., 'low', 'medium', 'high'). Only used with reasoning models.
             timeout: Request timeout in seconds. If None, uses OpenAI SDK default.
@@ -108,8 +117,12 @@ class ChatCompletionsClient(LLMClient):
         self._kwargs = kwargs or {}
 
         # Initialize AsyncOpenAI client
-        # Read from OPENROUTER_API_KEY if no api_key provided
-        resolved_api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        # Read from OPENROUTER_API_KEY, then OPENPATHS_API_KEY, if no api_key provided
+        resolved_api_key = (
+            api_key
+            or os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("OPENPATHS_API_KEY")
+        )
         self._client = AsyncOpenAI(
             api_key=resolved_api_key,
             base_url=base_url,
