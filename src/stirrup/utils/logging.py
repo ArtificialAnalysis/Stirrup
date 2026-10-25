@@ -401,6 +401,7 @@ class AgentLogger(AgentLoggerBase):
         # Silence noisy loggers
         for name in [
             "LiteLLM",
+            "any_llm",
             "httpx",
             "httpcore",
             "openai",

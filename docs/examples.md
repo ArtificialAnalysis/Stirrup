@@ -98,6 +98,17 @@ Use LiteLLM to connect to non-OpenAI providers like Anthropic Claude, Google Gem
 !!! note
     Requires `pip install stirrup[litellm]` (or: `uv add stirrup[litellm]`) and the appropriate API key for your chosen provider (e.g., `ANTHROPIC_API_KEY` for Claude).
 
+## any-llm Multi-Provider Support
+
+Use any-llm to connect to non-OpenAI providers like Anthropic Claude, Google Gemini, and many others.
+
+```python
+--8<-- "examples/anyllm_example.py"
+```
+
+!!! note
+    Requires `pip install stirrup[anyllm]` (or: `uv add stirrup[anyllm]`) and the appropriate API key for your chosen provider (e.g., `ANTHROPIC_API_KEY` for Claude).
+
 ## Custom Finish Tool
 
 Define structured output with a custom finish tool:

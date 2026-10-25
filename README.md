@@ -47,6 +47,7 @@ pip install 'stirrup[all]'  # or: uv add 'stirrup[all]'
 
 # Individual extras
 pip install 'stirrup[litellm]'  # or: uv add 'stirrup[litellm]'
+pip install 'stirrup[anyllm]'   # or: uv add 'stirrup[anyllm]'
 pip install 'stirrup[docker]'   # or: uv add 'stirrup[docker]'
 pip install 'stirrup[e2b]'      # or: uv add 'stirrup[e2b]'
 pip install 'stirrup[mcp]'      # or: uv add 'stirrup[mcp]'
@@ -163,6 +164,27 @@ agent = Agent(
 ```
 
 See [LiteLLM Example](https://stirrup.artificialanalysis.ai/examples/#litellm-multi-provider-support) or [Deepseek Example](https://stirrup.artificialanalysis.ai/examples/#openai-compatible-apis-deepseek-vllm-ollama) for complete examples.
+
+### any-llm (Anthropic, Google, etc.)
+
+```python
+# Ensure any-llm is added with: pip install 'stirrup[anyllm]'  # or: uv add 'stirrup[anyllm]'
+# Create any-llm client for Anthropic Claude
+# See https://mozilla-ai.github.io/any-llm/providers/ for all supported providers
+client = AnyLLMClient(
+    model_slug="anthropic/claude-opus-5",
+    max_tokens=8_192,
+    context_window_tokens=1_000_000,
+)
+
+# Pass client to Agent - model info comes from client.model_slug
+agent = Agent(
+    client=client,
+    name="claude_agent",
+)
+```
+
+See [any-llm Example](https://stirrup.artificialanalysis.ai/examples/#any-llm-multi-provider-support) or [Deepseek Example](https://stirrup.artificialanalysis.ai/examples/#openai-compatible-apis-deepseek-vllm-ollama) for complete examples.
 
 ## Default Tools
 
