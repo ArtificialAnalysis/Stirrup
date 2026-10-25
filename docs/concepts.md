@@ -341,6 +341,13 @@ A `Tool` has the following attributes:
 
 → See [Creating Tools](guides/tools.md) for full documentation.
 
+### Tool Middleware
+
+Middleware wraps an individual tool before it is passed to an agent. Stirrup includes
+middleware for truncating large results and spilling them to disk.
+
+→ See [Tool Middleware](guides/tools.md#tool-middleware).
+
 ### Sub-agents
 
 Convert any agent into a tool using `agent.to_tool()`. This enables hierarchical agent patterns where a supervisor delegates to specialized workers:
