@@ -4,13 +4,14 @@ This guide covers implementing custom LLM clients for Stirrup.
 
 ## Built-in Clients
 
-Stirrup provides three built-in clients:
+Stirrup provides four built-in clients:
 
 | Client | API | Best For |
 |--------|-----|----------|
 | [`ChatCompletionsClient`](../api/clients/chat_completions.md) | OpenAI Chat Completions | OpenAI, OpenRouter, vLLM, Ollama, and other OpenAI-compatible APIs |
 | [`OpenResponsesClient`](../api/clients/open_responses.md) | OpenAI Responses API | Providers implementing the newer Responses API format |
 | [`LiteLLMClient`](../api/clients/litellm.md) | LiteLLM | Multi-provider support (Anthropic, Google, Azure, etc.) |
+| [`AnyLLMClient`](../api/clients/anyllm.md) | any-llm | Multi-provider support (Anthropic, Google, etc.) |
 
 ## LLMClient Protocol
 

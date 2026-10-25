@@ -8,6 +8,9 @@ that support this newer API format.
 
 For multi-provider support via LiteLLM, install the litellm extra:
     pip install stirrup[litellm]
+
+For multi-provider support via any-llm, install the anyllm extra:
+    pip install stirrup[anyllm]
 """
 
 from stirrup.clients.chat_completions_client import ChatCompletionsClient

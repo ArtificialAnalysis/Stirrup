@@ -26,6 +26,7 @@ pip install 'stirrup[all]'  # or: uv add 'stirrup[all]'
 | Extra | Description |
 |-------|-------------|
 | `litellm` | Multi-provider support via LiteLLM (Anthropic, Google, etc.) |
+| `anyllm` | Multi-provider support via any-llm (Anthropic, Google, etc.) |
 | `docker` | Docker-based code execution |
 | `e2b` | E2B cloud sandboxes |
 | `mcp` | MCP server support |

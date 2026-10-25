@@ -30,6 +30,7 @@ pip install 'stirrup[all]'  # or: uv add 'stirrup[all]'
 
 # Individual extras
 pip install 'stirrup[litellm]'  # or: uv add 'stirrup[litellm]'
+pip install 'stirrup[anyllm]'   # or: uv add 'stirrup[anyllm]'
 pip install 'stirrup[docker]'   # or: uv add 'stirrup[docker]'
 pip install 'stirrup[e2b]'      # or: uv add 'stirrup[e2b]'
 pip install 'stirrup[mcp]'      # or: uv add 'stirrup[mcp]'
@@ -72,6 +73,14 @@ For non-OpenAI providers, change the base URL of the `ChatCompletionsClient`, us
 ```
 
 See [LiteLLM Example](examples.md#litellm-multi-provider-support) or [Deepseek Example](examples.md#openai-compatible-apis) for complete examples.
+
+### any-llm (Anthropic, Google, etc.)
+
+```python
+--8<-- "examples/anyllm_example.py:client"
+```
+
+See [any-llm Example](examples.md#any-llm-multi-provider-support) or [Deepseek Example](examples.md#openai-compatible-apis) for complete examples.
 
 ## Default Tools
 

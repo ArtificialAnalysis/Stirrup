@@ -268,6 +268,25 @@ Use `LiteLLMClient` for Anthropic, Google, and other providers via [LiteLLM](htt
 !!! note "LiteLLM Installation"
     Requires `pip install stirrup[litellm]` (or: `uv add stirrup[litellm]`)
 
+### AnyLLMClient
+
+Use `AnyLLMClient` for Anthropic, Google, and other providers via [any-llm](https://mozilla-ai.github.io/any-llm/providers/):
+
+```python
+--8<-- "examples/anyllm_example.py:client"
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model_slug` | `str` | required | Provider/model string (e.g., `"anthropic/claude-opus-5"`) |
+| `max_tokens` | `int` | `64_000` | Maximum provider response/output tokens |
+| `context_window_tokens` | `int` | required | Context capacity for summarization |
+| `reasoning_effort` | `str \| None` | `None` | For reasoning models (e.g. GPT-5.6) |
+| `kwargs` | `dict \| None` | `None` | Additional provider-specific arguments |
+
+!!! note "any-llm Installation"
+    Requires `pip install stirrup[anyllm]` (or: `uv add stirrup[anyllm]`)
+
 ### Creating Your Own Client
 
 Implement the `LLMClient` protocol to create a custom client:
