@@ -65,7 +65,7 @@ class TestLocalCodeExecToolProvider:
         provider = LocalCodeExecToolProvider()
 
         async with provider as _:
-            result = await provider.run_command('echo "hi" && sleep 2 > /dev/null 2>&1 &', timeout=1)
+            result = await provider.run_command('echo "hi" && touch ready && sleep 2 > /dev/null 2>&1 & while [ ! -f ready ]; do sleep 0.01; done', timeout=1)
 
         assert result.exit_code == 0
         assert result.stdout == "hi\n"
