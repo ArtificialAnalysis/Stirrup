@@ -60,6 +60,18 @@ class TestLocalCodeExecToolProvider:
             assert result.error_kind == "timeout"
             assert "timed out" in result.stderr.lower()
 
+    async def test_run_command_backgrounded_compound_command_returns_without_waiting(self) -> None:
+        """A backgrounded command list must not keep captured output streams open."""
+        provider = LocalCodeExecToolProvider()
+
+        async with provider as _:
+            result = await provider.run_command('echo "hi" && sleep 2 > /dev/null 2>&1 &', timeout=1)
+
+        assert result.exit_code == 0
+        assert result.stdout == "hi\n"
+        assert result.stderr == ""
+        assert result.error_kind is None
+
     async def test_run_command_timeout_kills_descendants(self) -> None:
         """Regression: a timed-out command must not leave orphaned grandchildren.
 
