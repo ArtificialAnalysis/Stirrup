@@ -25,6 +25,14 @@ Executes code in an isolated temporary directory on the host machine.
     options:
       show_source: true
 
+## BackgroundCodeExecToolProvider
+
+Wraps a sandboxed backend with backgroundable `code_exec` and `process_control` tools.
+
+::: stirrup.tools.code_backends.BackgroundCodeExecToolProvider
+    options:
+      show_source: true
+
 ## DockerCodeExecToolProvider
 
 Executes code in a Docker container.

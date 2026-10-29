@@ -5,12 +5,14 @@ This module provides code execution backends for the Agent.
 Available here (no optional dependencies):
 - Base classes and utilities from .base
 - LocalCodeExecToolProvider (uses subprocess)
+- BackgroundCodeExecToolProvider (wraps a sandboxed backend with backgroundable commands)
 
 Optional backends require explicit imports:
 - DockerCodeExecToolProvider: `from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider`
 - E2BCodeExecToolProvider: `from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider`
 """
 
+from .background import BackgroundCodeExecToolProvider
 from .base import (
     SHELL_TIMEOUT,
     CodeExecToolProvider,
@@ -27,6 +29,7 @@ from .local import LocalCodeExecToolProvider
 
 __all__ = [
     "SHELL_TIMEOUT",
+    "BackgroundCodeExecToolProvider",
     "CodeExecToolProvider",
     "CodeExecutionParams",
     "CommandResult",

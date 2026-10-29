@@ -197,6 +197,39 @@ provider = E2BCodeExecToolProvider(
 )
 ```
 
+## Background Commands
+
+`BackgroundCodeExecToolProvider` wraps a sandboxed backend so the agent can start long-running
+commands (builds, test suites, dev servers) and keep working while they run. It replaces the
+blocking `code_exec` tool with two tools:
+
+- `code_exec` starts a Bash command and waits up to `yield_time_ms`. If the command is still
+  running when the wait ends, the result carries a `process_id` and the command keeps running.
+- `process_control` polls a process for new output, terminates it with its whole process tree,
+  or lists the processes still running.
+
+```python
+from stirrup.tools.code_backends import BackgroundCodeExecToolProvider
+from stirrup.tools.code_backends.docker import DockerCodeExecToolProvider
+
+provider = BackgroundCodeExecToolProvider(
+    DockerCodeExecToolProvider.from_image("my-image-with-tmux"),
+    max_yield_time_sec=20 * 60,            # Longest single wait a call may request
+    min_wait_sec=10,                       # Floor on waits for a running process
+    output_spill_threshold_chars=30_000,   # Inline preview size; the rest is saved to a file
+)
+```
+
+Each result previews the new output since the last call (head and tail when it is long) and
+saves the full output to a file in the sandbox that the agent can read. When the session ends,
+every process the provider started is terminated.
+
+**Requirements.** The sandbox must be Linux with Bash, tmux, and procps installed (the full
+list is `BACKGROUND_TOOLS`). The wrapped backend must run commands through a shell, so
+`allowed_commands` is not supported, and `LocalCodeExecToolProvider` is not supported because
+it rejects the absolute paths the provider uses. A subagent that shares the parent's exec env
+gets the blocking `code_exec` tool.
+
 ## File Operations
 
 ### Uploading Files

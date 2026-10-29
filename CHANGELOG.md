@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `BackgroundCodeExecToolProvider`: wraps a sandboxed code execution backend (Docker, E2B, or
+  your own) so `code_exec` can return while a command keeps running, plus a `process_control`
+  tool to poll, terminate, or list those processes. Output is previewed inline and saved in
+  full to a file. Needs Linux with tmux and procps in the sandbox.
+
 ## v0.2.1 (2026-10-22)
 
 ### Changed
