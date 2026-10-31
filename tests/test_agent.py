@@ -34,8 +34,10 @@ from stirrup.core.models import (
     ToolCall,
     ToolMessage,
     ToolResult,
+    ToolUseCountMetadata,
     TurnWarningMessage,
     UserMessage,
+    aggregate_metadata,
     joined_text,
 )
 from stirrup.prompts import MESSAGE_SUMMARIZER
@@ -646,6 +648,82 @@ async def test_v01_cache_state_preserves_aggregate_run_metadata() -> None:
     )
 
     assert restored.run_metadata_by_turn == {"__legacy__": {"search": [{"queries": 1}]}}
+
+
+class SearchLikeMetadata(BaseModel):
+    """Stand-in for tool-specific metadata models (e.g. SearchMetadata)."""
+
+    queries: int = 0
+
+    def __add__(self, other: "SearchLikeMetadata") -> "SearchLikeMetadata":
+        return SearchLikeMetadata(queries=self.queries + other.queries)
+
+
+async def test_resumed_run_metadata_aggregates_cached_dicts_with_live_models() -> None:
+    """Regression test: metadata restored from the cache is plain dicts, while a
+    resumed run appends live models. Aggregating the merged list at run end must
+    combine them instead of raising TypeError (dict + ToolUseCountMetadata)."""
+    state = CacheState(
+        msgs=[UserMessage(content="Test task")],
+        full_msg_history=[],
+        run_metadata_by_turn={"turn-1": {"my_tool": [ToolUseCountMetadata(num_uses=2)]}},
+        task_hash="task",
+    )
+    restored = CacheState.from_dict(json.loads(json.dumps(state.to_dict())))
+    assert isinstance(restored.run_metadata_by_turn["turn-1"]["my_tool"][0], dict)
+
+    # The resumed run appends a live metadata object for the same tool, keyed by
+    # the new turn's assistant message id; run end merges the per-turn lists.
+    run_metadata_by_turn = dict(restored.run_metadata_by_turn)
+    run_metadata_by_turn["turn-2"] = {"my_tool": [ToolUseCountMetadata(num_uses=3)]}
+    run_metadata: dict = {}
+    for turn_metadata in run_metadata_by_turn.values():
+        for name, metadata_list in turn_metadata.items():
+            run_metadata.setdefault(name, []).extend(metadata_list)
+
+    assert aggregate_metadata(run_metadata) == {"my_tool": {"num_uses": 5}}
+
+
+def test_aggregate_metadata_combines_dicts_and_models_in_either_order() -> None:
+    cached = ToolUseCountMetadata(num_uses=2).model_dump(mode="json")
+
+    dict_first = aggregate_metadata(
+        {"tool": [cached, ToolUseCountMetadata(num_uses=3)]}, return_json_serializable=False
+    )
+    assert dict_first["tool"] == ToolUseCountMetadata(num_uses=5)
+
+    model_first = aggregate_metadata(
+        {"tool": [ToolUseCountMetadata(num_uses=3), cached]}, return_json_serializable=False
+    )
+    assert model_first["tool"] == ToolUseCountMetadata(num_uses=5)
+
+    two_dicts = aggregate_metadata(
+        {"tool": [{"num_uses": 2}, {"num_uses": 1}, ToolUseCountMetadata(num_uses=3)]},
+        return_json_serializable=False,
+    )
+    assert two_dicts["tool"] == ToolUseCountMetadata(num_uses=6)
+
+
+def test_aggregate_metadata_rehydrates_dicts_into_the_live_model_type() -> None:
+    """Dict entries take the type of the live model in the same list, so custom
+    tool metadata types aggregate after a resume too, not just ToolUseCountMetadata."""
+    result = aggregate_metadata(
+        {"search": [{"queries": 2}, SearchLikeMetadata(queries=3)]},
+        return_json_serializable=False,
+    )
+    assert result["search"] == SearchLikeMetadata(queries=5)
+
+
+def test_aggregate_metadata_combines_cached_sub_agent_dicts_with_live_models() -> None:
+    """A cache-restored SubAgentMetadata dict aggregates with a live one, and the
+    nested per-tool lists (themselves a mix of dicts and models) aggregate too."""
+    cached = SubAgentMetadata(message_history=[], run_metadata={"tool": [ToolUseCountMetadata(num_uses=2)]}).model_dump(
+        mode="json"
+    )
+    live = SubAgentMetadata(message_history=[], run_metadata={"tool": [ToolUseCountMetadata(num_uses=1)]})
+
+    result = aggregate_metadata({"sub": [cached, live]}, return_json_serializable=False)
+    assert result["sub"]["tool"] == ToolUseCountMetadata(num_uses=3)
 
 
 def _v01_idless_tool_history() -> list[dict[str, object]]:

@@ -304,6 +304,13 @@ def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
     for m in metadata_list[1:]:
         if isinstance(aggregated, dict) and isinstance(m, dict):
             aggregated = _merge_dicts(aggregated, m)  # ty: ignore[invalid-assignment]
+        elif isinstance(aggregated, dict) and isinstance(m, BaseModel):
+            # Metadata restored from the JSON cache is plain dicts, while the
+            # current run appends live models. Rehydrate the dict into the live
+            # item's type so the pair can be added instead of raising TypeError.
+            aggregated = type(m).model_validate(aggregated) + m
+        elif isinstance(aggregated, BaseModel) and isinstance(m, dict):
+            aggregated = aggregated + type(aggregated).model_validate(m)
         else:
             aggregated = aggregated + m
     return aggregated
