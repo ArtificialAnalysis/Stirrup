@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.agent import Agent, SubAgentParams
 from stirrup.core.cache import (
+    CacheManager,
     CacheState,
     deserialize_messages,
 )
@@ -646,6 +647,117 @@ async def test_v01_cache_state_preserves_aggregate_run_metadata() -> None:
     )
 
     assert restored.run_metadata_by_turn == {"__legacy__": {"search": [{"queries": 1}]}}
+
+
+class _CapturingMockLLMClient(MockLLMClient):
+    """MockLLMClient that also records the messages handed to generate()."""
+
+    def __init__(self, responses: Sequence[AssistantMessage | Exception]) -> None:
+        super().__init__(responses)
+        self.messages_seen: list[list[ChatMessage]] = []
+
+    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+        self.messages_seen.append(list(messages))
+        return await super().generate(messages, tools)
+
+
+def _clean_finish_message() -> AssistantMessage:
+    return AssistantMessage(
+        blocks=[
+            ToolCall(
+                name=DEFAULT_FINISH_TOOL_NAME,
+                arguments='{"reason": "Completed", "paths": []}',
+                tool_call_id="call_finish",
+            ),
+        ],
+        token_usage=TokenUsage(input=100, answer=50),
+    )
+
+
+async def test_clean_finish_is_cached_and_resumed_when_clear_cache_on_success_is_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clear_cache_on_success=False means save-and-keep.
+
+    A session that ends with a clean finish must still write its state, so a
+    later session(resume=True) on the same task text reopens it with its
+    history instead of starting fresh.
+    """
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", cache_dir)
+    marker = "first activation work"
+
+    first_client = _CapturingMockLLMClient(
+        [
+            AssistantMessage(blocks=[TextBlock(text=marker)], token_usage=TokenUsage(input=100, answer=50)),
+            _clean_finish_message(),
+        ]
+    )
+    first_agent = Agent(client=first_client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+    async with first_agent.session(resume=True, clear_cache_on_success=False) as session:
+        finish_params, _history, _metadata = await session.run("Frozen task text")
+    assert finish_params is not None
+
+    # The cleanly finished session's state was saved and kept.
+    cache_manager = CacheManager(cache_base_dir=cache_dir)
+    caches = cache_manager.list_caches()
+    assert len(caches) == 1
+    saved = cache_manager.load_state(caches[0])
+    assert saved is not None
+    assert any(marker in str(message) for message in saved.msgs)
+
+    # A later session with resume=True reopens it with its history.
+    second_client = _CapturingMockLLMClient([_clean_finish_message()])
+    second_agent = Agent(client=second_client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+    async with second_agent.session(resume=True, clear_cache_on_success=False) as session:
+        finish_params, _history, _metadata = await session.run("Frozen task text")
+    assert finish_params is not None
+    assert second_client.messages_seen
+    assert any(marker in str(message) for message in second_client.messages_seen[0])
+
+
+async def test_error_exit_is_still_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pre-existing abnormal-exit caching path is unchanged: a run that
+    exits with an exception still writes its state for resume."""
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", cache_dir)
+
+    client = MockLLMClient([RuntimeError("interrupted")])
+    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        async with agent.session(resume=True, clear_cache_on_success=False) as session:
+            await session.run("Frozen task text")
+
+    assert len(CacheManager(cache_base_dir=cache_dir).list_caches()) == 1
+
+
+async def test_clean_finish_still_clears_cache_when_clear_cache_on_success_is_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default semantics unchanged: clear_cache_on_success=True clears any
+    existing cache on a clean finish and does not save the finished state."""
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr("stirrup.core.cache.DEFAULT_CACHE_DIR", cache_dir)
+    cache_manager = CacheManager(cache_base_dir=cache_dir)
+
+    # Seed a cache the pre-existing way: a run that exits with an error.
+    failing_client = MockLLMClient([RuntimeError("interrupted")])
+    failing_agent = Agent(
+        client=failing_client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL
+    )
+    with pytest.raises(RuntimeError, match="interrupted"):
+        async with failing_agent.session(resume=True, clear_cache_on_success=True) as session:
+            await session.run("Frozen task text")
+    assert len(cache_manager.list_caches()) == 1
+
+    # A cleanly finishing run with clear_cache_on_success=True clears it and
+    # keeps nothing.
+    client = MockLLMClient([_clean_finish_message()])
+    agent = Agent(client=client, name="test-agent", max_turns=5, tools=[], finish_tool=SIMPLE_FINISH_TOOL)
+    async with agent.session(resume=True, clear_cache_on_success=True) as session:
+        finish_params, _history, _metadata = await session.run("Frozen task text")
+    assert finish_params is not None
+    assert cache_manager.list_caches() == []
 
 
 def _v01_idless_tool_history() -> list[dict[str, object]]:

@@ -526,7 +526,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                    environment files from a previous interrupted run.
             clear_cache_on_success: If True (default), automatically clear the cache
                                    when the agent completes successfully. Set to False
-                                   to preserve caches for inspection or debugging.
+                                   to save-and-keep the final state when the agent
+                                   finishes cleanly as well, so a later
+                                   session(resume=True) can reopen the successfully
+                                   finished session (not only an interrupted one).
             cache_on_interrupt: If True (default), set up a SIGINT handler to cache
                                state on Ctrl+C. Set to False when running agents in
                                threads or subprocesses where signal handlers cannot
@@ -995,12 +998,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         state = _SESSION_STATE.get()
 
         try:
-            # Cache state on non-success exit (only at root level)
+            # Cache state on non-success exit (only at root level). A clean finish
+            # is cached too when the caller asked to keep the cache:
+            # clear_cache_on_success=False means save-and-keep, so that a later
+            # session(resume=True) can reopen the successfully finished session.
+            # (With clear_cache_on_success=True a clean finish already cleared
+            # the cache in run() and nulled _current_task_hash/_current_run_state,
+            # so this still does not cache.)
             should_cache = (
                 state.depth == 0
                 and state.run_started
                 and self._cache_on_interrupt
-                and (exc_type is not None or state.finish_params is None)
+                and (exc_type is not None or state.finish_params is None or not self._clear_cache_on_success)
                 and self._current_task_hash is not None
                 and self._current_run_state is not None
             )
