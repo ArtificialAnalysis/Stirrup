@@ -51,7 +51,11 @@ pip install 'stirrup[docker]'   # or: uv add 'stirrup[docker]'
 pip install 'stirrup[e2b]'      # or: uv add 'stirrup[e2b]'
 pip install 'stirrup[mcp]'      # or: uv add 'stirrup[mcp]'
 pip install 'stirrup[browser]'  # or: uv add 'stirrup[browser]'
+pip install 'stirrup[media]'    # Audio/video validation and transcoding
 ```
+
+Audio and video content now require `stirrup[media]` (also included in `stirrup[all]`).
+Text, images, and screenshot-only browser use do not install or import MoviePy.
 
 ## Quick Start
 

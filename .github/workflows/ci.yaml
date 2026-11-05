@@ -54,3 +54,22 @@ jobs:
 
       - name: Run type checking
         run: uv run ty check --output-format github
+
+  optional-media:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extras: ["", "--extra media"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+      - uses: astral-sh/setup-uv@v6
+      - name: Install core or media dependencies
+        run: uv sync --locked --dev ${{ matrix.extras }}
+      - name: Verify core installation excludes MoviePy
+        if: matrix.extras == ''
+        run: uv run --no-sync python -c "import importlib.util; import stirrup; assert importlib.util.find_spec('moviepy') is None"
+      - name: Test optional media
+        run: uv run --no-sync pytest tests/test_optional_media.py -q
