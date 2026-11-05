@@ -29,6 +29,7 @@ pip install 'stirrup[all]'  # or: uv add 'stirrup[all]'
 | `docker` | Docker-based code execution |
 | `e2b` | E2B cloud sandboxes |
 | `mcp` | MCP server support |
+| `media` | Audio/video validation and transcoding |
 | `all` | All optional components |
 
 ## Your First Agent

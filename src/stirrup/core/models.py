@@ -14,8 +14,6 @@ from typing import Annotated, Any, ClassVar, Literal, Protocol, Self, overload, 
 from uuid import uuid4
 
 import filetype
-from moviepy import AudioFileClip, VideoFileClip
-from moviepy.video.fx import Resize
 from PIL import Image
 from pydantic import (
     BaseModel,
@@ -187,6 +185,13 @@ class VideoContentBlock(BinaryContentBlock, frozen=True):
 
     def _probe(self) -> None:
         """Verify video data is valid by attempting to open it as a VideoFileClip."""
+        try:
+            from moviepy import VideoFileClip
+        except ModuleNotFoundError as exc:
+            if exc.name != "moviepy":
+                raise
+            raise ImportError("Audio/video support requires pip install 'stirrup[media]'.") from exc
+
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
         with NamedTemporaryFile(suffix=".bin") as f:
@@ -197,6 +202,14 @@ class VideoContentBlock(BinaryContentBlock, frozen=True):
 
     def to_base64_url(self, max_pixels: int | None = RESOLUTION_480P, fps: int | None = None) -> str:
         """Transcode to MP4 and return base64 data URL."""
+        try:
+            from moviepy import VideoFileClip
+            from moviepy.video.fx import Resize
+        except ModuleNotFoundError as exc:
+            if exc.name != "moviepy":
+                raise
+            raise ImportError("Audio/video support requires pip install 'stirrup[media]'.") from exc
+
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
             with NamedTemporaryFile(suffix=".mp4") as fin, NamedTemporaryFile(suffix=".mp4") as fout:
@@ -241,6 +254,13 @@ class AudioContentBlock(BinaryContentBlock, frozen=True):
 
     def _probe(self) -> None:
         """Verify audio data is valid by attempting to open it as an AudioFileClip."""
+        try:
+            from moviepy import AudioFileClip
+        except ModuleNotFoundError as exc:
+            if exc.name != "moviepy":
+                raise
+            raise ImportError("Audio/video support requires pip install 'stirrup[media]'.") from exc
+
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
         with NamedTemporaryFile(suffix=".bin") as fin:
@@ -251,6 +271,13 @@ class AudioContentBlock(BinaryContentBlock, frozen=True):
 
     def to_base64_url(self, bitrate: str = "192k") -> str:
         """Transcode to MP3 and return base64 data URL."""
+        try:
+            from moviepy import AudioFileClip
+        except ModuleNotFoundError as exc:
+            if exc.name != "moviepy":
+                raise
+            raise ImportError("Audio/video support requires pip install 'stirrup[media]'.") from exc
+
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
             with NamedTemporaryFile(suffix=".bin") as fin, NamedTemporaryFile(suffix=".mp3") as fout:
