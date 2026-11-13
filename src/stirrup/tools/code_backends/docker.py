@@ -624,10 +624,10 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         # Exit 124 == SIGTERM expiry at the limit. timeout(1) also exits 137 when
         # the child dies by SIGKILL after the TERM at the limit (it keeps the
         # child's status, and --kill-after sends SIGKILL at limit + 5s). So the
-        # threshold below is the limit itself, not limit + kill-after, on
-        # purpose. A 124 or 137 before the limit is not a timeout. A 124 can come
-        # from the command itself (e.g. its own nested `timeout`). A 137 usually
-        # means a SIGKILL from elsewhere, possibly the kernel out-of-memory killer.
+        # threshold below is the limit itself, not limit + kill-after. A 124 or
+        # 137 before the limit is not a timeout. A 124 can come from the command
+        # itself (e.g. its own nested `timeout`). A 137 usually means a SIGKILL
+        # from elsewhere, possibly the kernel out-of-memory killer.
         if argv is not None:
             exec_cmd = ["timeout", "--kill-after=5s", f"{timeout}s", *argv]
         else:
@@ -672,23 +672,12 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
             if exit_code in (124, 137):
                 # Round down, so the shown time stays below the limit (29.996 -> "29.99", not "30.00").
                 shown = f"{math.floor(elapsed * 100) / 100:.2f}"
-                logger.warning(
-                    "Command exited %d after %s seconds, before the %d second limit: %s",
-                    exit_code,
-                    shown,
-                    timeout,
-                    cmd[:100],
-                )
                 early_msg = f"Exit code {exit_code} after {shown} seconds, before the {timeout} second limit. " + (
                     "The limit did not stop this command."
                     if exit_code == 124
                     else "This usually means the process was killed with SIGKILL, possibly by the out-of-memory killer."
                 )
-                return CommandResult(
-                    exit_code=exit_code,
-                    stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
-                    stderr=f"{stderr_text}\n{early_msg}" if stderr_text else early_msg,
-                )
+                stderr_text = f"{stderr_text}\n{early_msg}" if stderr_text else early_msg
 
             # Heuristic: exit 127 + a "timeout: ... not found" message from the
             # shell means coreutils timeout(1) is absent from the base image, so

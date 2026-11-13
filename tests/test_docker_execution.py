@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,19 +19,6 @@ from stirrup.tools.code_backends.docker import (
     DockerCodeExecToolProvider,
 )
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
-
-
-def _exec_run_taking(exec_result: MagicMock, seconds: float) -> tuple[MagicMock, Any]:
-    """Return an exec_run mock that advances a fake clock by ``seconds`` per call, and a perf_counter patch."""
-    clock = [0.0]
-
-    def exec_run(*_args: object, **_kwargs: object) -> MagicMock:
-        clock[0] += seconds
-        return exec_result
-
-    return MagicMock(side_effect=exec_run), patch(
-        "stirrup.tools.code_backends.docker.perf_counter", side_effect=lambda: clock[0]
-    )
 
 
 @pytest.fixture
@@ -163,13 +149,12 @@ class TestDockerCodeExecToolProvider:
             mock_exec_result = MagicMock()
             mock_exec_result.exit_code = exit_code
             mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
-            exec_run, clock_patch = _exec_run_taking(mock_exec_result, elapsed)
-            mock_docker_client.containers.run.return_value.exec_run = exec_run
+            mock_docker_client.containers.run.return_value.exec_run = MagicMock(return_value=mock_exec_result)
 
             with (
                 patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
                 patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-                clock_patch,
+                patch("stirrup.tools.code_backends.docker.perf_counter", side_effect=[0.0, elapsed]),
             ):
                 mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
@@ -196,13 +181,12 @@ class TestDockerCodeExecToolProvider:
             mock_exec_result = MagicMock()
             mock_exec_result.exit_code = exit_code
             mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
-            exec_run, clock_patch = _exec_run_taking(mock_exec_result, 2.0)
-            mock_docker_client.containers.run.return_value.exec_run = exec_run
+            mock_docker_client.containers.run.return_value.exec_run = MagicMock(return_value=mock_exec_result)
 
             with (
                 patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
                 patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-                clock_patch,
+                patch("stirrup.tools.code_backends.docker.perf_counter", side_effect=[0.0, 2.0]),
             ):
                 mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
@@ -217,26 +201,6 @@ class TestDockerCodeExecToolProvider:
             assert f"exit code {exit_code} after 2.00 seconds, before the 30 second limit" in stderr
             assert explanation in stderr
             assert "timed out" not in stderr
-
-    def test_format_result_error_branch_stdout(self) -> None:
-        """Error results show non-empty stdout. With empty stdout the text is unchanged."""
-        with_stdout = format_result(
-            CommandResult(
-                exit_code=124, stdout="partial", stderr="Command timed out after 3 seconds", error_kind="timeout"
-            )
-        )
-        assert "\n<stdout>partial</stdout>" in with_stdout.content
-        assert "<exit_code>" not in with_stdout.content
-
-        without_stdout = format_result(
-            CommandResult(exit_code=124, stdout="", stderr="Command timed out after 3 seconds", error_kind="timeout")
-        )
-        assert without_stdout.content == (
-            "<shell_results>"
-            "\n<error_kind>timeout</error_kind>"
-            "\n<details>Command timed out after 3 seconds</details>"
-            "\n</shell_results>"
-        )
 
     async def test_run_command_missing_timeout_binary_advice(
         self, mock_docker_client: MagicMock, tmp_path: Path
@@ -516,3 +480,22 @@ class TestDockerCodeExecToolProvider:
 
         assert lock_a1 is lock_a2
         assert lock_a1 is not lock_b
+
+
+def test_format_result_error_branch_stdout() -> None:
+    """Error results show non-empty stdout. With empty stdout the text is unchanged."""
+    with_stdout = format_result(
+        CommandResult(exit_code=124, stdout="partial", stderr="Command timed out after 3 seconds", error_kind="timeout")
+    )
+    assert "\n<stdout>partial</stdout>" in with_stdout.content
+    assert "<exit_code>" not in with_stdout.content
+
+    without_stdout = format_result(
+        CommandResult(exit_code=124, stdout="", stderr="Command timed out after 3 seconds", error_kind="timeout")
+    )
+    assert without_stdout.content == (
+        "<shell_results>"
+        "\n<error_kind>timeout</error_kind>"
+        "\n<details>Command timed out after 3 seconds</details>"
+        "\n</shell_results>"
+    )
