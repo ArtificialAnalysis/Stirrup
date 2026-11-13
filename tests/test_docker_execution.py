@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import shlex
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -154,7 +155,10 @@ class TestDockerCodeExecToolProvider:
             with (
                 patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
                 patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-                patch("stirrup.tools.code_backends.docker.perf_counter", side_effect=[0.0, elapsed]),
+                patch(
+                    "stirrup.tools.code_backends.docker.perf_counter",
+                    side_effect=itertools.chain([0.0, elapsed], itertools.repeat(elapsed)),
+                ),
             ):
                 mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
@@ -186,7 +190,10 @@ class TestDockerCodeExecToolProvider:
             with (
                 patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
                 patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-                patch("stirrup.tools.code_backends.docker.perf_counter", side_effect=[0.0, 2.0]),
+                patch(
+                    "stirrup.tools.code_backends.docker.perf_counter",
+                    side_effect=itertools.chain([0.0, 2.0], itertools.repeat(2.0)),
+                ),
             ):
                 mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
