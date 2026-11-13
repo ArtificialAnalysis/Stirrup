@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The Docker backend no longer reports an exit code 124 or 137 before the time limit as a
+  timeout. Such a result now keeps its real exit code, stdout and stderr, plus a note with
+  the elapsed time. A 137 before the limit usually means an outside SIGKILL, for example the
+  kernel out-of-memory killer, and a 124 can come from a nested `timeout` in the command.
+- Error results from code execution tools now include the stdout of the command when it is
+  not empty, so the partial output of a timed-out command reaches the model.
+
 ## v0.2.1 (2026-10-22)
 
 ### Changed
