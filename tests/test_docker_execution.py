@@ -155,11 +155,11 @@ class TestDockerCodeExecToolProvider:
     async def test_run_command_timeout_exit_codes_map_to_timeout(
         self, mock_docker_client: MagicMock, tmp_path: Path
     ) -> None:
-        """Exit 124, and exit 137 at or past the limit (--kill-after SIGKILL), surface as timeouts."""
+        """Exit 124 or 137 at or past the limit surfaces as a timeout."""
         provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
 
-        # (137, 1.0) is the boundary: elapsed equal to the 1 second limit is a timeout.
-        for exit_code, elapsed in ((124, 1.0), (137, 6.0), (137, 1.0)):
+        # Elapsed equal to the 1 second limit is the boundary, and it is a timeout.
+        for exit_code, elapsed in ((124, 1.0), (124, 1.5), (137, 6.0), (137, 1.0)):
             mock_exec_result = MagicMock()
             mock_exec_result.exit_code = exit_code
             mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
@@ -183,34 +183,40 @@ class TestDockerCodeExecToolProvider:
             assert "partial-stderr" in result.stderr
             assert "timed out" in result.stderr.lower()
 
-    async def test_run_command_exit_137_before_limit_is_not_timeout(
+    async def test_run_command_early_exit_124_or_137_is_not_timeout(
         self, mock_docker_client: MagicMock, tmp_path: Path
     ) -> None:
-        """Exit 137 before the limit is not a timeout (usually an outside SIGKILL, e.g. the OOM killer)."""
+        """Exit 124 or 137 before the limit is not a timeout (e.g. a nested `timeout`, or the OOM killer)."""
         provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
 
-        mock_exec_result = MagicMock()
-        mock_exec_result.exit_code = 137
-        mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
-        exec_run, clock_patch = _exec_run_taking(mock_exec_result, 2.0)
-        mock_docker_client.containers.run.return_value.exec_run = exec_run
-
-        with (
-            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
-            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
-            clock_patch,
+        for exit_code, explanation in (
+            (124, "the limit did not stop this command."),
+            (137, "this usually means the process was killed with sigkill"),
         ):
-            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+            mock_exec_result = MagicMock()
+            mock_exec_result.exit_code = exit_code
+            mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
+            exec_run, clock_patch = _exec_run_taking(mock_exec_result, 2.0)
+            mock_docker_client.containers.run.return_value.exec_run = exec_run
 
-            async with provider as _:
-                result = await provider.run_command("python -c 'x = bytearray(10**10)'", timeout=30)
+            with (
+                patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+                patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+                clock_patch,
+            ):
+                mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
-        assert result.error_kind is None
-        assert result.exit_code == 137
-        assert "partial-stdout" in result.stdout
-        assert "partial-stderr" in result.stderr
-        assert "exit code 137 after 2.00 seconds, before the 30 second limit" in result.stderr.lower()
-        assert "timed out" not in result.stderr.lower()
+                async with provider as _:
+                    result = await provider.run_command("timeout 2 sleep 60", timeout=30)
+
+            stderr = result.stderr.lower()
+            assert result.error_kind is None, f"exit {exit_code} before the limit is not a timeout"
+            assert result.exit_code == exit_code
+            assert "partial-stdout" in result.stdout
+            assert "partial-stderr" in stderr
+            assert f"exit code {exit_code} after 2.00 seconds, before the 30 second limit" in stderr
+            assert explanation in stderr
+            assert "timed out" not in stderr
 
     def test_format_result_error_branch_stdout(self) -> None:
         """Error results show non-empty stdout. With empty stdout the text is unchanged."""
