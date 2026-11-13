@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,12 +14,25 @@ pytest.importorskip("docker")
 
 from docker.errors import APIError, ImageNotFound
 
-from stirrup.tools.code_backends.base import SHELL_TIMEOUT, CommandResult
+from stirrup.tools.code_backends.base import SHELL_TIMEOUT, CommandResult, format_result
 from stirrup.tools.code_backends.docker import (
     DEFAULT_WORKING_DIR,
     DockerCodeExecToolProvider,
 )
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+
+def _exec_run_taking(exec_result: MagicMock, seconds: float) -> tuple[MagicMock, Any]:
+    """Return an exec_run mock that advances a fake clock by ``seconds`` per call, and a perf_counter patch."""
+    clock = [0.0]
+
+    def exec_run(*_args: object, **_kwargs: object) -> MagicMock:
+        clock[0] += seconds
+        return exec_result
+
+    return MagicMock(side_effect=exec_run), patch(
+        "stirrup.tools.code_backends.docker.perf_counter", side_effect=lambda: clock[0]
+    )
 
 
 @pytest.fixture
@@ -141,29 +155,82 @@ class TestDockerCodeExecToolProvider:
     async def test_run_command_timeout_exit_codes_map_to_timeout(
         self, mock_docker_client: MagicMock, tmp_path: Path
     ) -> None:
-        """Exit 124 (SIGTERM expiry) and 137 (--kill-after SIGKILL) both surface as timeouts."""
+        """Exit 124, and exit 137 at or past the limit (--kill-after SIGKILL), surface as timeouts."""
         provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
 
-        for exit_code in (124, 137):
+        # (137, 1.0) is the boundary: elapsed equal to the 1 second limit is a timeout.
+        for exit_code, elapsed in ((124, 1.0), (137, 6.0), (137, 1.0)):
             mock_exec_result = MagicMock()
             mock_exec_result.exit_code = exit_code
             mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
-            mock_docker_client.containers.run.return_value.exec_run = MagicMock(return_value=mock_exec_result)
+            exec_run, clock_patch = _exec_run_taking(mock_exec_result, elapsed)
+            mock_docker_client.containers.run.return_value.exec_run = exec_run
 
             with (
                 patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
                 patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+                clock_patch,
             ):
                 mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
 
                 async with provider as _:
                     result = await provider.run_command("sleep 999", timeout=1)
 
-            assert result.error_kind == "timeout", f"exit {exit_code} should map to timeout"
+            case = f"exit {exit_code} after {elapsed}s"
+            assert result.error_kind == "timeout", f"{case} should map to timeout"
             assert result.exit_code == exit_code
             assert "partial-stdout" in result.stdout
             assert "partial-stderr" in result.stderr
             assert "timed out" in result.stderr.lower()
+
+    async def test_run_command_exit_137_before_limit_is_not_timeout(
+        self, mock_docker_client: MagicMock, tmp_path: Path
+    ) -> None:
+        """Exit 137 before the limit is not a timeout (usually an outside SIGKILL, e.g. the OOM killer)."""
+        provider = DockerCodeExecToolProvider.from_image("python:3.12-slim", temp_base_dir=tmp_path)
+
+        mock_exec_result = MagicMock()
+        mock_exec_result.exit_code = 137
+        mock_exec_result.output = (b"partial-stdout", b"partial-stderr")
+        exec_run, clock_patch = _exec_run_taking(mock_exec_result, 2.0)
+        mock_docker_client.containers.run.return_value.exec_run = exec_run
+
+        with (
+            patch("stirrup.tools.code_backends.docker.docker.from_env", return_value=mock_docker_client),
+            patch("stirrup.tools.code_backends.docker.to_thread") as mock_to_thread,
+            clock_patch,
+        ):
+            mock_to_thread.run_sync = AsyncMock(side_effect=lambda fn, *args: fn(*args) if not args else fn)
+
+            async with provider as _:
+                result = await provider.run_command("python -c 'x = bytearray(10**10)'", timeout=30)
+
+        assert result.error_kind is None
+        assert result.exit_code == 137
+        assert "partial-stdout" in result.stdout
+        assert "partial-stderr" in result.stderr
+        assert "exit code 137 after 2.00 seconds, before the 30 second limit" in result.stderr.lower()
+        assert "timed out" not in result.stderr.lower()
+
+    def test_format_result_error_branch_stdout(self) -> None:
+        """Error results show non-empty stdout. With empty stdout the text is unchanged."""
+        with_stdout = format_result(
+            CommandResult(
+                exit_code=124, stdout="partial", stderr="Command timed out after 3 seconds", error_kind="timeout"
+            )
+        )
+        assert "\n<stdout>partial</stdout>" in with_stdout.content
+        assert "<exit_code>" not in with_stdout.content
+
+        without_stdout = format_result(
+            CommandResult(exit_code=124, stdout="", stderr="Command timed out after 3 seconds", error_kind="timeout")
+        )
+        assert without_stdout.content == (
+            "<shell_results>"
+            "\n<error_kind>timeout</error_kind>"
+            "\n<details>Command timed out after 3 seconds</details>"
+            "\n</shell_results>"
+        )
 
     async def test_run_command_missing_timeout_binary_advice(
         self, mock_docker_client: MagicMock, tmp_path: Path

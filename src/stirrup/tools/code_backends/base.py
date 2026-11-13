@@ -393,6 +393,8 @@ def format_result(result: CommandResult) -> ToolResult[ToolUseCountMetadata]:
             f"\n<error_kind>{result.error_kind}</error_kind>"
             f"\n<details>{truncate_msg(result.stderr, MAX_LENGTH_SHELL_STDERR)}</details>"
         )
+        if result.stdout:
+            content += f"\n<stdout>{truncate_msg(result.stdout, MAX_LENGTH_SHELL_STDOUT)}</stdout>"
         if result.advice:
             content += f"\n<advice>{result.advice}</advice>"
         content += "\n</shell_results>"

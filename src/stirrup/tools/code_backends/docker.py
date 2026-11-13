@@ -2,11 +2,13 @@
 
 import contextlib
 import hashlib
+import math
 import os
 import shlex
 import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
+from time import perf_counter
 from typing import ClassVar, Self
 
 import anyio
@@ -19,7 +21,7 @@ try:
     import docker
     from docker.client import DockerClient
     from docker.errors import APIError, BuildError, ImageNotFound, NotFound
-    from docker.models.containers import Container
+    from docker.models.containers import Container, ExecResult
 except ImportError as e:
     raise ImportError(
         "Requires installation of the docker extra. Install with (for example): `uv pip install stirrup[docker]` or `uv add stirrup[docker]`",
@@ -619,8 +621,12 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         # It runs the command in its own process group and sends SIGKILL to the
         # whole group after --kill-after, so descendants can't leak as orphans
         # parented to container PID 1 when the client gives up (moby/moby#9098).
-        # Exit 124 == SIGTERM expiry, 137 == --kill-after SIGKILL; both map to
-        # error_kind="timeout" for the caller.
+        # Exit 124 == SIGTERM expiry at the limit. timeout(1) also exits 137 when
+        # the child dies by SIGKILL after the TERM at the limit (it keeps the
+        # child's status, and --kill-after sends SIGKILL at limit + 5s). So the
+        # threshold below is the limit itself, not limit + kill-after, on
+        # purpose. A 137 before the limit is not a timeout. It usually means a
+        # SIGKILL from elsewhere, possibly the kernel out-of-memory killer.
         if argv is not None:
             exec_cmd = ["timeout", "--kill-after=5s", f"{timeout}s", *argv]
         else:
@@ -630,19 +636,25 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
         try:
             # Outer fail_after is a safety net for a stalled docker socket; the
             # in-container timeout(1) should fire first in the normal case.
-            with fail_after(timeout + 10):
-                exec_result = await to_thread.run_sync(
-                    lambda: container.exec_run(
-                        cmd=exec_cmd,
-                        workdir=self._working_dir,
-                        demux=True,  # Separate stdout/stderr
-                    )
+            # The clock runs in the worker thread around exec_run only, so the
+            # wait for a free thread is not counted. Docker API overhead is
+            # counted, which can only push a result towards "timeout".
+            def timed_exec_run() -> tuple[ExecResult, float]:
+                start_time = perf_counter()
+                result = container.exec_run(
+                    cmd=exec_cmd,
+                    workdir=self._working_dir,
+                    demux=True,  # Separate stdout/stderr
                 )
+                return result, perf_counter() - start_time
+
+            with fail_after(timeout + 10):
+                exec_result, elapsed = await to_thread.run_sync(timed_exec_run)
 
             exit_code = exec_result.exit_code
             stdout_bytes, stderr_bytes = exec_result.output
 
-            if exit_code in (124, 137):
+            if exit_code == 124 or (exit_code == 137 and elapsed >= timeout):
                 logger.warning("Command timed out after %d seconds: %s", timeout, cmd[:100])
                 partial_stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
                 timeout_msg = f"Command timed out after {timeout} seconds"
@@ -655,6 +667,22 @@ class DockerCodeExecToolProvider(CodeExecToolProvider):
                 )
 
             stderr_text = (stderr_bytes or b"").decode("utf-8", errors="replace")
+
+            if exit_code == 137:
+                # Round down, so the shown time stays below the limit (29.996 -> "29.99", not "30.00").
+                shown = f"{math.floor(elapsed * 100) / 100:.2f}"
+                logger.warning(
+                    "Command exited 137 after %s seconds, before the %d second limit: %s", shown, timeout, cmd[:100]
+                )
+                kill_msg = (
+                    f"Exit code 137 after {shown} seconds, before the {timeout} second limit. "
+                    "This usually means the process was killed with SIGKILL, possibly by the out-of-memory killer."
+                )
+                return CommandResult(
+                    exit_code=exit_code,
+                    stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
+                    stderr=f"{stderr_text}\n{kill_msg}" if stderr_text else kill_msg,
+                )
 
             # Heuristic: exit 127 + a "timeout: ... not found" message from the
             # shell means coreutils timeout(1) is absent from the base image, so
