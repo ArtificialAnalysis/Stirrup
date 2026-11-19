@@ -21,6 +21,7 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401
 AGENT_MAX_TURNS = 30  # Maximum agent turns before forced termination
 CONTEXT_SUMMARIZATION_CUTOFF = 0.7  # Context window usage threshold (0.0-1.0) that triggers message summarization
 TURNS_REMAINING_WARNING_THRESHOLD = 20
+OUTPUT_TOKENS_REMAINING_WARNING_THRESHOLD = 20_000
 
 # Media resolution limits
 RESOLUTION_1MP = 1_000_000  # 1 megapixel - default max resolution for images
