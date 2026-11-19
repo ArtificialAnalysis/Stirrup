@@ -126,6 +126,19 @@ def _output_tokens_remaining_msg(output_tokens_remaining: int) -> TurnWarningMes
     )
 
 
+def _turns_and_output_tokens_remaining_msg(
+    number_of_turns_remaining: int, output_tokens_remaining: int
+) -> TurnWarningMessage:
+    """Create a user message warning the agent about both remaining turns and remaining output tokens."""
+    if number_of_turns_remaining == 1:
+        return TurnWarningMessage(
+            content=f"This is the last turn, and you have {output_tokens_remaining:,} output tokens remaining, reasoning included. Please finish the task by calling a finish tool.",
+        )
+    return TurnWarningMessage(
+        content=f"You have {number_of_turns_remaining} turns and {output_tokens_remaining:,} output tokens remaining to complete the task, reasoning included. Please continue. Remember you will need a separate turn to call a finish tool.",
+    )
+
+
 def _tool_arguments_json(tool_call: ToolCall) -> str:
     """Return the call's arguments as JSON, treating an empty string as no arguments.
 
@@ -697,23 +710,23 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         return self._max_output_tokens is not None and output_tokens >= self._max_output_tokens
 
     def _remaining_warning(self, turns: int, output_tokens: int) -> TurnWarningMessage | None:
-        """Warn about remaining turns, and add the output tokens left once within their threshold."""
+        """Warn about whichever limits are within their warning threshold, or return None."""
         turns_remaining = self._max_turns - turns
-        warning = (
-            _num_turns_remaining_msg(turns_remaining)
-            if turns_remaining <= self._turns_remaining_warning_threshold
-            else None
+        near_turns = turns_remaining <= self._turns_remaining_warning_threshold
+        output_tokens_remaining = (
+            self._max_output_tokens - output_tokens if self._max_output_tokens is not None else None
         )
-        if self._max_output_tokens is None:
-            return warning
-        output_tokens_remaining = self._max_output_tokens - output_tokens
-        if output_tokens_remaining > self._output_tokens_remaining_warning_threshold:
-            return warning
-        if warning is None:
+        near_output_tokens = (
+            output_tokens_remaining is not None
+            and output_tokens_remaining <= self._output_tokens_remaining_warning_threshold
+        )
+        if near_turns and near_output_tokens:
+            return _turns_and_output_tokens_remaining_msg(turns_remaining, output_tokens_remaining)
+        if near_turns:
+            return _num_turns_remaining_msg(turns_remaining)
+        if near_output_tokens:
             return _output_tokens_remaining_msg(output_tokens_remaining)
-        return TurnWarningMessage(
-            content=f"{warning.content} You also have {output_tokens_remaining:,} output tokens remaining, reasoning included."
-        )
+        return None
 
     def _build_system_prompt(self) -> str:
         """Build the complete system prompt: base + input files + user instructions.

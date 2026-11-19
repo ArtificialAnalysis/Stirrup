@@ -1632,14 +1632,14 @@ async def test_allow_successive_assistant_messages() -> None:
     [
         (30, None, 3, [], True),
         (30, 1_000, 2, ["You have 400 output tokens remaining"], False),
-        (3, 1_000, 2, ["You have 2 turns remaining", "You also have 400 output tokens remaining"], False),
-        (2, 1_000, 2, ["This is the last turn", "You also have 400 output tokens remaining"], False),
+        (3, 1_000, 2, ["You have 2 turns and 400 output tokens remaining"], False),
+        (2, 1_000, 2, ["This is the last turn, and you have 400 output tokens remaining"], False),
     ],
 )
 async def test_max_output_tokens_warns_then_stops(
     max_turns: int, max_output_tokens: int | None, expected_calls: int, expected_warnings: list[str], finishes: bool
 ) -> None:
-    """Output tokens count reasoning; the token warning joins any turns warning, and either limit stops the run."""
+    """Output tokens count reasoning; one warning covers whichever limits are near, and either limit stops the run."""
     working = TokenUsage(input=100, answer=300, reasoning=300)
     responses = [
         AssistantMessage(blocks=[TextBlock(text="Working")], token_usage=working),
@@ -1672,8 +1672,8 @@ async def test_max_output_tokens_warns_then_stops(
     assert (finish_params is not None) == finishes
     assert client.call_count == expected_calls
     warnings = [str(m.content) for group in history for m in group if isinstance(m, TurnWarningMessage)]
-    assert len(warnings) == (1 if expected_warnings else 0)
-    assert all(part in warnings[0] for part in expected_warnings)
+    assert len(warnings) == len(expected_warnings)
+    assert all(w.startswith(e) for w, e in zip(warnings, expected_warnings, strict=True))
 
 
 async def test_summarize_history_has_one_summary_per_trajectory() -> None:
