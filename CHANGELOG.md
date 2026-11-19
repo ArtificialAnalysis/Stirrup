@@ -4,10 +4,11 @@
 
 ### Added
 
-- `Agent(max_output_tokens=...)`: a limit on the agent's output tokens, reasoning included,
-  that works like `max_turns`. Once `output_tokens_remaining_warning_threshold` (default
-  20,000) or fewer remain, each turn starts with a `TurnWarningMessage` giving the tokens
-  left. The run stops before the next turn once the limit is reached and returns
+- `Agent(max_output_tokens=...)`: a limit on the agent's total output tokens across all turns
+  of the run, reasoning included, that works like `max_turns`. Once
+  `output_tokens_remaining_warning_threshold` (default 50,000) or fewer remain, each turn's
+  `TurnWarningMessage` gives the tokens left, in the same message as the turns left when both
+  apply. The run stops before the next turn once the limit is reached and returns
   `finish_params=None`, as at `max_turns`. The last turn can go over the limit. Each agent
   counts only its own turns, so sub-agents take their own `max_output_tokens`. The default,
   `None`, means no limit.

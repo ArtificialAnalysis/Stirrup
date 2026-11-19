@@ -18,7 +18,7 @@ agent = Agent(
     client=client,                                        # (required) LLM client for generating responses
     name="my_agent",                                      # (required) Agent name for logging
     max_turns=30,                                         # (default: 30) Max iterations before stopping
-    max_output_tokens=None,                               # (default: None) Max output tokens before stopping
+    max_output_tokens=None,                               # (default: None) Max total output tokens across the run
     system_prompt="You are an agent specializing in ...", # (default: None) Instructions prepended to runs
     tools=None,                                           # (default: default_tools()) Available tools
     finish_tool=None,                                     # (default: SIMPLE_FINISH_TOOL) Completion signal(s)
@@ -38,7 +38,7 @@ agent = Agent(
     | `client` | `LLMClient` | required | LLM client (use factory methods or create directly) |
     | `name` | `str` | required | Agent name for logging |
     | `max_turns` | `int` | `30` | Maximum turns before stopping |
-    | `max_output_tokens` | `int \| None` | `None` | Maximum output tokens, reasoning included, before stopping; `None` means no limit |
+    | `max_output_tokens` | `int \| None` | `None` | Maximum total output tokens across all turns of the run, reasoning included, before stopping; `None` means no limit |
     | `system_prompt` | `str \| None` | `None` | System prompt prepended to runs |
     | `tools` | `list[Tool \| ToolProvider] \| None` | `default_tools()` | Available tools |
     | `finish_tool` | `Tool \| list[Tool]` | `SIMPLE_FINISH_TOOL` | Tool(s) to signal completion |

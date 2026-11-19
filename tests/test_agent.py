@@ -1628,16 +1628,18 @@ async def test_allow_successive_assistant_messages() -> None:
 
 
 @pytest.mark.parametrize(
-    ("max_output_tokens", "expected_calls", "expected_warnings", "finishes"),
+    ("max_turns", "max_output_tokens", "expected_calls", "expected_warnings", "finishes"),
     [
-        (None, 3, [], True),
-        (1_000, 2, ["You have 400 output tokens remaining"], False),
+        (30, None, 3, [], True),
+        (30, 1_000, 2, ["You have 400 output tokens remaining"], False),
+        (3, 1_000, 2, ["You have 2 turns remaining", "You also have 400 output tokens remaining"], False),
+        (2, 1_000, 2, ["This is the last turn", "You also have 400 output tokens remaining"], False),
     ],
 )
 async def test_max_output_tokens_warns_then_stops(
-    max_output_tokens: int | None, expected_calls: int, expected_warnings: list[str], finishes: bool
+    max_turns: int, max_output_tokens: int | None, expected_calls: int, expected_warnings: list[str], finishes: bool
 ) -> None:
-    """Output tokens count reasoning; the run warns below the threshold and stops once the limit is spent."""
+    """Output tokens count reasoning; the token warning joins any turns warning, and either limit stops the run."""
     working = TokenUsage(input=100, answer=300, reasoning=300)
     responses = [
         AssistantMessage(blocks=[TextBlock(text="Working")], token_usage=working),
@@ -1657,7 +1659,7 @@ async def test_max_output_tokens_warns_then_stops(
     agent = Agent(
         client=client,
         name="test-agent",
-        max_turns=30,
+        max_turns=max_turns,
         max_output_tokens=max_output_tokens,
         output_tokens_remaining_warning_threshold=500,
         tools=[],
@@ -1670,21 +1672,8 @@ async def test_max_output_tokens_warns_then_stops(
     assert (finish_params is not None) == finishes
     assert client.call_count == expected_calls
     warnings = [str(m.content) for group in history for m in group if isinstance(m, TurnWarningMessage)]
-    assert len(warnings) == len(expected_warnings)
-    assert all(w.startswith(e) for w, e in zip(warnings, expected_warnings, strict=True))
-
-
-def test_unwound_turn_takes_every_warning_before_it() -> None:
-    """A turn with both a turns and an output-tokens warning unwinds both with the response."""
-    messages: list[ChatMessage] = [
-        UserMessage(content="Task"),
-        AssistantMessage(id="turn-1", blocks=[TextBlock(text="Working")]),
-        TurnWarningMessage(content="5 turns remaining"),
-        TurnWarningMessage(content="400 output tokens remaining"),
-        AssistantMessage(id="turn-2", blocks=[TextBlock(text="Still working")]),
-    ]
-
-    assert Agent._latest_completed_turn(messages) == (2, "turn-2")  # noqa: SLF001
+    assert len(warnings) == (1 if expected_warnings else 0)
+    assert all(part in warnings[0] for part in expected_warnings)
 
 
 async def test_summarize_history_has_one_summary_per_trajectory() -> None:
