@@ -1530,6 +1530,71 @@ async def test_finish_tool_validates_file_paths() -> None:
     assert any("nonexistent.txt" in str(msg.content) and not msg.success for msg in tool_messages)
 
 
+def _finish_call(paths: list[str], call_id: str) -> AssistantMessage:
+    return AssistantMessage(
+        blocks=[
+            ToolCall(
+                name=DEFAULT_FINISH_TOOL_NAME,
+                arguments=json.dumps({"reason": "Done", "paths": paths}),
+                tool_call_id=call_id,
+            ),
+        ],
+        token_usage=TokenUsage(input=100, answer=50),
+    )
+
+
+async def _run_finish_attempts(attempts: list[list[str]]) -> tuple[FinishParams | None, list[ToolMessage]]:
+    """Run an agent on a local exec env holding real.txt whose turns each call finish with the given paths."""
+    from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
+
+    provider = LocalCodeExecToolProvider()
+    client = MockLLMClient([_finish_call(paths, f"call_{i}") for i, paths in enumerate(attempts)])
+    agent = Agent(client=client, name="test-agent", max_turns=len(attempts), tools=[provider])
+
+    async with agent.session() as session:
+        await provider.write_file_bytes("real.txt", b"data")
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    tool_messages = [msg for group in history for msg in group if isinstance(msg, ToolMessage)]
+    return finish_params, tool_messages
+
+
+async def test_finish_tool_missing_file_message_unchanged() -> None:
+    _, tool_messages = await _run_finish_attempts([["missing.txt"], []])
+
+    assert not tool_messages[0].success
+    assert tool_messages[0].content == (
+        "ERROR: Files do not exist: ['missing.txt']. Verify paths and ensure files were saved."
+    )
+
+
+async def test_finish_tool_rejects_path_outside_exec_env(tmp_path: Path) -> None:
+    """A path the exec env refuses as outside it is a failed finish, not a crashed session."""
+    outside = str(tmp_path / "report.docx")
+
+    finish_params, tool_messages = await _run_finish_attempts([[outside], []])
+
+    assert finish_params is not None
+    assert not tool_messages[0].success
+    assert outside in str(tool_messages[0].content)
+    assert "outside the execution environment" in str(tool_messages[0].content)
+
+
+async def test_finish_tool_names_only_outside_paths_when_mixed_with_existing(tmp_path: Path) -> None:
+    outside = str(tmp_path / "report.docx")
+
+    finish_params, tool_messages = await _run_finish_attempts([["real.txt", outside], ["real.txt"]])
+
+    first, second = tool_messages
+    assert not first.success
+    assert outside in str(first.content)
+    assert "real.txt" not in str(first.content)
+    assert "do not exist" not in str(first.content)
+    assert second.success
+    assert finish_params is not None
+    assert finish_params.paths == ["real.txt"]
+
+
 async def test_no_successive_assistant_messages() -> None:
     """Test agent adds continue message to avoid successive assistant messages."""
     responses = [

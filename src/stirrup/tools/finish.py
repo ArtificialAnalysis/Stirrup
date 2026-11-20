@@ -30,10 +30,22 @@ async def _validating_finish_executor(params: FinishParams) -> ToolResult[ToolUs
         exec_env = None
 
     if exec_env and params.paths:
-        missing = [p for p in params.paths if not await exec_env.file_exists(p)]
+        missing: list[str] = []
+        outside: list[str] = []
+        for p in params.paths:
+            try:
+                if not await exec_env.file_exists(p):
+                    missing.append(p)
+            except ValueError:  # the exec env rejects paths outside it
+                outside.append(p)
+        errors = []
         if missing:
+            errors.append(f"Files do not exist: {missing}.")
+        if outside:
+            errors.append(f"Paths are outside the execution environment: {outside}.")
+        if errors:
             return ToolResult(
-                content=f"ERROR: Files do not exist: {missing}. Verify paths and ensure files were saved.",
+                content=f"ERROR: {' '.join(errors)} Verify paths and ensure files were saved.",
                 metadata=ToolUseCountMetadata(),
                 success=False,
             )
