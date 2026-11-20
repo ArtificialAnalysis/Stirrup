@@ -38,7 +38,7 @@ agent = Agent(
     | `client` | `LLMClient` | required | LLM client (use factory methods or create directly) |
     | `name` | `str` | required | Agent name for logging |
     | `max_turns` | `int` | `30` | Maximum turns before stopping |
-    | `max_cumulative_output_tokens` | `int \| None` | `None` | Maximum total output tokens across all turns of the run, reasoning included, before stopping; `None` means no limit |
+    | `max_cumulative_output_tokens` | `int \| None` | `None` | Maximum total output tokens across all turns of the run, reasoning included, before stopping; compaction summaries are not counted; `None` means no limit |
     | `system_prompt` | `str \| None` | `None` | System prompt prepended to runs |
     | `tools` | `list[Tool \| ToolProvider] \| None` | `default_tools()` | Available tools |
     | `finish_tool` | `Tool \| list[Tool]` | `SIMPLE_FINISH_TOOL` | Tool(s) to signal completion |

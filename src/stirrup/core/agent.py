@@ -405,7 +405,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             max_turns: Maximum number of turns before stopping
             max_cumulative_output_tokens: Maximum total output tokens across all turns of the run,
                                           reasoning included, before stopping. Counts this agent's own
-                                          turns only, like max_turns. None (default) means no limit.
+                                          turns only, like max_turns; compaction summaries are not
+                                          counted. None (default) means no limit.
             system_prompt: System prompt to prepend to all runs (when using string prompts)
             tools: List of Tools and/or ToolProviders available to the agent.
                    If None, uses default_tools(). ToolProviders are automatically
