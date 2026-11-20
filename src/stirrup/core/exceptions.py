@@ -6,6 +6,7 @@ __all__ = [
     "CompactionReason",
     "CompactionRequiredError",
     "ContextOverflowError",
+    "EmptyResponseError",
     "IncompleteResponseError",
     "OutputTokenLimitError",
 ]
@@ -32,6 +33,21 @@ class ContextOverflowError(Exception):
 
     The agent drops the latest turn, summarizes the rest and retries the step once.
     """
+
+
+class EmptyResponseError(Exception):
+    """Raised when a provider answers successfully but without any choices.
+
+    OpenAI-compatible gateways such as OpenRouter can return HTTP 200 with an ``error``
+    object and no ``choices`` when an upstream provider fails mid-request. The client
+    retries such replies and raises this once its retries are used up, or at once when
+    ``retryable`` is false because the error's code marks a client error (4xx other than
+    408 and 429).
+    """
+
+    def __init__(self, *args: object, retryable: bool = True) -> None:
+        super().__init__(*args)
+        self.retryable = retryable
 
 
 class IncompleteResponseError(Exception):

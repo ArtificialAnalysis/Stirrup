@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from openai import BadRequestError
+from tenacity import wait_none
 
-from stirrup import ContextOverflowError, OutputTokenLimitError
+from stirrup import ContextOverflowError, EmptyResponseError, OutputTokenLimitError
 from stirrup.clients import chat_completions_client as chat_completions_module
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.core.models import AssistantMessage, ReasoningBlock, TextBlock, ToolCall, UserMessage
@@ -202,3 +203,112 @@ async def test_unrelated_bad_request_is_not_mapped_to_context_overflow(monkeypat
 
     with pytest.raises(BadRequestError):
         await client.generate([UserMessage(content="hello")], {})
+
+
+def _reply_without_choices(choices: list[object] | None = None, *, error: object = None) -> SimpleNamespace:
+    error = error if error is not None else {"message": "Provider returned error", "code": 502}
+    return SimpleNamespace(choices=choices, usage=None, model_extra={"error": error})
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chat_completions_module, "_EMPTY_RESPONSE_WAIT", wait_none())
+
+
+def _client_with_retries(
+    monkeypatch: pytest.MonkeyPatch, provider_call: AsyncMock, max_retries: int
+) -> ChatCompletionsClient:
+    provider_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=provider_call)))
+    monkeypatch.setattr(chat_completions_module, "AsyncOpenAI", lambda **_kwargs: provider_client)
+    return ChatCompletionsClient(
+        model="gpt-4o", api_key="test-key", context_window_tokens=64_000, max_retries=max_retries
+    )
+
+
+@pytest.mark.usefixtures("no_retry_wait")
+class TestRepliesWithoutChoices:
+    """Gateways such as OpenRouter can answer HTTP 200 with an error and no choices."""
+
+    @pytest.mark.parametrize("choices", [None, []])
+    async def test_reply_without_choices_is_retried(
+        self, monkeypatch: pytest.MonkeyPatch, choices: list[object] | None
+    ) -> None:
+        provider_call = AsyncMock(side_effect=[_reply_without_choices(choices), _mock_response(content="recovered")])
+        client = _client_with_provider_call(monkeypatch, provider_call)
+
+        result = await client.generate([UserMessage(content="hello")], {})
+
+        assert result.blocks == [TextBlock(text="recovered")]
+        assert result.token_usage.input == 10
+        assert provider_call.await_count == 2
+
+    @pytest.mark.parametrize("choices", [None, []])
+    async def test_every_reply_without_choices_raises_with_provider_error(
+        self, monkeypatch: pytest.MonkeyPatch, choices: list[object] | None
+    ) -> None:
+        provider_call = AsyncMock(return_value=_reply_without_choices(choices))
+        client = _client_with_retries(monkeypatch, provider_call, max_retries=3)
+
+        with pytest.raises(EmptyResponseError, match="Provider returned error") as exc_info:
+            await client.generate([UserMessage(content="hello")], {})
+
+        assert provider_call.await_count == 4
+        assert exc_info.value.retryable is True
+
+    @pytest.mark.parametrize("code", [400, 401, 404])
+    async def test_client_error_code_is_not_retried(self, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+        provider_call = AsyncMock(return_value=_reply_without_choices(error={"message": "Bad input", "code": code}))
+        client = _client_with_retries(monkeypatch, provider_call, max_retries=3)
+
+        with pytest.raises(EmptyResponseError, match="Bad input") as exc_info:
+            await client.generate([UserMessage(content="hello")], {})
+
+        assert not exc_info.value.retryable
+        provider_call.assert_awaited_once()
+
+    @pytest.mark.parametrize("code", [408, 429, 502, "server_error"])
+    async def test_transient_error_code_is_retried(self, monkeypatch: pytest.MonkeyPatch, code: int | str) -> None:
+        reply = _reply_without_choices(error={"message": "Try again", "code": code})
+        provider_call = AsyncMock(side_effect=[reply, _mock_response(content="recovered")])
+        client = _client_with_retries(monkeypatch, provider_call, max_retries=3)
+
+        result = await client.generate([UserMessage(content="hello")], {})
+
+        assert result.blocks == [TextBlock(text="recovered")]
+        assert provider_call.await_count == 2
+
+    async def test_long_provider_error_is_truncated_in_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reply = _reply_without_choices(error={"message": "x" * 5_000, "code": 502})
+        client = _client_with_retries(monkeypatch, AsyncMock(return_value=reply), max_retries=0)
+
+        with pytest.raises(EmptyResponseError) as exc_info:
+            await client.generate([UserMessage(content="hello")], {})
+
+        message = str(exc_info.value)
+        assert message.endswith("... [truncated]")
+        assert len(message) < 600
+
+    async def test_zero_max_retries_makes_one_attempt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider_call = AsyncMock(return_value=_reply_without_choices())
+        client = _client_with_retries(monkeypatch, provider_call, max_retries=0)
+
+        with pytest.raises(EmptyResponseError):
+            await client.generate([UserMessage(content="hello")], {})
+
+        provider_call.assert_awaited_once()
+
+    async def test_reply_without_choices_or_error_still_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reply = SimpleNamespace(choices=None, usage=None, model_extra={})
+        client = _client_with_retries(monkeypatch, AsyncMock(return_value=reply), max_retries=0)
+
+        with pytest.raises(EmptyResponseError, match="returned no choices"):
+            await client.generate([UserMessage(content="hello")], {})
+
+    async def test_reply_with_choices_makes_one_attempt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider_call = AsyncMock(return_value=_mock_response(content="first time"))
+        client = _client_with_provider_call(monkeypatch, provider_call)
+
+        result = await client.generate([UserMessage(content="hello")], {})
+
+        assert result.blocks == [TextBlock(text="first time")]
+        provider_call.assert_awaited_once()
