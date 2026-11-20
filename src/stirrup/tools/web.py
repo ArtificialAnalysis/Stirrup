@@ -27,7 +27,7 @@ from contextlib import AsyncExitStack
 from functools import partial
 from html import escape
 from types import TracebackType
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 import trafilatura
@@ -460,15 +460,35 @@ class WebToolProvider(ToolProvider):
         *,
         timeout: float = 60 * 3,
         brave_api_key: str | None = None,
+        search_provider: Literal["brave", "parallel"] = "brave",
+        parallel_public_query: str | None = None,
     ) -> None:
         """Initialize WebToolProvider.
 
         Args:
-            timeout: Total web fetch timeout and per-operation web search timeout in seconds (default: 180)
+            timeout: Total web fetch and Parallel operation timeout, and per-operation
+                Brave search timeout in seconds (default: 180).
             brave_api_key: Brave Search API key for web_search tool.
                           If None, uses BRAVE_API_KEY environment variable.
-                          Web search is only available if API key is provided.
+                          Brave search is only available if API key is provided.
+            search_provider: Explicit search backend choice. Defaults to Brave.
+            parallel_public_query: One literal, user-approved public documentation
+                query for an attended Parallel operation. Requires search_provider="parallel"
+                and the mcp extra. The model receives no query arguments. Construct a
+                fresh provider for each approved operation; attempts are never retried.
         """
+        if search_provider not in ("brave", "parallel"):
+            raise ValueError("search_provider must be 'brave' or 'parallel'")
+        if search_provider == "parallel":
+            if not isinstance(parallel_public_query, str) or not parallel_public_query.strip():
+                raise ValueError("Parallel requires a nonempty, user-approved parallel_public_query")
+            from stirrup.tools.parallel_web import get_parallel_search_tool
+
+            self._parallel_tool = get_parallel_search_tool(parallel_public_query, timeout=timeout)
+        else:
+            if parallel_public_query is not None:
+                raise ValueError("parallel_public_query requires explicit search_provider='parallel'")
+            self._parallel_tool = None
         self._timeout = timeout
         self._brave_api_key = brave_api_key or os.getenv("BRAVE_API_KEY")
         self._fetch_client: httpx.AsyncClient | None = None
@@ -479,7 +499,8 @@ class WebToolProvider(ToolProvider):
         """Enter async context: create HTTP clients and return web tools.
 
         Returns:
-            List of Tool objects (web_fetch, and web_search if API key available).
+            List of tools: web_fetch, plus the explicitly selected Parallel search
+            or Brave search when its API key is available.
         """
         stack = AsyncExitStack()
         await stack.__aenter__()
@@ -491,7 +512,7 @@ class WebToolProvider(ToolProvider):
                     trust_env=False,
                 )
             )
-            if self._brave_api_key:
+            if self._parallel_tool is None and self._brave_api_key:
                 self._search_client = await stack.enter_async_context(
                     httpx.AsyncClient(timeout=self._timeout, follow_redirects=True)
                 )
@@ -523,7 +544,7 @@ class WebToolProvider(ToolProvider):
         """Get web tools configured with the managed HTTP clients.
 
         Returns:
-            List containing web_fetch tool, and web_search tool if API key is available.
+            List containing web_fetch and the selected, configured search tool.
 
         Raises:
             RuntimeError: If called before entering context.
@@ -533,8 +554,9 @@ class WebToolProvider(ToolProvider):
 
         tools: list[Tool[Any, Any]] = [_get_fetch_web_page_tool(self._fetch_client, timeout=self._timeout)]
 
-        # Only add web_search if API key is available
-        if self._brave_api_key:
+        if self._parallel_tool is not None:
+            tools.append(self._parallel_tool)
+        elif self._brave_api_key:
             if self._search_client is None:
                 raise RuntimeError("Web search client not started. Use 'async with' first.")
             tools.append(_get_websearch_tool(self._brave_api_key, self._search_client))
