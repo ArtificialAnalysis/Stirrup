@@ -1628,18 +1628,22 @@ async def test_allow_successive_assistant_messages() -> None:
 
 
 @pytest.mark.parametrize(
-    ("max_turns", "max_output_tokens", "expected_calls", "expected_warnings", "finishes"),
+    ("max_turns", "max_cumulative_output_tokens", "expected_calls", "expected_warnings", "finishes"),
     [
         (30, None, 3, [], True),
         (30, 1_000, 2, ["You have 400 output tokens remaining"], False),
         (3, 1_000, 2, ["You have 2 turns and 400 output tokens remaining"], False),
-        (2, 1_000, 2, ["This is the last turn, and you have 400 output tokens remaining"], False),
+        (2, 1_000, 2, ["This is the last turn. Please finish the task by calling a finish tool."], False),
     ],
 )
-async def test_max_output_tokens_warns_then_stops(
-    max_turns: int, max_output_tokens: int | None, expected_calls: int, expected_warnings: list[str], finishes: bool
+async def test_max_cumulative_output_tokens_warns_then_stops(
+    max_turns: int,
+    max_cumulative_output_tokens: int | None,
+    expected_calls: int,
+    expected_warnings: list[str],
+    finishes: bool,
 ) -> None:
-    """Output tokens count reasoning; one warning covers whichever limits are near, and either limit stops the run."""
+    """Output tokens count reasoning; one warning covers whichever limits are near, except tokens on the last turn."""
     working = TokenUsage(input=100, answer=300, reasoning=300)
     responses = [
         AssistantMessage(blocks=[TextBlock(text="Working")], token_usage=working),
@@ -1660,7 +1664,7 @@ async def test_max_output_tokens_warns_then_stops(
         client=client,
         name="test-agent",
         max_turns=max_turns,
-        max_output_tokens=max_output_tokens,
+        max_cumulative_output_tokens=max_cumulative_output_tokens,
         output_tokens_remaining_warning_threshold=500,
         tools=[],
         finish_tool=SIMPLE_FINISH_TOOL,
