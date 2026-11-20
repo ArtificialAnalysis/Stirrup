@@ -503,7 +503,7 @@ agent = Agent(
 
 `recover_from_context_overflow=False` also disables compaction on `CompactionRequiredError`.
 
-Recovery only covers `ContextOverflowError` and `CompactionRequiredError`. Two other client failures deliberately abort the run:
+Recovery only covers `ContextOverflowError` and `CompactionRequiredError`. Three other client failures deliberately abort the run:
 
 - Summarization is itself a model call, so `summarize_messages` can raise `OutputTokenLimitError`
   out of `session.run()` even though you never call it directly. Retrying it with the same
@@ -511,6 +511,10 @@ Recovery only covers `ContextOverflowError` and `CompactionRequiredError`. Two o
 - `OpenResponsesClient` raises `IncompleteResponseError` for incomplete responses that are not
   output-limit stops, such as `incomplete_details.reason == "content_filter"`. Before token
   budgets were split these unwound a turn and retried; only context overflow does that now.
+- `ChatCompletionsClient` raises `EmptyResponseError` when every attempt, up to `max_retries`
+  retries, returned no choices, or at once when the reply's error code is a 4xx other than 408
+  or 429. Gateways such as OpenRouter answer that way, with HTTP 200 and
+  an `error` object, when an upstream provider fails; the error is in the exception message.
 
 ## Logging
 

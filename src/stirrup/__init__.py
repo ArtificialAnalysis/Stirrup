@@ -33,6 +33,7 @@ from stirrup.core.agent import Agent, SessionAgent
 from stirrup.core.exceptions import (
     CompactionRequiredError,
     ContextOverflowError,
+    EmptyResponseError,
     IncompleteResponseError,
     OutputTokenLimitError,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "CompactionRequiredError",
     "ContextOverflowError",
     "EmptyParams",
+    "EmptyResponseError",
     "EncryptedReasoningBlock",
     "ImageContentBlock",
     "IncompleteResponseError",
