@@ -1627,6 +1627,59 @@ async def test_allow_successive_assistant_messages() -> None:
     assert len(continue_messages) == 0
 
 
+@pytest.mark.parametrize(
+    ("max_turns", "max_cumulative_output_tokens", "expected_calls", "expected_warnings", "finishes"),
+    [
+        (30, None, 3, [], True),
+        (30, 1_000, 2, ["You have 400 output tokens remaining"], False),
+        (3, 1_000, 2, ["You have 2 turns and 400 output tokens remaining"], False),
+        (2, 1_000, 2, ["This is the last turn. Please finish the task by calling a finish tool."], False),
+    ],
+)
+async def test_max_cumulative_output_tokens_warns_then_stops(
+    max_turns: int,
+    max_cumulative_output_tokens: int | None,
+    expected_calls: int,
+    expected_warnings: list[str],
+    finishes: bool,
+) -> None:
+    """Output tokens count reasoning; one warning covers whichever limits are near, except tokens on the last turn."""
+    working = TokenUsage(input=100, answer=300, reasoning=300)
+    responses = [
+        AssistantMessage(blocks=[TextBlock(text="Working")], token_usage=working),
+        AssistantMessage(blocks=[TextBlock(text="Still working")], token_usage=working),
+        AssistantMessage(
+            blocks=[
+                ToolCall(
+                    name=DEFAULT_FINISH_TOOL_NAME,
+                    arguments='{"reason": "Task completed", "paths": []}',
+                    tool_call_id="call_1",
+                ),
+            ],
+            token_usage=TokenUsage(input=100, answer=50),
+        ),
+    ]
+    client = MockLLMClient(responses)
+    agent = Agent(
+        client=client,
+        name="test-agent",
+        max_turns=max_turns,
+        max_cumulative_output_tokens=max_cumulative_output_tokens,
+        output_tokens_remaining_warning_threshold=500,
+        tools=[],
+        finish_tool=SIMPLE_FINISH_TOOL,
+    )
+
+    async with agent.session(cache_on_interrupt=False) as session:
+        finish_params, history, _ = await session.run([UserMessage(content="Test task")])
+
+    assert (finish_params is not None) == finishes
+    assert client.call_count == expected_calls
+    warnings = [str(m.content) for group in history for m in group if isinstance(m, TurnWarningMessage)]
+    assert len(warnings) == len(expected_warnings)
+    assert all(w.startswith(e) for w, e in zip(warnings, expected_warnings, strict=True))
+
+
 async def test_summarize_history_has_one_summary_per_trajectory() -> None:
     """Test that each sub-trajectory in history contains at most one SummaryMessage.
 

@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 from stirrup.constants import (
     AGENT_MAX_TURNS,
     CONTEXT_SUMMARIZATION_CUTOFF,
+    OUTPUT_TOKENS_REMAINING_WARNING_THRESHOLD,
     TURNS_REMAINING_WARNING_THRESHOLD,
 )
 from stirrup.core.cache import CacheManager, CacheState, compute_task_hash
@@ -118,6 +119,22 @@ def _num_turns_remaining_msg(number_of_turns_remaining: int) -> TurnWarningMessa
     )
 
 
+def _output_tokens_remaining_msg(output_tokens_remaining: int) -> TurnWarningMessage:
+    """Create a user message warning the agent about remaining output tokens before max_cumulative_output_tokens is reached."""
+    return TurnWarningMessage(
+        content=f"You have {output_tokens_remaining:,} output tokens remaining to complete the task, reasoning included. Please continue. Remember you will need tokens for a separate turn to call a finish tool.",
+    )
+
+
+def _turns_and_output_tokens_remaining_msg(
+    number_of_turns_remaining: int, output_tokens_remaining: int
+) -> TurnWarningMessage:
+    """Create a user message warning the agent about both remaining turns and remaining output tokens."""
+    return TurnWarningMessage(
+        content=f"You have {number_of_turns_remaining} turns and {output_tokens_remaining:,} output tokens remaining to complete the task, reasoning included. Please continue. Remember you will need a separate turn to call a finish tool.",
+    )
+
+
 def _tool_arguments_json(tool_call: ToolCall) -> str:
     """Return the call's arguments as JSON, treating an empty string as no arguments.
 
@@ -196,10 +213,16 @@ def _get_tool_durations(messages: list[list[ChatMessage]]) -> dict[str, list[flo
     return durations
 
 
-def _get_turn_count(full_msg_history: list[list[ChatMessage]], messages: list[ChatMessage]) -> int:
-    """Count accepted assistant turns still present in history."""
-    all_messages = chain(chain.from_iterable(full_msg_history), messages)
-    return sum(1 for msg in all_messages if isinstance(msg, AssistantMessage))
+def _count_turns_and_output_tokens(
+    full_msg_history: list[list[ChatMessage]], messages: list[ChatMessage]
+) -> tuple[int, int]:
+    """Count accepted assistant turns still present in history, and their output tokens (reasoning included)."""
+    turns = output_tokens = 0
+    for msg in chain(chain.from_iterable(full_msg_history), messages):
+        if isinstance(msg, AssistantMessage):
+            turns += 1
+            output_tokens += msg.token_usage.output
+    return turns, output_tokens
 
 
 def _merge_run_metadata(run_metadata_by_turn: dict[str, dict[str, list[Any]]]) -> dict[str, list[Any]]:
@@ -289,11 +312,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         name: str,
         *,
         max_turns: int = ...,
+        max_cumulative_output_tokens: int | None = ...,
         system_prompt: str | None = ...,
         tools: list[Tool | ToolProvider] | None = ...,
         finish_tool: None = None,
         context_summarization_cutoff: float = ...,
         turns_remaining_warning_threshold: int = ...,
+        output_tokens_remaining_warning_threshold: int = ...,
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
@@ -309,11 +334,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         name: str,
         *,
         max_turns: int = ...,
+        max_cumulative_output_tokens: int | None = ...,
         system_prompt: str | None = ...,
         tools: list[Tool | ToolProvider] | None = ...,
         finish_tool: Tool[FinishParams, FinishMeta],
         context_summarization_cutoff: float = ...,
         turns_remaining_warning_threshold: int = ...,
+        output_tokens_remaining_warning_threshold: int = ...,
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
@@ -329,11 +356,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         name: str,
         *,
         max_turns: int = ...,
+        max_cumulative_output_tokens: int | None = ...,
         system_prompt: str | None = ...,
         tools: list[Tool | ToolProvider] | None = ...,
         finish_tool: list[Tool],
         context_summarization_cutoff: float = ...,
         turns_remaining_warning_threshold: int = ...,
+        output_tokens_remaining_warning_threshold: int = ...,
         run_sync_in_thread: bool = ...,
         text_only_tool_responses: bool = ...,
         block_successive_assistant_messages: bool = ...,
@@ -348,12 +377,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         name: str,
         *,
         max_turns: int = AGENT_MAX_TURNS,
+        max_cumulative_output_tokens: int | None = None,
         system_prompt: str | None = None,
         tools: list[Tool | ToolProvider] | None = None,
         finish_tool: Tool[FinishParams, FinishMeta] | list[Tool] | None = None,
         # Agent options
         context_summarization_cutoff: float = CONTEXT_SUMMARIZATION_CUTOFF,
         turns_remaining_warning_threshold: int = TURNS_REMAINING_WARNING_THRESHOLD,
+        output_tokens_remaining_warning_threshold: int = OUTPUT_TOKENS_REMAINING_WARNING_THRESHOLD,
         run_sync_in_thread: bool = True,
         text_only_tool_responses: bool = True,
         block_successive_assistant_messages: bool = True,
@@ -372,6 +403,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     conversation history is summarized; a ValueError is raised otherwise.
             name: Name of the agent (used for logging purposes)
             max_turns: Maximum number of turns before stopping
+            max_cumulative_output_tokens: Maximum total output tokens across all turns of the run,
+                                          reasoning included, before stopping. Counts this agent's own
+                                          turns only, like max_turns; compaction summaries are not
+                                          counted. None (default) means no limit.
             system_prompt: System prompt to prepend to all runs (when using string prompts)
             tools: List of Tools and/or ToolProviders available to the agent.
                    If None, uses default_tools(). ToolProviders are automatically
@@ -381,6 +416,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                          Defaults to SIMPLE_FINISH_TOOL. If a list is provided,
                          a successful call to any listed tool ends the run.
             context_summarization_cutoff: Fraction of context window (0-1) at which to trigger summarization
+            output_tokens_remaining_warning_threshold: Warn the agent each turn once this many output tokens
+                                                       or fewer remain. Only used with max_cumulative_output_tokens.
             run_sync_in_thread: Execute synchronous tool executors in a separate thread
             text_only_tool_responses: Extract images from tool responses as separate user messages
             block_successive_assistant_messages: If True (default), automatically inject a continue
@@ -421,11 +458,13 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         self._name = name
         self._max_turns = max_turns
+        self._max_cumulative_output_tokens = max_cumulative_output_tokens
         self._system_prompt = system_prompt
         self._tools = tools if tools is not None else default_tools()
         self._finish_tools: dict[str, Tool[Any, Any]] = _normalize_finish_tools(finish_tool)
         self._context_summarization_cutoff = context_summarization_cutoff
         self._turns_remaining_warning_threshold = turns_remaining_warning_threshold
+        self._output_tokens_remaining_warning_threshold = output_tokens_remaining_warning_threshold
         self._run_sync_in_thread = run_sync_in_thread
         self._text_only_tool_responses = text_only_tool_responses
         self._block_successive_assistant_messages = block_successive_assistant_messages
@@ -663,6 +702,33 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         return warnings
 
+    def _output_tokens_spent(self, output_tokens: int) -> bool:
+        """Whether the run has used up max_cumulative_output_tokens; never when it is None."""
+        return self._max_cumulative_output_tokens is not None and output_tokens >= self._max_cumulative_output_tokens
+
+    def _remaining_warning(self, turns: int, output_tokens: int) -> TurnWarningMessage | None:
+        """Warn about whichever limits are within their warning threshold, or return None."""
+        turns_remaining = self._max_turns - turns
+        near_turns = turns_remaining <= self._turns_remaining_warning_threshold
+        output_tokens_remaining = (
+            self._max_cumulative_output_tokens - output_tokens
+            if self._max_cumulative_output_tokens is not None
+            else None
+        )
+        # Tokens can't stop the run after the last turn, so it gets the turns warning only.
+        near_output_tokens = (
+            turns_remaining > 1
+            and output_tokens_remaining is not None
+            and output_tokens_remaining <= self._output_tokens_remaining_warning_threshold
+        )
+        if near_turns and near_output_tokens:
+            return _turns_and_output_tokens_remaining_msg(turns_remaining, output_tokens_remaining)
+        if near_turns:
+            return _num_turns_remaining_msg(turns_remaining)
+        if near_output_tokens:
+            return _output_tokens_remaining_msg(output_tokens_remaining)
+        return None
+
     def _build_system_prompt(self) -> str:
         """Build the complete system prompt: base + input files + user instructions.
 
@@ -676,6 +742,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
 
         # Base prompt with max_turns
         parts.append(BASE_SYSTEM_PROMPT_TEMPLATE.format(max_turns=self._max_turns))
+        if self._max_cumulative_output_tokens is not None:
+            parts.append(
+                f" You may use at most {self._max_cumulative_output_tokens:,} output tokens in total across all turns, reasoning included."
+            )
 
         # User interaction guidance based on whether user_input tool is available
         if "user_input" in self._active_tools:
@@ -1487,7 +1557,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 full_msg_history = cached.full_msg_history
                 cached_run_metadata_by_turn = cached.run_metadata_by_turn
                 resumed = True
-                restored_turn = _get_turn_count(full_msg_history, msgs)
+                restored_turn, _ = _count_turns_and_output_tokens(full_msg_history, msgs)
                 self._logger.info(f"Resuming from cached state at turn {restored_turn}")
             else:
                 self._logger.info(f"No cache found for task {task_hash}, starting fresh")
@@ -1538,8 +1608,8 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         total_output_tokens = 0
         finish_params: FinishParams | None = None
 
-        while _get_turn_count(full_msg_history, msgs) < self._max_turns:
-            turn = _get_turn_count(full_msg_history, msgs)
+        turns, output_tokens = _count_turns_and_output_tokens(full_msg_history, msgs)
+        while turns < self._max_turns and not self._output_tokens_spent(output_tokens):
             # Capture current state for potential caching (before any async work)
             self._current_run_state = CacheState(
                 msgs=list(msgs),
@@ -1548,10 +1618,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 task_hash=task_hash,
                 agent_name=self._name,
             )
-            if self._max_turns - turn <= self._turns_remaining_warning_threshold and turn != 0:
-                num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - turn)
-                msgs.append(num_turns_remaining_msg)
-                self._logger.user_message(num_turns_remaining_msg)
+            remaining_warning = self._remaining_warning(turns, output_tokens) if turns != 0 else None
+            if remaining_warning:
+                msgs.append(remaining_warning)
+                self._logger.user_message(remaining_warning)
 
             compacted = False
             while True:
@@ -1561,7 +1631,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                     assistant_message, tool_messages, finish_params = await self.step(
                         msgs,
                         turn_metadata,
-                        turn=_get_turn_count(full_msg_history, msgs) + 1,
+                        turn=turns + 1,
                         max_turns=self._max_turns,
                     )
                     break
@@ -1577,18 +1647,20 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                         msgs, run_metadata_by_turn, trigger=trigger
                     )
                     full_msg_history.append(messages_to_summarize)
+                    turns, output_tokens = _count_turns_and_output_tokens(full_msg_history, msgs)
                     compacted = True
 
             # Update cumulative stats
             run_metadata_by_turn[assistant_message.id] = turn_metadata
-            accepted_turn = _get_turn_count(full_msg_history, msgs) + 1
+            turns += 1
+            output_tokens += assistant_message.token_usage.output
             total_tool_calls += len(tool_messages)
             total_input_tokens += assistant_message.token_usage.input
             total_output_tokens += assistant_message.token_usage.output
 
             # Call progress callback after step completes
             if step_callback:
-                step_callback(accepted_turn, total_tool_calls, total_input_tokens, total_output_tokens)
+                step_callback(turns, total_tool_calls, total_input_tokens, total_output_tokens)
 
             user_messages: list[UserMessage] = []
             if self._text_only_tool_responses:
@@ -1604,13 +1676,18 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 break
 
             pct_context_used = assistant_message.token_usage.total / self._context_window_tokens
-            if pct_context_used >= self._context_summarization_cutoff and accepted_turn != self._max_turns:
+            if (
+                pct_context_used >= self._context_summarization_cutoff
+                and turns != self._max_turns
+                and not self._output_tokens_spent(output_tokens)
+            ):
                 self._logger.context_summarization_start(pct_context_used, self._context_summarization_cutoff)
                 messages_to_summarize, msgs = await self.summarize_messages(msgs, run_metadata_by_turn)
                 full_msg_history.append(messages_to_summarize)
+                turns, output_tokens = _count_turns_and_output_tokens(full_msg_history, msgs)
 
-            # Avoid successive assistant messages (only if next turn won't show turns remaining)
-            next_turn_will_show_warning = self._max_turns - accepted_turn <= self._turns_remaining_warning_threshold
+            # Avoid successive assistant messages (only if next turn won't show a remaining warning)
+            next_turn_will_show_warning = self._remaining_warning(turns, output_tokens) is not None
             if (
                 self._block_successive_assistant_messages
                 and not tool_messages
@@ -1620,7 +1697,11 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 continue_msg = UserMessage(content="Please continue the task")
                 msgs.append(continue_msg)
 
-        if finish_params is None:
+        if finish_params is None and self._output_tokens_spent(output_tokens):
+            LOGGER.error(
+                f"Maximum cumulative output tokens reached: {self._max_cumulative_output_tokens}. The agent was not able to finish the task. Consider increasing the max_cumulative_output_tokens parameter.",
+            )
+        elif finish_params is None:
             LOGGER.error(
                 f"Maximum number of turns reached: {self._max_turns}. The agent was not able to finish the task. Consider increasing the max_turns parameter.",
             )
