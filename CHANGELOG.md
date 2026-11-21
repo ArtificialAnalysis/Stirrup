@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `Agent.steer(message)`: queue a user message that the model reads before its next turn,
+  for example from a tool that sees the environment change under the agent. Messages queued
+  as the run finishes are dropped.
+
 ## v0.2.1 (2026-10-22)
 
 ### Changed

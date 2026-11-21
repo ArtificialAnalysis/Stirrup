@@ -460,6 +460,9 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         self._current_task_hash: str | None = None
         self._current_run_state: CacheState | None = None
 
+        # User messages queued by steer(), sent before the next model call
+        self._steering: list[UserMessage] = []
+
     @property
     def name(self) -> str:
         """The name of this agent."""
@@ -496,6 +499,14 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
     def logger(self) -> AgentLoggerBase:
         """The logger instance used by this agent."""
         return self._logger
+
+    def steer(self, message: str) -> None:
+        """Queue a user message that the model reads before its next turn.
+
+        Call it while the agent runs, for example from a tool. Messages queued as the run
+        finishes are dropped.
+        """
+        self._steering.append(UserMessage(content=message))
 
     def session(
         self,
@@ -1548,6 +1559,10 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
                 task_hash=task_hash,
                 agent_name=self._name,
             )
+            while self._steering:
+                steering_msg = self._steering.pop(0)
+                msgs.append(steering_msg)
+                self._logger.user_message(steering_msg)
             if self._max_turns - turn <= self._turns_remaining_warning_threshold and turn != 0:
                 num_turns_remaining_msg = _num_turns_remaining_msg(self._max_turns - turn)
                 msgs.append(num_turns_remaining_msg)
@@ -1626,6 +1641,7 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
             )
 
         full_msg_history.append(msgs)
+        self._steering.clear()
 
         # Add agent's own token usage, tool durations, and model speed to run_metadata
         run_metadata: dict[str, Any] = _merge_run_metadata(run_metadata_by_turn)

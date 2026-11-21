@@ -2355,3 +2355,77 @@ def test_agents_do_not_share_default_tool_instances() -> None:
 
     assert [type(tool) for tool in first._tools] == [type(tool) for tool in second._tools]  # noqa: SLF001
     assert all(a is not b for a, b in zip(first._tools, second._tools, strict=True))  # noqa: SLF001
+
+
+class SeenMessagesClient(MockLLMClient):
+    def __init__(self, responses: Sequence[AssistantMessage | Exception]) -> None:
+        super().__init__(responses)
+        self.seen: list[list[ChatMessage]] = []
+
+    async def generate(self, messages: list[ChatMessage], tools: dict[str, Tool]) -> AssistantMessage:
+        self.seen.append(list(messages))
+        return await super().generate(messages, tools)
+
+
+def _call(name: str, arguments: str, call_id: str) -> AssistantMessage:
+    return AssistantMessage(
+        blocks=[ToolCall(name=name, arguments=arguments, tool_call_id=call_id)], token_usage=TokenUsage()
+    )
+
+
+async def test_a_steering_message_reaches_the_model_after_the_tool_that_sent_it() -> None:
+    client = SeenMessagesClient(
+        [
+            _call("restart", '{"label": "restart"}', "call_restart"),
+            _call("finish", '{"reason": "done", "paths": []}', "call_finish"),
+        ]
+    )
+
+    steer: list[Callable[[str], None]] = []
+
+    def restart(_: RecordingParams) -> ToolResult:
+        steer[0]("The sandbox restarted.")
+        return ToolResult(content="restarted")
+
+    tool = Tool[RecordingParams, None](
+        name="restart", description="Restart", parameters=RecordingParams, executor=restart
+    )
+    agent = Agent(
+        client=client, name="test-agent", tools=[tool], finish_tool=UNVALIDATED_FINISH_TOOL, run_sync_in_thread=False
+    )
+    steer.append(agent.steer)
+
+    async with agent.session() as session:
+        _, history, _ = await session.run("Test task")
+
+    after_tool = client.seen[1][-2:]
+    assert isinstance(after_tool[0], ToolMessage)
+    assert after_tool[0].content == "restarted"
+    assert after_tool[1] == UserMessage(content="The sandbox restarted.")
+    assert UserMessage(content="The sandbox restarted.") in history[-1]
+
+
+async def test_a_message_steered_as_the_run_finishes_is_dropped() -> None:
+    steer: list[Callable[[str], None]] = []
+
+    def finish(params: FinishParams) -> ToolResult[None]:
+        steer[0]("Too late.")
+        return ToolResult(content=params.reason)
+
+    finish_tool = Tool[FinishParams, None](
+        name=DEFAULT_FINISH_TOOL_NAME, description="Finish", parameters=FinishParams, executor=finish
+    )
+    client = SeenMessagesClient(
+        [
+            _call("finish", '{"reason": "first", "paths": []}', "call_1"),
+            _call("finish", '{"reason": "second", "paths": []}', "call_2"),
+        ]
+    )
+    agent = Agent(client=client, name="test-agent", tools=[], finish_tool=finish_tool, run_sync_in_thread=False)
+    steer.append(agent.steer)
+
+    async with agent.session() as session:
+        await session.run("First task")
+        await session.run("Second task")
+
+    assert UserMessage(content="Too late.") not in client.seen[1]
