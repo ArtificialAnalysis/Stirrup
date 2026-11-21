@@ -170,6 +170,32 @@ async def _resolve_public_addresses(url: httpx.URL) -> tuple[str, ...]:
         return (str(literal_address),)
 
 
+HTML_MEDIA_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+TEXT_MEDIA_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/csv",
+        "application/javascript",
+        "application/x-ndjson",
+        "application/x-yaml",
+        "application/yaml",
+    }
+)
+
+
+def _media_type(response: httpx.Response) -> str:
+    """Return the lowercased media type of ``response`` without its parameters."""
+    return response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+
+
+def _is_text_media_type(media_type: str) -> bool:
+    """Whether a response of ``media_type`` is text to return as is rather than HTML to extract."""
+    if media_type in HTML_MEDIA_TYPES:
+        return False
+    return media_type.startswith("text/") or media_type in TEXT_MEDIA_TYPES or media_type.endswith(("+json", "+xml"))
+
+
 def _get_fetch_web_page_tool(
     client: httpx.AsyncClient,
     *,
@@ -239,7 +265,7 @@ def _get_fetch_web_page_tool(
 
         raise RuntimeError("Web fetch retry loop completed without a response.")
 
-    async def _fetch_with_redirects(url: str) -> bytes:
+    async def _fetch_with_redirects(url: str) -> httpx.Response:
         current_url = httpx.URL(url).copy_with(fragment=None)
         redirects_followed = 0
 
@@ -247,7 +273,7 @@ def _get_fetch_web_page_tool(
             public_addresses = await _resolve_public_addresses(current_url)
             response = await _request_hop(current_url, public_addresses)
             if not response.has_redirect_location:
-                return response.content
+                return response
 
             if redirects_followed >= WEB_FETCH_MAX_REDIRECTS:
                 raise _WebFetchError(f"Too many redirects (maximum {WEB_FETCH_MAX_REDIRECTS}).")
@@ -259,14 +285,21 @@ def _get_fetch_web_page_tool(
         """Fetch web page and extract main content as markdown using trafilatura."""
         try:
             with fail_after(timeout):
-                response_body = await _fetch_with_redirects(params.url)
-                body_md = (
-                    await to_thread.run_sync(
-                        partial(trafilatura.extract, response_body, output_format="markdown"),
-                        abandon_on_cancel=True,
+                response = await _fetch_with_redirects(params.url)
+                media_type = _media_type(response)
+                if _is_text_media_type(media_type):
+                    # trafilatura only extracts HTML; it returns None for JSON, CSV, XML or plain text.
+                    body_md = response.text
+                elif media_type in HTML_MEDIA_TYPES or not media_type:
+                    body_md = (
+                        await to_thread.run_sync(
+                            partial(trafilatura.extract, response.content, output_format="markdown"),
+                            abandon_on_cancel=True,
+                        )
+                        or ""
                     )
-                    or ""
-                )
+                else:
+                    raise _WebFetchError(f"Unsupported content type: {media_type}")
             return ToolResult(
                 content=f"<web_fetch><url>{params.url}</url><body>"
                 f"{truncate_msg(body_md, MAX_LENGTH_WEB_FETCH_HTML)}</body></web_fetch>",
@@ -287,8 +320,9 @@ def _get_fetch_web_page_tool(
     return Tool[FetchWebPageParams, WebFetchMetadata](
         name="fetch_web_page",
         description=(
-            "Fetch and extract the main content from a web page as markdown. Cannot reach private, loopback, "
-            "or other non-public network addresses. Returns body text or error as XML."
+            "Fetch and extract the main content from a web page as markdown. Text responses such as JSON, CSV, "
+            "XML or plain text are returned as is. Cannot reach private, loopback, or other non-public network "
+            "addresses. Returns body text or error as XML."
         ),
         parameters=FetchWebPageParams,
         executor=fetch_web_page_executor,

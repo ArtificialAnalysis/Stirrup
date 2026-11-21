@@ -67,7 +67,7 @@ def html_response(
     return httpx.Response(
         status_code,
         request=request,
-        headers=headers,
+        headers={"content-type": "text/html; charset=utf-8", **(headers or {})},
         text="<html><body><main><p>Example body</p></main></body></html>",
     )
 
@@ -536,3 +536,59 @@ async def test_web_fetch_limits_redirects(monkeypatch: MonkeyPatch) -> None:
 
     assert result.success is False
     assert len(requests) == web.WEB_FETCH_MAX_REDIRECTS + 1
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [
+        ("application/json", '[{"page": 1}, [{"value": 9123.4}]]'),
+        ("application/vnd.api+json; charset=utf-8", '{"data": []}'),
+        ("text/csv", "Entity,Year,Life expectancy\nBrazil,2023,76.2\n"),
+        ("text/plain; charset=utf-8", "Internet Engineering Task Force (IETF)"),
+        ("application/xml", "<feed><entry>1</entry></feed>"),
+    ],
+)
+async def test_web_fetch_returns_text_responses_as_is(
+    monkeypatch: MonkeyPatch,
+    content_type: str,
+    body: str,
+) -> None:
+    install_dns(monkeypatch, PUBLIC_IPV4)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, headers={"content-type": content_type}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), "https://example.com/data")
+
+    assert result.success is True
+    assert f"<body>{body}</body>" in result.content
+
+
+async def test_web_fetch_extracts_html_responses(monkeypatch: MonkeyPatch) -> None:
+    install_dns(monkeypatch, PUBLIC_IPV4)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return html_response(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), "https://example.com/page")
+
+    assert result.success is True
+    assert "Example body" in result.content
+    assert "<main>" not in result.content
+
+
+async def test_web_fetch_reports_unsupported_content_types(monkeypatch: MonkeyPatch) -> None:
+    install_dns(monkeypatch, PUBLIC_IPV4)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, request=request, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 binary"
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await run_web_fetch_tool(_get_fetch_web_page_tool(client), "https://example.com/report.pdf")
+
+    assert result.success is False
+    assert "Unsupported content type: application/pdf" in result.content
