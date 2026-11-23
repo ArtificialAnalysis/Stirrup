@@ -46,3 +46,45 @@ Searches the web using the Brave Search API.
     Requires `BRAVE_API_KEY` environment variable.
 
 ::: stirrup.tools.web.WebSearchParams
+
+### Excluding domains
+
+Search benchmarks often need some sites kept out of the results, for example the site that hosts
+the benchmark's questions and answers. Pass `exclude_domains` to `WebToolProvider`, or set the
+comma-separated `WEB_SEARCH_EXCLUDE_DOMAINS` environment variable so it also applies to
+`default_tools()`:
+
+```python
+WebToolProvider(exclude_domains=["huggingface.co", "github.com"])
+```
+
+```bash
+export WEB_SEARCH_EXCLUDE_DOMAINS="huggingface.co,github.com"
+```
+
+- An excluded domain also excludes its subdomains: `huggingface.co` removes `discuss.huggingface.co`.
+- Entries may be bare domains or URLs (`https://huggingface.co/datasets` becomes `huggingface.co`).
+  A leading `*.` is accepted and ignored.
+- An explicit `exclude_domains` replaces the environment variable; `exclude_domains=[]` turns it off.
+- Only `web_search` is filtered. `fetch_web_page` can still open a URL on an excluded domain.
+
+Brave Search has no `exclude_domains` parameter. The provider sends one inline
+[Goggle](https://api-dashboard.search.brave.com/documentation/resources/goggles) with a
+`$discard,site=<domain>` rule per domain. Brave does not document whether `site=` covers
+subdomains, so the tool also drops any returned result whose host is an excluded domain or one of
+its subdomains, and counts those in `WebSearchMetadata.results_excluded`. A search can therefore
+return fewer than 5 results.
+
+Other search APIs name the same feature differently, which is the mapping to use when adding
+another provider:
+
+| Provider | Parameter |
+| --- | --- |
+| Brave Search | `goggles` with `$discard,site=<domain>` rules |
+| Tavily | `exclude_domains` |
+| Exa | `excludeDomains` |
+| Parallel | `source_policy.exclude_domains` |
+| Perplexity Search | `search_domain_filter`, each domain prefixed with `-` |
+| Anthropic web search tool | `blocked_domains` |
+| OpenAI web search tool | `filters.blocked_domains` |
+| Vertex AI Google Search grounding | `exclude_domains` |

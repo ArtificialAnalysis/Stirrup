@@ -22,12 +22,15 @@ Example usage:
 
 import ipaddress
 import os
+import re
 import socket
+from collections.abc import Iterable
 from contextlib import AsyncExitStack
 from functools import partial
 from html import escape
 from types import TracebackType
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 import httpx
 import trafilatura
@@ -73,6 +76,7 @@ _EXPLICITLY_NON_PUBLIC_NETWORKS = (
     ipaddress.ip_network("3fff::/20"),  # Documentation
 )
 WEB_SEARCH_TIMEOUT = 60 * 3
+WEB_SEARCH_EXCLUDE_DOMAINS_ENV = "WEB_SEARCH_EXCLUDE_DOMAINS"
 WEB_SEARCH_RETRY_WAIT = wait_random_exponential(multiplier=1, min=1, max=15)
 
 
@@ -317,13 +321,69 @@ class WebSearchMetadata(BaseModel):
     num_uses: int = 1
     pages_returned: int = 0
     retry_idle_for: float = 0.0
+    # Results from an excluded domain that the provider still returned, dropped client-side.
+    results_excluded: int = 0
 
     def __add__(self, other: "WebSearchMetadata") -> "WebSearchMetadata":
         return WebSearchMetadata(
             num_uses=self.num_uses + other.num_uses,
             pages_returned=self.pages_returned + other.pages_returned,
             retry_idle_for=self.retry_idle_for + other.retry_idle_for,
+            results_excluded=self.results_excluded + other.results_excluded,
         )
+
+
+def _normalize_domain(domain: str) -> str:
+    """Reduce one excluded-domain entry to a bare lowercase hostname.
+
+    ``example.com``, ``https://example.com/path``, ``*.example.com`` and ``.example.com``
+    all become ``example.com``. Subdomains are always excluded with their parent, so the
+    wildcard forms add nothing.
+    """
+    entry = domain.strip().lower()
+    try:
+        host = urlsplit(entry if "://" in entry else f"//{entry}").hostname or ""
+    except ValueError:
+        host = ""
+    host = host.removeprefix("*.").strip(".")
+    # Hostname characters only: the domain is interpolated into Goggles rules, where a
+    # newline, ``$`` or ``,`` would start a new rule or option.
+    if not re.fullmatch(r"[\w-]+(\.[\w-]+)*", host):
+        raise ValueError(f"Invalid domain to exclude from web search: {domain!r}")
+    return host
+
+
+def _normalize_exclude_domains(domains: Iterable[str] | None) -> tuple[str, ...]:
+    """Normalize and de-duplicate excluded domains, preserving order and skipping blanks."""
+    if domains is None:
+        return ()
+    if isinstance(domains, str):
+        raise TypeError("exclude_domains must be a list of domains, not a single string.")
+    return tuple(dict.fromkeys(_normalize_domain(domain) for domain in domains if domain.strip()))
+
+
+def _exclude_domains_from_env() -> tuple[str, ...]:
+    """Read comma-separated excluded domains from ``WEB_SEARCH_EXCLUDE_DOMAINS``."""
+    return _normalize_exclude_domains(os.getenv(WEB_SEARCH_EXCLUDE_DOMAINS_ENV, "").split(","))
+
+
+def _is_excluded_url(url: str, exclude_domains: tuple[str, ...]) -> bool:
+    """Whether ``url``'s host is an excluded domain or a subdomain of one."""
+    try:
+        host = (urlsplit(url).hostname or "").rstrip(".")
+    except ValueError:
+        return False
+    return any(host == domain or host.endswith(f".{domain}") for domain in exclude_domains)
+
+
+def _brave_exclude_goggle(exclude_domains: tuple[str, ...]) -> str:
+    """Build an inline Brave Goggle that discards every result from ``exclude_domains``.
+
+    Brave Search has no ``exclude_domains`` parameter. Domains are removed with Goggles
+    rules (``$discard,site=<domain>``), one per line, sent inline in the ``goggles`` query
+    parameter. See https://api-dashboard.search.brave.com/documentation/resources/goggles
+    """
+    return "\n".join(f"$discard,site={domain}" for domain in exclude_domains)
 
 
 def _should_retry_web_search(exc: BaseException) -> bool:
@@ -335,13 +395,18 @@ def _should_retry_web_search(exc: BaseException) -> bool:
 
 
 def _get_websearch_tool(
-    brave_api_key: str | None, client: httpx.AsyncClient | None = None
+    brave_api_key: str | None,
+    client: httpx.AsyncClient | None = None,
+    *,
+    exclude_domains: Iterable[str] | None = None,
 ) -> Tool[WebSearchParams, WebSearchMetadata]:
     """Create a web search tool using Brave Search API.
 
     Args:
         brave_api_key: Brave Search API key, or None to use BRAVE_API_KEY environment variable
         client: Optional shared httpx.AsyncClient for connection pooling
+        exclude_domains: Domains whose results, subdomains included, are removed. Sent to
+            Brave as an inline Goggle and also enforced on the returned results.
 
     Returns:
         Tool configured to search the web and return top 5 results as XML
@@ -355,6 +420,11 @@ def _get_websearch_tool(
     if brave_api_key is None:
         raise RuntimeError("No Brave Search API key provided.")
 
+    excluded = _normalize_exclude_domains(exclude_domains)
+    search_params: dict[str, str | int] = {"count": 5}
+    if excluded:
+        search_params["goggles"] = _brave_exclude_goggle(excluded)
+
     async def _search_once(query: str, http_client: httpx.AsyncClient) -> dict:
         """Execute one Brave Search API request."""
         response = await http_client.get(
@@ -363,7 +433,7 @@ def _get_websearch_tool(
                 "X-Subscription-Token": brave_api_key,
                 "Accept": "application/json",
             },
-            params={"q": query, "count": 5},
+            params={"q": query, **search_params},
         )
         response.raise_for_status()
         return response.json()
@@ -396,6 +466,11 @@ def _get_websearch_tool(
                 data, retry_idle_for = await _search(params.query, temp_client)
 
         results = data.get("web", {}).get("results", [])
+        # Brave does not document whether ``site=`` Goggles rules cover subdomains, so the
+        # exclusion is also enforced on what comes back.
+        kept_results = [result for result in results if not _is_excluded_url(result.get("url") or "", excluded)]
+        results_excluded = len(results) - len(kept_results)
+        results = kept_results
         results_xml = (
             "<results>\n"
             + "\n".join(
@@ -413,7 +488,11 @@ def _get_websearch_tool(
 
         return ToolResult(
             content=truncate_msg(results_xml, MAX_LENGTH_WEB_SEARCH_RESULTS),
-            metadata=WebSearchMetadata(pages_returned=len(results), retry_idle_for=retry_idle_for),
+            metadata=WebSearchMetadata(
+                pages_returned=len(results),
+                retry_idle_for=retry_idle_for,
+                results_excluded=results_excluded,
+            ),
         )
 
     return Tool[WebSearchParams, WebSearchMetadata](
@@ -460,6 +539,7 @@ class WebToolProvider(ToolProvider):
         *,
         timeout: float = 60 * 3,
         brave_api_key: str | None = None,
+        exclude_domains: Iterable[str] | None = None,
     ) -> None:
         """Initialize WebToolProvider.
 
@@ -468,9 +548,17 @@ class WebToolProvider(ToolProvider):
             brave_api_key: Brave Search API key for web_search tool.
                           If None, uses BRAVE_API_KEY environment variable.
                           Web search is only available if API key is provided.
+            exclude_domains: Domains to remove from web_search results, subdomains included,
+                          e.g. ``["huggingface.co"]`` so a search benchmark's answers cannot be
+                          looked up. Entries may be bare domains or URLs. If None, uses the
+                          comma-separated WEB_SEARCH_EXCLUDE_DOMAINS environment variable;
+                          pass ``[]`` to ignore it. Does not restrict web_fetch.
         """
         self._timeout = timeout
         self._brave_api_key = brave_api_key or os.getenv("BRAVE_API_KEY")
+        self._exclude_domains = (
+            _exclude_domains_from_env() if exclude_domains is None else _normalize_exclude_domains(exclude_domains)
+        )
         self._fetch_client: httpx.AsyncClient | None = None
         self._search_client: httpx.AsyncClient | None = None
         self._client_stack: AsyncExitStack | None = None
@@ -537,6 +625,8 @@ class WebToolProvider(ToolProvider):
         if self._brave_api_key:
             if self._search_client is None:
                 raise RuntimeError("Web search client not started. Use 'async with' first.")
-            tools.append(_get_websearch_tool(self._brave_api_key, self._search_client))
+            tools.append(
+                _get_websearch_tool(self._brave_api_key, self._search_client, exclude_domains=self._exclude_domains)
+            )
 
         return tools
