@@ -13,6 +13,13 @@
   over the limit. Each agent counts only its own turns, so sub-agents take their own
   `max_cumulative_output_tokens`, and the output of compaction summaries is not counted. The
   default, `None`, means no limit.
+- `WebToolProvider(exclude_domains=[...])`: domains, subdomains included, to remove from
+  `web_search` results, for example the site hosting a search benchmark's answers. Without the
+  argument, the comma-separated `WEB_SEARCH_EXCLUDE_DOMAINS` environment variable is used, so
+  `default_tools()` can be configured too. Brave receives the domains as an inline Goggle
+  (`$discard,site=<domain>`), and results that still come back from an excluded domain are
+  dropped and counted in the new `WebSearchMetadata.results_excluded`. `fetch_web_page` is not
+  restricted.
 
 ## v0.2.1 (2026-10-22)
 
