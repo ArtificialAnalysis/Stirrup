@@ -25,7 +25,7 @@ Stirrup is a lightweight framework, or starting point template, for building age
 
 ## Features
 
-- 🧪 **Code execution:** Run code locally, in Docker, or in an E2B sandbox
+- 🧪 **Code execution:** Run code locally, in Docker, in an E2B sandbox, or in a Daytona sandbox
 - 🔎 **Online search / web browsing:** Search and fetch web pages
 - 🔌 **MCP client support:** Connect to MCP servers and use their tools/resources
 - 📄 **Document input and output:** Import files into context and produce file outputs
@@ -49,6 +49,7 @@ pip install 'stirrup[all]'  # or: uv add 'stirrup[all]'
 pip install 'stirrup[litellm]'  # or: uv add 'stirrup[litellm]'
 pip install 'stirrup[docker]'   # or: uv add 'stirrup[docker]'
 pip install 'stirrup[e2b]'      # or: uv add 'stirrup[e2b]'
+pip install 'stirrup[daytona]'  # or: uv add 'stirrup[daytona]'
 pip install 'stirrup[mcp]'      # or: uv add 'stirrup[mcp]'
 pip install 'stirrup[browser]'  # or: uv add 'stirrup[browser]'
 ```
