@@ -327,36 +327,30 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
                 # on timeout. Without it, process.kill() only terminates the
                 # root process, leaving grandchildren reparented to init (same
                 # bug shape as the docker orphan leak that motivated this PR).
-                process = await anyio.open_process(
-                    argv if argv is not None else ["bash", "-c", cmd],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=self._temp_dir,
-                    start_new_session=True,
-                )
+                # Use regular temporary files instead of pipes. A backgrounded
+                # shell command inherits stdout/stderr, so pipe readers cannot see
+                # EOF when the shell exits and would keep this call waiting for the
+                # background process. Files preserve the shell's output while letting
+                # us wait only for the command process itself.
+                with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+                    process = await anyio.open_process(
+                        argv if argv is not None else ["bash", "-c", cmd],
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        cwd=self._temp_dir,
+                        start_new_session=True,
+                    )
+                    await process.wait()
 
-                # Read all output from streams concurrently
-                stdout_chunks: list[bytes] = []
-                stderr_chunks: list[bytes] = []
-
-                async def read_stdout() -> None:
-                    if process.stdout:
-                        stdout_chunks.extend([chunk async for chunk in process.stdout])
-
-                async def read_stderr() -> None:
-                    if process.stderr:
-                        stderr_chunks.extend([chunk async for chunk in process.stderr])
-
-                async with anyio.create_task_group() as tg:
-                    tg.start_soon(read_stdout)
-                    tg.start_soon(read_stderr)
-
-                await process.wait()
+                    stdout_file.seek(0)
+                    stderr_file.seek(0)
+                    stdout = stdout_file.read().decode("utf-8", errors="replace")
+                    stderr = stderr_file.read().decode("utf-8", errors="replace")
 
                 return CommandResult(
                     exit_code=process.returncode or 0,
-                    stdout=b"".join(stdout_chunks).decode("utf-8", errors="replace"),
-                    stderr=b"".join(stderr_chunks).decode("utf-8", errors="replace"),
+                    stdout=stdout,
+                    stderr=stderr,
                 )
 
         except TimeoutError:
