@@ -33,6 +33,7 @@ Execute code in isolated environments with multiple backend options.
     - **Local**: `LocalCodeExecToolProvider()` - runs in temp directory
     - **Docker**: `DockerCodeExecToolProvider.from_image("python:3.12-slim")` - requires Docker
     - **E2B**: `E2BCodeExecToolProvider()` - requires `E2B_API_KEY`
+    - **boxd**: `BoxdCodeExecToolProvider()` - requires `BOXD_API_KEY`
 
 ## MCP Integration
 

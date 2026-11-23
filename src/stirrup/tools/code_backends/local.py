@@ -136,7 +136,8 @@ class LocalCodeExecToolProvider(CodeExecToolProvider):
                     error_kind="absolute_path_detected",
                     advice=(
                         "Use relative paths (e.g., './output.txt' instead of '~/output.txt'). "
-                        "For full filesystem access, use DockerCodeExecToolProvider or E2BCodeExecToolProvider."
+                        "For full filesystem access, use DockerCodeExecToolProvider, E2BCodeExecToolProvider, "
+                        "or BoxdCodeExecToolProvider."
                     ),
                 )
         return None

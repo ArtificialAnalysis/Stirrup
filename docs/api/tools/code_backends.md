@@ -51,6 +51,19 @@ from stirrup.tools.code_backends.e2b import E2BCodeExecToolProvider
 provider = E2BCodeExecToolProvider()
 ```
 
+## BoxdCodeExecToolProvider
+
+Executes code in an isolated [boxd](https://boxd.sh/?ref=Stirrup) cloud machine.
+
+!!! note
+    Requires `pip install stirrup[boxd]` (or: `uv add stirrup[boxd]`) and `BOXD_API_KEY` environment variable.
+
+```python
+from stirrup.tools.code_backends.boxd import BoxdCodeExecToolProvider
+
+provider = BoxdCodeExecToolProvider()
+```
+
 ## Data Types
 
 ::: stirrup.tools.code_backends.CodeExecutionParams
