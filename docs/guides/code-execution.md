@@ -17,6 +17,7 @@ All code execution backends implement `CodeExecToolProvider`, which provides:
 | `LocalCodeExecToolProvider` | Temp directory | Development, trusted code |
 | `DockerCodeExecToolProvider` | Container | Production, semi-trusted code |
 | `E2BCodeExecToolProvider` | Cloud sandbox | Production, untrusted code |
+| `BoxdCodeExecToolProvider` | Cloud machine (VM) | Production, untrusted code |
 
 ## LocalCodeExecToolProvider
 
@@ -65,16 +66,16 @@ provider = LocalCodeExecToolProvider(
 ```
 
 The allowlist is configured and matched the same way in every backend
-(`LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`, and
-`E2BCodeExecToolProvider`).
+(`LocalCodeExecToolProvider`, `DockerCodeExecToolProvider`,
+`E2BCodeExecToolProvider`, and `BoxdCodeExecToolProvider`).
 
 When an allowlist is set, Stirrup parses each command into an argument list and
 checks that list against your patterns, so what was vetted is exactly what runs.
 `LocalCodeExecToolProvider` and `DockerCodeExecToolProvider` execute the argument
-list directly, with no shell involved. `E2BCodeExecToolProvider` is the
-exception: the E2B API accepts only a command string, so the vetted arguments are
-quoted back into one and run by the sandbox shell, with every argument quoted so
-there is nothing left for it to expand.
+list directly, with no shell involved. `E2BCodeExecToolProvider` and
+`BoxdCodeExecToolProvider` are the exception: the vetted arguments are quoted back
+into one command string and run by the sandbox shell, with every argument quoted
+so there is nothing left for it to expand.
 
 **Pattern matching.** Patterns are regexes matched against the parsed command,
 starting from the first character. Quoting is normalized before matching, so
@@ -196,6 +197,65 @@ provider = E2BCodeExecToolProvider(
     template="custom-python-template",  # Your E2B template ID
 )
 ```
+
+## BoxdCodeExecToolProvider
+
+Executes code in a [boxd](https://boxd.sh/?ref=Stirrup) cloud machine, a full Ubuntu VM.
+Each session creates one machine and deletes it when the session ends. If the
+Python process is killed first, the machine stays in your account until you delete it.
+
+!!! note
+    Requires `pip install stirrup[boxd]` (or: `uv add stirrup[boxd]`) and `BOXD_API_KEY` environment variable.
+
+```python
+from stirrup import Agent
+from stirrup.clients.chat_completions_client import ChatCompletionsClient
+from stirrup.tools.code_backends.boxd import BoxdCodeExecToolProvider
+
+provider = BoxdCodeExecToolProvider(region="fra")
+
+client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
+agent = Agent(
+    client=client,
+    name="boxd_coder",
+    tools=[provider],
+    max_turns=20,
+)
+
+async with agent.session(output_dir="./results") as session:
+    await session.run("Write and run a Python hello world script")
+```
+
+Commands run through bash in `/home/boxd/workspace`. Relative paths resolve there,
+and only files under it can be saved as outputs.
+
+### Configuration
+
+```python
+from stirrup.tools.code_backends.boxd import BoxdCodeExecToolProvider
+
+provider = BoxdCodeExecToolProvider(
+    org="my-org",                  # Default: BOXD_ORG, then the API key's org
+    region="fra",                  # "fra" or "nyc"
+    vcpu=2,                        # Set vcpu and memory together
+    memory="8G",
+    env={"DATASET": "sales"},      # Sent with every command
+    labels={"team": "research"},
+)
+```
+
+### Security Considerations
+
+Every machine is created with `isolated=True`, and this cannot be turned off. An
+isolated machine has no `boxd` or `run` CLI and no metadata endpoint, and it does
+not join your organization's default network.
+
+Isolation does not cover everything:
+
+- Values in `env` reach every command, so the agent can read them.
+- Environment variables and secrets in the machine's scope also reach commands.
+  Do not keep a secret there that the agent should not see.
+- Commands can reach the public internet.
 
 ## File Operations
 

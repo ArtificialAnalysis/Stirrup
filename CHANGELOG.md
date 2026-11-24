@@ -4,6 +4,8 @@
 
 ### Added
 
+- `BoxdCodeExecToolProvider`: run code in a disposable, isolated [boxd](https://boxd.sh/?ref=Stirrup)
+  machine. Install with `stirrup[boxd]` and set `BOXD_API_KEY`.
 - `Agent(max_cumulative_output_tokens=...)`: a limit on the agent's total output tokens across
   all turns of the run, reasoning included, that works like `max_turns`. Once
   `output_tokens_remaining_warning_threshold` (default 50,000) or fewer remain, each turn's

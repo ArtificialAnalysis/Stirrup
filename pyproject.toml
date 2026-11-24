@@ -42,10 +42,11 @@ litellm = ["litellm>=1.79.3"]
 e2b = ["e2b-code-interpreter>=2.3.0"]
 e2b-throttle = ["stirrup[e2b]", "aiolimiter>=1.1.0"]
 docker = ["docker>=7.0.0", "python-dotenv>=1.0.0"]
+boxd = ["boxd>=0.3.2"]
 mcp = ["mcp>=1.9.0"]
 browser = ["browser-use>=0.11.3"]
 slack = ["slack-bolt>=1.20.0"]
-all = ["stirrup[litellm,e2b,e2b-throttle,docker,mcp,browser,slack]"]
+all = ["stirrup[litellm,e2b,e2b-throttle,docker,boxd,mcp,browser,slack]"]
 
 [project.urls]
 Homepage = "https://github.com/ArtificialAnalysis/Stirrup"
@@ -77,6 +78,7 @@ anyio_mode = "auto"
 markers = [
     "docker: marks tests as requiring the docker package (deselect with '-m \"not docker\"')",
     "e2b: marks tests as requiring the e2b package (deselect with '-m \"not e2b\"')",
+    "boxd: marks tests as requiring the boxd package (deselect with '-m \"not boxd\"')",
     "browser: marks tests as requiring headless Chrome (deselect with '-m \"not browser\"')",
 ]
 

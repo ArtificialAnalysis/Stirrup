@@ -415,6 +415,7 @@ class AgentLogger(AgentLoggerBase):
             "e2b.api",
             "e2b.sandbox_async",
             "e2b.sandbox_sync",
+            "boxd",
         ]:
             logging.getLogger(name).setLevel(logging.WARNING)
 
