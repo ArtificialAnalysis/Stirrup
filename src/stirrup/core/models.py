@@ -304,6 +304,11 @@ def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
     for m in metadata_list[1:]:
         if isinstance(aggregated, dict) and isinstance(m, dict):
             aggregated = _merge_dicts(aggregated, m)  # ty: ignore[invalid-assignment]
+        elif isinstance(aggregated, dict):
+            # A resumed session holds cached turns as JSON dicts next to live models; a dict cannot be added to one.
+            aggregated = m
+        elif isinstance(m, dict):
+            continue
         else:
             aggregated = aggregated + m
     return aggregated
