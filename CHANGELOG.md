@@ -14,6 +14,12 @@
   `max_cumulative_output_tokens`, and the output of compaction summaries is not counted. The
   default, `None`, means no limit.
 
+### Fixed
+
+- A resumed session no longer crashes at the end of the run when its tool metadata mixes cached
+  JSON dicts with live metadata objects. Aggregation now keeps the live metadata and skips the
+  cached dicts, so counts from before the resume are not included in the totals.
+
 ## v0.2.1 (2026-10-22)
 
 ### Changed
