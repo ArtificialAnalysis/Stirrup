@@ -98,6 +98,16 @@ Use LiteLLM to connect to non-OpenAI providers like Anthropic Claude, Google Gem
 !!! note
     Requires `pip install stirrup[litellm]` (or: `uv add stirrup[litellm]`) and the appropriate API key for your chosen provider (e.g., `ANTHROPIC_API_KEY` for Claude).
 
+## Tool Middleware
+
+Spill a large result to disk, then truncate the value returned to the model.
+
+```python
+--8<-- "examples/tool_middleware_example.py:middleware"
+```
+
+→ See [Creating Tools — Tool Middleware](guides/tools.md#tool-middleware).
+
 ## Custom Finish Tool
 
 Define structured output with a custom finish tool:

@@ -122,6 +122,7 @@ See the [Full Customization guide](https://stirrup.artificialanalysis.ai/extendi
 - **`session()`** - Context manager that sets up tools, manages files, and handles cleanup
 - **`Tool`** - Define tools with Pydantic parameters
 - **`ToolProvider`** - Manage tools that require lifecycle (connections, temp directories, etc.)
+- **`ToolMiddleware`** - Per-tool wrappers (e.g. truncate or spill large outputs to disk)
 - **`default_tools()`** - Standard tools included by default: code execution and web tools
 
 ## Using Other LLM Providers
