@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,17 +45,15 @@ def parse_frontmatter(content: str) -> dict[str, str]:
     if not match:
         return {}
 
-    frontmatter_text = match.group(1)
-    result: dict[str, str] = {}
+    try:
+        parsed = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return {}
 
-    # Simple YAML parsing for key: value pairs
-    for line in frontmatter_text.strip().split("\n"):
-        line = line.strip()
-        if ":" in line:
-            key, value = line.split(":", 1)
-            result[key.strip()] = value.strip()
+    if not isinstance(parsed, dict):
+        return {}
 
-    return result
+    return {key: value for key, value in parsed.items() if isinstance(key, str) and isinstance(value, str)}
 
 
 def load_skills_metadata(skills_dir: Path) -> list[SkillMetadata]:
@@ -136,8 +136,8 @@ def format_skills_section(skills: list[SkillMetadata]) -> str:
         "Each skill contains a SKILL.md file with detailed instructions and potentially bundled scripts.",
         "",
         "To use a skill:",
-        "1. Read the full instructions: `cat <skill_path>/SKILL.md`",
-        "2. Follow the instructions and use any bundled resources as described",
+        "1. Read the full `<skill_path>/SKILL.md` with an available file-reading tool.",
+        "2. Follow the instructions and use any bundled resources as described.",
         "",
     ]
     lines.extend([f"- **{skill.name}**: {skill.description} (`{skill.path}/SKILL.md`)" for skill in skills])
