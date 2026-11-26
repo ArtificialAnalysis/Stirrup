@@ -75,7 +75,9 @@ def to_openai_tools(tools: dict[str, Tool]) -> list[dict[str, Any]]:
             "name": t.name,
             "description": t.description,
         }
-        if t.parameters is not EmptyParams:
+        if t.parameter_schema is not None:
+            function["parameters"] = t.parameter_schema
+        elif t.parameters is not EmptyParams:
             function["parameters"] = t.parameters.model_json_schema()
         tool_payload: dict[str, Any] = {
             "type": "function",

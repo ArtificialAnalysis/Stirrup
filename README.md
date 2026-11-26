@@ -27,7 +27,7 @@ Stirrup is a lightweight framework, or starting point template, for building age
 
 - 🧪 **Code execution:** Run code locally, in Docker, or in an E2B sandbox
 - 🔎 **Online search / web browsing:** Search and fetch web pages
-- 🔌 **MCP client support:** Connect to MCP servers and use their tools/resources
+- 🔌 **MCP tools host:** Connect to current and legacy MCP servers and use their tools
 - 📄 **Document input and output:** Import files into context and produce file outputs
 - 🧩 **Skills system:** Extend agents with modular, domain-specific instruction packages
 - 🛠️ **Flexible tool execution:** A generic `Tool` interface allows easy tool definition

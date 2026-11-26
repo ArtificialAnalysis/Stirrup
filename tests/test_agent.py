@@ -1,6 +1,7 @@
 """Tests for agent core functionality."""
 
 import json
+import wave
 from collections.abc import Callable, Sequence
 from io import BytesIO
 from pathlib import Path
@@ -11,7 +12,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
-from stirrup.core.agent import Agent, SubAgentParams
+from stirrup.core.agent import Agent, SubAgentParams, _handle_text_only_tool_responses
 from stirrup.core.cache import (
     CacheState,
     deserialize_messages,
@@ -19,6 +20,7 @@ from stirrup.core.cache import (
 from stirrup.core.exceptions import CompactionRequiredError, ContextOverflowError, OutputTokenLimitError
 from stirrup.core.models import (
     AssistantMessage,
+    AudioContentBlock,
     ChatMessage,
     EmptyParams,
     ImageContentBlock,
@@ -41,6 +43,27 @@ from stirrup.core.models import (
 from stirrup.prompts import MESSAGE_SUMMARIZER
 from stirrup.tools import default_tools
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL, FinishParams
+
+
+def test_text_only_tool_responses_move_audio_to_a_user_message() -> None:
+    audio_bytes = BytesIO()
+    with wave.open(audio_bytes, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8_000)
+        wav.writeframes(b"\x00\x00" * 80)
+    audio = AudioContentBlock(data=audio_bytes.getvalue())
+    tool_message = ToolMessage(tool_call_id="call-1", content=["transcript", audio])
+
+    tool_messages, user_messages = _handle_text_only_tool_responses([tool_message])
+
+    assert tool_messages[0].content == [
+        "transcript",
+        "Done! The User will provide the audio for tool call call-1",
+    ]
+    assert user_messages == [
+        UserMessage(content=["Here is the audio for tool call call-1", audio]),
+    ]
 
 
 class MockLLMClient(LLMClient):

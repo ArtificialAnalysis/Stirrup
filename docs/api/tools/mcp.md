@@ -1,6 +1,6 @@
 # MCP Tool Provider
 
-The `stirrup.tools.mcp` module provides MCP (Model Context Protocol) integration.
+The `stirrup.tools.mcp` module provides Model Context Protocol tool integration.
 
 !!! note
     Requires `pip install stirrup[mcp]` (or: `uv add stirrup[mcp]`)
@@ -13,6 +13,10 @@ The `stirrup.tools.mcp` module provides MCP (Model Context Protocol) integration
       members:
         - from_config
         - __init__
+        - connect
+        - call_tool
+        - call_tool_result
+        - protocol_versions
         - __aenter__
         - __aexit__
 
@@ -32,18 +36,12 @@ For local command-based MCP servers:
 
 #### SseServerConfig
 
-For SSE (Server-Sent Events) based MCP servers:
+For legacy HTTP+SSE MCP servers:
 
 ::: stirrup.tools.mcp.SseServerConfig
 
 #### StreamableHttpServerConfig
 
-For streamable HTTP MCP servers:
+For standard Streamable HTTP MCP servers:
 
 ::: stirrup.tools.mcp.StreamableHttpServerConfig
-
-#### WebSocketServerConfig
-
-For WebSocket-based MCP servers:
-
-::: stirrup.tools.mcp.WebSocketServerConfig

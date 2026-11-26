@@ -1,42 +1,27 @@
-"""MCP (Model Context Protocol) tool provider for connecting to MCP servers.
+"""Expose tools from MCP servers as native Stirrup tools.
 
-This module provides MCPToolProvider, a ToolProvider that manages connections to
-multiple MCP servers and exposes each MCP tool as a separate Tool object.
+The official MCP Python SDK owns protocol negotiation and transports. This
+module owns Stirrup-specific configuration, tool namespacing, schema bridging,
+and result conversion.
 
-Example usage:
-    ```python
-    from stirrup.clients.chat_completions_client import ChatCompletionsClient
-    from stirrup.tools import default_tools
-
-    # With Agent (preferred)
-    client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
-    agent = Agent(
-        client=client,
-        name="assistant",
-        tools=[*default_tools(), MCPToolProvider.from_config("mcp.json")],
-    )
-    async with agent.session() as session:
-        await session.run("Use MCP tools")
-
-    # Standalone usage
-    provider = MCPToolProvider.from_config(Path("mcp.json"))
-    async with provider as tools:
-        # tools is a list of Tool objects
-        pass
-    ```
-
-Requires the optional `mcp` dependency:
+Requires the optional MCP dependencies:
     pip install stirrup[mcp]
 """
 
-from collections.abc import AsyncIterator
+import json
+import logging
+import os
+import re
+from collections.abc import AsyncIterator, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Literal, Protocol, Self, cast
+from urllib.parse import urlsplit
 
-from json_schema_to_pydantic import create_model
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from stirrup.core.models import (
     AudioContentBlock,
@@ -49,14 +34,25 @@ from stirrup.core.models import (
     ToolUseCountMetadata,
 )
 
-# MCP imports (optional dependency)
 try:
-    from mcp import ClientSession, StdioServerParameters
+    import httpx2
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
+    from jsonschema.exceptions import ValidationError as JSONSchemaValidationError
+    from mcp import Client, MCPError, StdioServerParameters
     from mcp.client.sse import sse_client
     from mcp.client.stdio import stdio_client
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
     from mcp.types import (
         AudioContent as MCPAudioContent,
+    )
+    from mcp.types import (
+        BlobResourceContents,
+        CallToolResult,
+        EmbeddedResource,
+        Implementation,
+        ResourceLink,
+        TextResourceContents,
     )
     from mcp.types import (
         ImageContent as MCPImageContent,
@@ -64,16 +60,14 @@ try:
     from mcp.types import (
         TextContent as MCPTextContent,
     )
-except ImportError as e:
+    from mcp.types import (
+        Tool as MCPTool,
+    )
+except ImportError as exc:
     raise ImportError(
-        "Requires installation of the mcp extra. Install with (for example): `uv pip install stirrup[mcp]` or `uv add stirrup[mcp]`",
-    ) from e
-
-# WebSocket client requires additional 'websockets' package
-try:
-    from mcp.client.websocket import websocket_client
-except ImportError:
-    websocket_client = None  # ty: ignore[invalid-assignment]
+        "MCP support requires the optional dependencies. Install them with `pip install stirrup[mcp]` "
+        "or `uv add stirrup[mcp]`."
+    ) from exc
 
 
 __all__ = [
@@ -83,303 +77,352 @@ __all__ = [
     "SseServerConfig",
     "StdioServerConfig",
     "StreamableHttpServerConfig",
-    "WebSocketServerConfig",
 ]
 
+logger = logging.getLogger(__name__)
 
-# === Models ===
+_ENVIRONMENT_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_CLIENT_INFO = Implementation(name="stirrup", title="Stirrup", version=version("stirrup"))
 
 
-class StdioServerConfig(BaseModel):
-    """Configuration for stdio-based MCP servers (local process)."""
+class _ServerConfig(BaseModel):
+    """Options shared by every MCP transport."""
 
+    read_timeout: float = Field(default=120.0, gt=0)
+    """Maximum seconds to wait for an MCP response."""
+
+
+class StdioServerConfig(_ServerConfig):
+    """Configuration for a client-launched MCP subprocess."""
+
+    transport: Literal["stdio"] = "stdio"
     command: str
-    """Command to run the MCP server (e.g., "npx", "python")."""
-
     args: list[str] = Field(default_factory=list)
-    """Arguments to pass to the command."""
-
     env: dict[str, str] | None = None
-    """Environment variables to set for the server process."""
-
     cwd: str | None = None
-    """Working directory for the server process."""
-
     encoding: str = "utf-8"
-    """Text encoding for messages."""
 
 
-class SseServerConfig(BaseModel):
-    """Configuration for SSE-based MCP servers (HTTP GET with Server-Sent Events)."""
+class SseServerConfig(_ServerConfig):
+    """Configuration for the deprecated HTTP+SSE transport."""
 
+    transport: Literal["sse"] = "sse"
     url: str
-    """The SSE endpoint URL (must end with /sse)."""
-
     headers: dict[str, str] | None = None
-    """Optional HTTP headers."""
-
-    timeout: float = 5.0
-    """HTTP timeout for regular operations (seconds)."""
-
-    sse_read_timeout: float = 300.0
-    """Timeout for SSE read operations (seconds)."""
+    timeout: float = Field(default=5.0, gt=0)
+    sse_read_timeout: float = Field(default=300.0, gt=0)
 
 
-class StreamableHttpServerConfig(BaseModel):
-    """Configuration for Streamable HTTP MCP servers (HTTP POST with optional SSE responses)."""
+class StreamableHttpServerConfig(_ServerConfig):
+    """Configuration for the standard Streamable HTTP transport."""
 
+    transport: Literal["streamable-http"] = "streamable-http"
     url: str
-    """The endpoint URL."""
-
     headers: dict[str, str] | None = None
-    """Optional HTTP headers."""
-
-    timeout: float = 30.0
-    """HTTP timeout (seconds)."""
-
-    sse_read_timeout: float = 300.0
-    """SSE read timeout (seconds)."""
-
+    timeout: float = Field(default=30.0, gt=0)
+    sse_read_timeout: float = Field(default=300.0, gt=0)
     terminate_on_close: bool = True
-    """Close session when transport closes."""
 
 
-class WebSocketServerConfig(BaseModel):
-    """Configuration for WebSocket-based MCP servers."""
-
-    url: str
-    """The WebSocket URL (must start with ws:// or wss://)."""
+MCPServerConfig = StdioServerConfig | SseServerConfig | StreamableHttpServerConfig
 
 
-# Type alias for the union of all server config types
-MCPServerConfig = StdioServerConfig | SseServerConfig | StreamableHttpServerConfig | WebSocketServerConfig
+def _replace_environment_variables(value: object) -> object:
+    """Resolve documented ``${NAME}`` placeholders without mutating config input."""
+    if isinstance(value, str):
+
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name not in os.environ:
+                raise ValueError(f"Environment variable '{name}' is not set")
+            return os.environ[name]
+
+        return _ENVIRONMENT_VARIABLE.sub(replace, value)
+    if isinstance(value, list):
+        return [_replace_environment_variables(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_environment_variables(item) for key, item in value.items()}
+    return value
 
 
 def _infer_server_config(data: dict[str, Any]) -> MCPServerConfig:
-    """Infer and instantiate the correct config class from raw data.
-
-    Inference rules:
-    - 'command' field present -> StdioServerConfig
-    - 'url' starts with ws:// or wss:// -> WebSocketServerConfig
-    - 'url' ends with /sse -> SseServerConfig
-    - 'url' present (default) -> StreamableHttpServerConfig
-
-    Args:
-        data: Raw configuration dictionary.
-
-    Returns:
-        Appropriate server config instance.
-
-    Raises:
-        ValueError: If neither 'command' nor 'url' is provided.
-    """
+    """Parse common MCP config shapes while preferring an explicit transport."""
+    transport = data.get("transport") or data.get("type")
     if "command" in data:
+        if transport not in (None, "stdio"):
+            raise ValueError("A server with 'command' must use the stdio transport")
         return StdioServerConfig(**data)
-    if "url" in data:
-        url = data["url"]
-        if url.startswith(("ws://", "wss://")):
-            return WebSocketServerConfig(**data)
-        if url.endswith("/sse"):
-            return SseServerConfig(**data)
+    if "url" not in data:
+        raise ValueError("MCP server config requires either 'command' or 'url'")
+
+    url = data["url"]
+    if url.startswith(("ws://", "wss://")) or transport in {"websocket", "ws"}:
+        raise ValueError("WebSocket is not an MCP transport; use Streamable HTTP instead")
+    if transport in {"streamable_http", "http"}:
+        data = {**data, "transport": "streamable-http"}
         return StreamableHttpServerConfig(**data)
-    raise ValueError("Config must have 'command' (stdio) or 'url' (SSE/HTTP/WebSocket)")
+    if transport == "streamable-http":
+        return StreamableHttpServerConfig(**data)
+    if transport == "sse":
+        return SseServerConfig(**data)
+    if transport is not None:
+        raise ValueError(f"Unsupported MCP transport: {transport!r}")
+
+    path = urlsplit(url).path.rstrip("/")
+    if path.endswith("/sse"):
+        return SseServerConfig(**data)
+    return StreamableHttpServerConfig(**data)
 
 
 class MCPConfig(BaseModel):
-    """Root configuration matching mcp.json format."""
+    """Root configuration using the conventional ``mcpServers`` mapping."""
 
     mcp_servers: dict[str, MCPServerConfig] = Field(alias="mcpServers")
-    """Map of server names to their configurations."""
 
     @model_validator(mode="before")
     @classmethod
-    def _infer_transport_types(cls, data: dict[str, Any]) -> dict[str, Any]:
-        """Convert raw server configs to appropriate typed instances."""
-        if "mcpServers" in data:
-            data["mcpServers"] = {
-                name: _infer_server_config(config) if isinstance(config, dict) else config
-                for name, config in data["mcpServers"].items()
-            }
-        return data
+    def _parse_server_configs(cls, data: object) -> object:
+        expanded = _replace_environment_variables(data)
+        if not isinstance(expanded, dict) or "mcpServers" not in expanded:
+            return expanded
+        expanded_mapping = cast(dict[str, object], expanded)
+        servers = expanded_mapping["mcpServers"]
+        if not isinstance(servers, dict):
+            return expanded
+        server_mapping = cast(dict[str, object], servers)
+        return {
+            **expanded_mapping,
+            "mcpServers": {
+                name: _infer_server_config(cast(dict[str, Any], config)) if isinstance(config, dict) else config
+                for name, config in server_mapping.items()
+            },
+        }
 
 
-# === Manager ===
+class _MCPToolParameters(BaseModel):
+    """Preserve raw JSON arguments while the original MCP schema is exposed to the model."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class _SchemaValidator(Protocol):
+    def iter_errors(self, instance: object) -> Iterator[JSONSchemaValidationError]: ...
+
+
+@dataclass(frozen=True)
+class _ToolDefinition:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    input_validator: _SchemaValidator
+    output_validator: _SchemaValidator | None
 
 
 class MCPToolProvider(ToolProvider):
-    """MCP tool provider that manages connections to multiple MCP servers.
+    """Connect to MCP servers and expose their tools through Stirrup.
 
-    MCPToolProvider connects to MCP servers and exposes each server's tools
-    as individual Tool objects.
-
-    Usage with Agent (preferred):
-        from stirrup.clients.chat_completions_client import ChatCompletionsClient
-        from stirrup.tools import default_tools
-
-        client = ChatCompletionsClient(model="gpt-5.6-luna", max_tokens=8_192, context_window_tokens=1_000_000)
-        agent = Agent(
-            client=client,
-            name="assistant",
-            tools=[*default_tools(), MCPToolProvider.from_config("mcp.json")],
-        )
-
-        async with agent.session(output_dir="./output") as session:
-            await session.run("Use MCP tools")
-
-    Standalone usage with connect() context manager:
-        provider = MCPToolProvider.from_config(Path("mcp.json"))
-        async with provider.connect() as provider:
-            tools = provider.get_all_tools()
-            # Use tools...
+    The SDK client negotiates the modern 2026 protocol and automatically falls
+    back to legacy initialization-based servers. Tool catalogs are fully
+    paginated and remain fixed for the lifetime of the Stirrup agent session.
     """
 
-    def __init__(
-        self,
-        config: MCPConfig,
-        server_names: list[str] | None = None,
-    ) -> None:
-        """Initialize the MCP manager.
-
-        Args:
-            config: MCPConfig instance.
-            server_names: Which servers to connect to. If None, connects to all servers in config.
-        """
+    def __init__(self, config: MCPConfig, server_names: list[str] | None = None) -> None:
         self._config = config
-        self._server_names = server_names
-        self._servers: dict[str, ClientSession] = {}
-        self._tools: dict[str, list[dict[str, Any]]] = {}
+        self._server_names = list(server_names) if server_names is not None else None
+        self._servers: dict[str, Client] = {}
+        self._tools: dict[str, dict[str, _ToolDefinition]] = {}
         self._exit_stack: AsyncExitStack | None = None
 
     @classmethod
     def from_config(cls, config_path: Path | str, server_names: list[str] | None = None) -> Self:
-        """Create an MCPToolProvider from a config file.
+        """Create a provider from a conventional MCP JSON config file."""
+        return cls(MCPConfig.model_validate_json(Path(config_path).read_text()), server_names)
 
-        Args:
-            config_path: Path to the MCP config file.
-            server_names: Which servers to connect to. If None, connects to all servers in config.
+    def _selected_server_names(self) -> list[str]:
+        names = list(self._config.mcp_servers) if self._server_names is None else self._server_names
+        missing = [name for name in names if name not in self._config.mcp_servers]
+        if missing:
+            raise KeyError(f"Unknown MCP server(s) {missing}. Available: {list(self._config.mcp_servers)}")
+        return names
 
-        Returns:
-            MCPToolProvider instance.
-        """
-        config = MCPConfig.model_validate_json(Path(config_path).read_text())
+    async def _open_client(
+        self,
+        stack: AsyncExitStack,
+        config: MCPServerConfig,
+    ) -> Client:
+        match config:
+            case StdioServerConfig():
+                server = stdio_client(
+                    StdioServerParameters(
+                        command=config.command,
+                        args=config.args,
+                        env=config.env,
+                        cwd=config.cwd,
+                        encoding=config.encoding,
+                    )
+                )
+            case SseServerConfig():
+                server = sse_client(
+                    url=config.url,
+                    headers=config.headers,
+                    timeout=config.timeout,
+                    sse_read_timeout=config.sse_read_timeout,
+                )
+            case StreamableHttpServerConfig():
+                http_client = await stack.enter_async_context(
+                    httpx2.AsyncClient(
+                        headers=config.headers,
+                        timeout=httpx2.Timeout(config.timeout, read=config.sse_read_timeout),
+                        follow_redirects=True,
+                    )
+                )
+                server = streamable_http_client(
+                    url=config.url,
+                    http_client=http_client,
+                    terminate_on_close=config.terminate_on_close,
+                )
+        return await stack.enter_async_context(
+            Client(
+                cast(Any, server),  # SDK documents transport context managers; its public annotation is narrower.
+                client_info=_CLIENT_INFO,
+                mode="auto",
+                read_timeout_seconds=config.read_timeout,
+            )
+        )
 
-        return cls(config=config, server_names=server_names)
+    @staticmethod
+    def _build_tool_definition(server_name: str, tool: MCPTool) -> _ToolDefinition:
+        try:
+            Draft202012Validator.check_schema(tool.input_schema)
+            input_validator = Draft202012Validator(tool.input_schema)
+            output_validator = None
+            if tool.output_schema is not None:
+                Draft202012Validator.check_schema(tool.output_schema)
+                output_validator = Draft202012Validator(tool.output_schema)
+        except SchemaError as exc:
+            raise ValueError(
+                f"MCP server '{server_name}' returned an invalid schema for tool '{tool.name}': {exc}"
+            ) from exc
+
+        return _ToolDefinition(
+            name=tool.name,
+            description=tool.description or tool.title or f"Tool '{tool.name}' from {server_name}",
+            input_schema=tool.input_schema,
+            input_validator=input_validator,
+            output_validator=output_validator,
+        )
+
+    async def _list_all_tools(self, server_name: str, client: Client) -> dict[str, _ToolDefinition]:
+        capabilities = client.server_capabilities
+        if capabilities is not None and capabilities.tools is None:
+            return {}
+
+        tools: dict[str, _ToolDefinition] = {}
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            response = await client.list_tools(cursor=cursor)
+            for tool in response.tools:
+                if tool.name in tools:
+                    raise ValueError(f"MCP server '{server_name}' returned duplicate tool '{tool.name}'")
+                tools[tool.name] = self._build_tool_definition(server_name, tool)
+
+            cursor = response.next_cursor
+            if cursor is None:
+                return tools
+            if cursor in seen_cursors:
+                raise ValueError(f"MCP server '{server_name}' repeated pagination cursor {cursor!r}")
+            seen_cursors.add(cursor)
+
+    async def _connect_all(self, stack: AsyncExitStack) -> None:
+        if self._servers:
+            raise RuntimeError("MCPToolProvider is already connected")
+        for name in self._selected_server_names():
+            client = await self._open_client(stack, self._config.mcp_servers[name])
+            self._servers[name] = client
+            self._tools[name] = await self._list_all_tools(name, client)
+
+    def _clear(self) -> None:
+        self._servers.clear()
+        self._tools.clear()
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[Self]:
-        """Connect to MCP servers from config file.
-
-        Yields:
-            Self with active connections to specified servers.
-
-        Raises:
-            FileNotFoundError: If config file doesn't exist.
-            KeyError: If a specified server name doesn't exist in config.
-        """
-        config = self._config
-        servers_to_connect = self._server_names or list(config.mcp_servers.keys())
-
+        """Connect for direct programmatic access to servers and tool metadata."""
+        if self._servers or self._exit_stack is not None:
+            raise RuntimeError("MCPToolProvider is already connected")
         async with AsyncExitStack() as stack:
-            for name in servers_to_connect:
-                if name not in config.mcp_servers:
-                    raise KeyError(f"Server '{name}' not found in config. Available: {list(config.mcp_servers.keys())}")
-
-                server_config = config.mcp_servers[name]
-
-                # Connect to server based on transport type
-                match server_config:
-                    case StdioServerConfig():
-                        server_params = StdioServerParameters(
-                            command=server_config.command,
-                            args=server_config.args,
-                            env=server_config.env,
-                            cwd=server_config.cwd,
-                            encoding=server_config.encoding,
-                        )
-                        read, write = await stack.enter_async_context(stdio_client(server_params))
-                    case SseServerConfig():
-                        read, write = await stack.enter_async_context(
-                            sse_client(
-                                url=server_config.url,
-                                headers=server_config.headers,
-                                timeout=server_config.timeout,
-                                sse_read_timeout=server_config.sse_read_timeout,
-                            )
-                        )
-                    case StreamableHttpServerConfig():
-                        read, write, _ = await stack.enter_async_context(
-                            streamablehttp_client(
-                                url=server_config.url,
-                                headers=server_config.headers,
-                                timeout=server_config.timeout,
-                                sse_read_timeout=server_config.sse_read_timeout,
-                                terminate_on_close=server_config.terminate_on_close,
-                            )
-                        )
-                    case WebSocketServerConfig():
-                        if websocket_client is None:
-                            raise ImportError(
-                                f"WebSocket transport for server '{name}' requires the 'websockets' package. "
-                                "Install with: pip install websockets"
-                            )
-                        read, write = await stack.enter_async_context(websocket_client(url=server_config.url))
-
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-
-                # Cache session and available tools
-                self._servers[name] = session
-                response = await session.list_tools()
-                self._tools[name] = [
-                    {"name": t.name, "description": t.description, "schema": t.inputSchema} for t in response.tools
-                ]
-
             try:
+                await self._connect_all(stack)
                 yield self
             finally:
-                self._servers.clear()
-                self._tools.clear()
+                self._clear()
 
     @property
     def servers(self) -> list[str]:
-        """List of connected server names."""
-        return list(self._servers.keys())
+        """Connected server names."""
+        return list(self._servers)
+
+    @property
+    def protocol_versions(self) -> dict[str, str]:
+        """Negotiated protocol version for each connected server."""
+        return {
+            name: client.protocol_version
+            for name, client in self._servers.items()
+            if client.protocol_version is not None
+        }
 
     def get_tools(self, server: str) -> list[dict[str, Any]]:
-        """Get available tools for a specific server.
-
-        Args:
-            server: Server name.
-
-        Returns:
-            List of tool info dicts with name, description, and schema.
-        """
-        return self._tools.get(server, [])
+        """Return model-facing metadata for a connected server's tools."""
+        return [
+            {"name": tool.name, "description": tool.description, "schema": tool.input_schema}
+            for tool in self._tools.get(server, {}).values()
+        ]
 
     @property
     def all_tools(self) -> dict[str, list[str]]:
-        """Get all available tools grouped by server.
+        """Tool names grouped by connected server."""
+        return {server: list(tools) for server, tools in self._tools.items()}
 
-        Returns:
-            Dict mapping server names to lists of tool names.
-        """
-        return {server: [t["name"] for t in tools] for server, tools in self._tools.items()}
+    @staticmethod
+    def _json_content(label: str, value: object) -> str:
+        return f"<{label}>\n{json.dumps(value, ensure_ascii=False, indent=2)}\n</{label}>"
 
     def _convert_mcp_content(self, content_blocks: list[Any]) -> Content:
-        """Convert MCP content blocks into Stirrup content blocks."""
+        """Convert every core MCP tool content type into Stirrup content."""
         content: list[ContentBlock] = []
-
         for block in content_blocks:
             if isinstance(block, MCPTextContent):
                 content.append(block.text)
-                continue
-            if isinstance(block, MCPImageContent):
+            elif isinstance(block, MCPImageContent):
                 content.append(ImageContentBlock(data=block.data))
-                continue
-            if isinstance(block, MCPAudioContent):
+            elif isinstance(block, MCPAudioContent):
                 content.append(AudioContentBlock(data=block.data))
-                continue
-            raise TypeError(f"Unsupported MCP content block: {type(block).__name__}")
+            elif isinstance(block, ResourceLink):
+                content.append(self._json_content("resource_link", block.model_dump(by_alias=True, exclude_none=True)))
+            elif isinstance(block, EmbeddedResource):
+                resource = block.resource
+                if isinstance(resource, TextResourceContents):
+                    content.append(
+                        self._json_content(
+                            "embedded_resource",
+                            resource.model_dump(by_alias=True, exclude_none=True),
+                        )
+                    )
+                elif isinstance(resource, BlobResourceContents):
+                    metadata = resource.model_dump(by_alias=True, exclude={"blob"}, exclude_none=True)
+                    content.append(self._json_content("embedded_resource", metadata))
+                    try:
+                        if (resource.mime_type or "").startswith("image/"):
+                            content.append(ImageContentBlock(data=resource.blob))
+                        elif (resource.mime_type or "").startswith("audio/"):
+                            content.append(AudioContentBlock(data=resource.blob))
+                        else:
+                            content.append(self._json_content("embedded_resource_blob", resource.blob))
+                    except ValueError:
+                        content.append(self._json_content("embedded_resource_blob", resource.blob))
+            else:
+                raise TypeError(f"Unsupported MCP content block: {type(block).__name__}")
 
         if not content:
             return ""
@@ -387,141 +430,128 @@ class MCPToolProvider(ToolProvider):
             return content[0]
         return content
 
-    async def call_tool(self, server: str, tool_name: str, arguments: dict[str, Any]) -> Content:
-        """Call a tool on a specific MCP server.
-
-        Args:
-            server: Name of the MCP server.
-            tool_name: Name of the tool to call.
-            arguments: Arguments to pass to the tool.
-
-        Returns:
-            Tool result converted into Stirrup content blocks.
-
-        Raises:
-            ValueError: If server is not connected.
-        """
-        session = self._servers.get(server)
-        if session is None:
-            raise ValueError(f"Server '{server}' not connected. Available: {self.servers}")
-
-        result = await session.call_tool(tool_name, arguments)
-        return self._convert_mcp_content(result.content)
-
-    def get_all_tools(self) -> list[Tool[Any, ToolUseCountMetadata]]:
-        """Get individual Tool objects for each tool from all connected MCP servers.
-
-        Each MCP tool is exposed as a separate Tool with its own parameter schema,
-        allowing the LLM to see and call each tool directly without routing through
-        a unified proxy.
-
-        Tool names are formatted as '{server}__{tool_name}' to ensure uniqueness
-        across servers (e.g., 'supabase__query_table').
-
-        Returns:
-            List of Tool objects, one for each tool available across all connected servers.
-        """
-        tools: list[Tool[Any, ToolUseCountMetadata]] = []
-
-        for server_name, server_tools in self._tools.items():
-            for tool_info in server_tools:
-                mcp_tool_name = tool_info["name"]
-                # Create unique tool name with server prefix
-                unique_name = f"{server_name}__{mcp_tool_name}"
-
-                # Convert JSON schema to Pydantic model
-                params_model = create_model(
-                    tool_info.get("schema", {}),
+    def _convert_tool_result(
+        self,
+        result: CallToolResult,
+        output_validator: _SchemaValidator | None,
+    ) -> ToolResult[ToolUseCountMetadata]:
+        structured_content_present = "structured_content" in result.model_fields_set
+        if output_validator is not None:
+            if not structured_content_present:
+                return ToolResult(
+                    content="MCP server omitted structuredContent required by the tool's outputSchema",
+                    success=False,
+                    metadata=ToolUseCountMetadata(),
+                )
+            error = next(output_validator.iter_errors(result.structured_content), None)
+            if error is not None:
+                return ToolResult(
+                    content=f"MCP server returned invalid structuredContent: {error.message}",
+                    success=False,
+                    metadata=ToolUseCountMetadata(),
                 )
 
-                # Create executor closure - capture server_name and mcp_tool_name
-                # using default arguments to avoid late binding issues in the loop
+        content = self._convert_mcp_content(result.content)
+        if structured_content_present:
+            structured = self._json_content("structured_content", result.structured_content)
+            content = [*content, structured] if isinstance(content, list) else [content, structured]
+            content = [block for block in content if block != ""]
+
+        if result.result_type != "complete":
+            return ToolResult(
+                content="MCP tool requires client input that Stirrup could not provide",
+                success=False,
+                metadata=ToolUseCountMetadata(),
+            )
+        return ToolResult(
+            content=content,
+            success=not result.is_error,
+            metadata=ToolUseCountMetadata(),
+        )
+
+    @staticmethod
+    async def _log_progress(progress: float, total: float | None, message: str | None) -> None:
+        logger.debug("MCP tool progress: progress=%s total=%s message=%s", progress, total, message)
+
+    async def call_tool_result(
+        self,
+        server: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolResult[ToolUseCountMetadata]:
+        """Call one MCP tool while preserving validation and failure semantics."""
+        client = self._servers.get(server)
+        if client is None:
+            raise ValueError(f"Server '{server}' not connected. Available: {self.servers}")
+        definition = self._tools.get(server, {}).get(tool_name)
+        if definition is None:
+            raise ValueError(f"Tool '{tool_name}' is not available from server '{server}'")
+
+        input_error = next(definition.input_validator.iter_errors(arguments), None)
+        if input_error is not None:
+            return ToolResult(
+                content=f"Tool arguments are not valid: {input_error.message}",
+                success=False,
+                metadata=ToolUseCountMetadata(),
+            )
+
+        try:
+            result = await client.call_tool(
+                tool_name,
+                arguments,
+                progress_callback=self._log_progress,
+            )
+        except MCPError as exc:
+            return ToolResult(content=f"MCP protocol error: {exc}", success=False, metadata=ToolUseCountMetadata())
+        except TimeoutError:
+            return ToolResult(content="MCP tool call timed out", success=False, metadata=ToolUseCountMetadata())
+        return self._convert_tool_result(result, definition.output_validator)
+
+    async def call_tool(self, server: str, tool_name: str, arguments: dict[str, Any]) -> Content:
+        """Compatibility helper returning only tool content.
+
+        Prefer :meth:`call_tool_result` when the caller needs success metadata.
+        """
+        return (await self.call_tool_result(server, tool_name, arguments)).content
+
+    def get_all_tools(self) -> list[Tool[Any, ToolUseCountMetadata]]:
+        """Create namespaced Stirrup tools for every connected MCP tool."""
+        tools: list[Tool[Any, ToolUseCountMetadata]] = []
+        for server_name, server_tools in self._tools.items():
+            for definition in server_tools.values():
+
                 async def executor(
-                    params: BaseModel,
+                    params: _MCPToolParameters,
                     _server: str = server_name,
-                    _tool: str = mcp_tool_name,
+                    _tool: str = definition.name,
                 ) -> ToolResult[ToolUseCountMetadata]:
-                    content = await self.call_tool(_server, _tool, params.model_dump())
-                    return ToolResult(content=content, metadata=ToolUseCountMetadata())
+                    return await self.call_tool_result(_server, _tool, params.model_dump())
 
                 tools.append(
                     Tool(
-                        name=unique_name,
-                        description=tool_info.get("description") or f"Tool '{mcp_tool_name}' from {server_name}",
-                        parameters=params_model,
+                        name=f"{server_name}__{definition.name}",
+                        description=definition.description,
+                        parameters=_MCPToolParameters,
+                        parameter_schema=definition.input_schema,
                         executor=executor,
                     )
                 )
-
         return tools
 
-    # Tool lifecycle protocol implementation
     async def __aenter__(self) -> list[Tool[Any, ToolUseCountMetadata]]:
-        """Enter async context: connect to MCP servers and return all tools.
-
-        Returns:
-            List of Tool objects, one for each tool available across all connected servers.
-        """
-        self._exit_stack = AsyncExitStack()
-        await self._exit_stack.__aenter__()
-
-        config = self._config
-        servers_to_connect = self._server_names or list(config.mcp_servers.keys())
-
-        for name in servers_to_connect:
-            if name not in config.mcp_servers:
-                raise KeyError(f"Server '{name}' not found in config. Available: {list(config.mcp_servers.keys())}")
-
-            server_config = config.mcp_servers[name]
-
-            # Connect to server based on transport type
-            match server_config:
-                case StdioServerConfig():
-                    server_params = StdioServerParameters(
-                        command=server_config.command,
-                        args=server_config.args,
-                        env=server_config.env,
-                        cwd=server_config.cwd,
-                        encoding=server_config.encoding,
-                    )
-                    read, write = await self._exit_stack.enter_async_context(stdio_client(server_params))
-                case SseServerConfig():
-                    read, write = await self._exit_stack.enter_async_context(
-                        sse_client(
-                            url=server_config.url,
-                            headers=server_config.headers,
-                            timeout=server_config.timeout,
-                            sse_read_timeout=server_config.sse_read_timeout,
-                        )
-                    )
-                case StreamableHttpServerConfig():
-                    read, write, _ = await self._exit_stack.enter_async_context(
-                        streamablehttp_client(
-                            url=server_config.url,
-                            headers=server_config.headers,
-                            timeout=server_config.timeout,
-                            sse_read_timeout=server_config.sse_read_timeout,
-                            terminate_on_close=server_config.terminate_on_close,
-                        )
-                    )
-                case WebSocketServerConfig():
-                    if websocket_client is None:
-                        raise ImportError(
-                            f"WebSocket transport for server '{name}' requires the 'websockets' package. "
-                            "Install with: pip install websockets"
-                        )
-                    read, write = await self._exit_stack.enter_async_context(websocket_client(url=server_config.url))
-
-            session = await self._exit_stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-
-            # Cache session and available tools
-            self._servers[name] = session
-            response = await session.list_tools()
-            self._tools[name] = [
-                {"name": t.name, "description": t.description, "schema": t.inputSchema} for t in response.tools
-            ]
-
+        """Connect and return all namespaced tools for ``Agent.session()``."""
+        if self._exit_stack is not None or self._servers:
+            raise RuntimeError("MCPToolProvider is already entered")
+        stack = AsyncExitStack()
+        await stack.__aenter__()
+        self._exit_stack = stack
+        try:
+            await self._connect_all(stack)
+        except BaseException:
+            self._clear()
+            self._exit_stack = None
+            await stack.aclose()
+            raise
         return self.get_all_tools()
 
     async def __aexit__(
@@ -530,9 +560,11 @@ class MCPToolProvider(ToolProvider):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Exit async context: disconnect from MCP servers."""
-        self._servers.clear()
-        self._tools.clear()
-        if self._exit_stack:
-            await self._exit_stack.__aexit__(exc_type, exc_val, exc_tb)
-            self._exit_stack = None
+        """Disconnect all MCP clients."""
+        stack = self._exit_stack
+        self._exit_stack = None
+        try:
+            if stack is not None:
+                await stack.__aexit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._clear()
